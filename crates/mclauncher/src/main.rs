@@ -173,6 +173,8 @@ impl eframe::App for VertexApp {
         if modal_open {
             self.render_config_format_modal(ctx);
         }
+
+        ui::top_bar::handle_window_resize(ctx);
     }
 }
 

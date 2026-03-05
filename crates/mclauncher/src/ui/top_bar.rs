@@ -1,4 +1,7 @@
-use egui::{self, Align, Context, Layout, RichText, Sense, TopBottomPanel, ViewportCommand};
+use egui::{
+    self, Align, Context, CursorIcon, Layout, ResizeDirection, RichText, Sense, TopBottomPanel,
+    ViewportCommand,
+};
 
 use crate::{assets, screens::AppScreen, ui::components::icon_button};
 
@@ -7,6 +10,7 @@ const CONTROL_SLOT_WIDTH: f32 = 20.0;
 const CONTROL_ICON_MAX_WIDTH: f32 = 20.0;
 const CONTROL_GAP: f32 = 7.0;
 const CONTROL_GROUP_PADDING: f32 = 12.0;
+const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 
 pub fn render(ctx: &Context, active_screen: AppScreen) {
     TopBottomPanel::top("window_top_bar")
@@ -65,6 +69,59 @@ pub fn render(ctx: &Context, active_screen: AppScreen) {
         });
 }
 
+pub fn handle_window_resize(ctx: &Context) {
+    let (content_rect, pointer_pos, primary_pressed, is_maximized, is_fullscreen) =
+        ctx.input(|i| {
+            (
+                i.content_rect(),
+                i.pointer.interact_pos(),
+                i.pointer.primary_pressed(),
+                i.viewport().maximized.unwrap_or(false),
+                i.viewport().fullscreen.unwrap_or(false),
+            )
+        });
+
+    if is_maximized || is_fullscreen {
+        return;
+    }
+
+    let Some(pointer_pos) = pointer_pos else {
+        return;
+    };
+
+    let left = pointer_pos.x <= content_rect.left() + RESIZE_GRAB_THICKNESS;
+    let right = pointer_pos.x >= content_rect.right() - RESIZE_GRAB_THICKNESS;
+    let top = pointer_pos.y <= content_rect.top() + RESIZE_GRAB_THICKNESS;
+    let bottom = pointer_pos.y >= content_rect.bottom() - RESIZE_GRAB_THICKNESS;
+
+    let direction = if top && left {
+        Some(ResizeDirection::NorthWest)
+    } else if top && right {
+        Some(ResizeDirection::NorthEast)
+    } else if bottom && left {
+        Some(ResizeDirection::SouthWest)
+    } else if bottom && right {
+        Some(ResizeDirection::SouthEast)
+    } else if top {
+        Some(ResizeDirection::North)
+    } else if bottom {
+        Some(ResizeDirection::South)
+    } else if left {
+        Some(ResizeDirection::West)
+    } else if right {
+        Some(ResizeDirection::East)
+    } else {
+        None
+    };
+
+    if let Some(direction) = direction {
+        ctx.set_cursor_icon(resize_cursor_icon(direction));
+        if primary_pressed {
+            ctx.send_viewport_cmd(ViewportCommand::BeginResize(direction));
+        }
+    }
+}
+
 fn render_controls(ui: &mut egui::Ui, ctx: &Context) {
     if render_control_button(ui, "close", assets::X_SVG, "Close").clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -83,6 +140,19 @@ fn render_controls(ui: &mut egui::Ui, ctx: &Context) {
 
     if render_control_button(ui, "minimize", assets::CHEVRON_DOWN_SVG, "Minimize").clicked() {
         ctx.send_viewport_cmd(ViewportCommand::Minimized(true));
+    }
+}
+
+fn resize_cursor_icon(direction: ResizeDirection) -> CursorIcon {
+    match direction {
+        ResizeDirection::North => CursorIcon::ResizeNorth,
+        ResizeDirection::South => CursorIcon::ResizeSouth,
+        ResizeDirection::East => CursorIcon::ResizeEast,
+        ResizeDirection::West => CursorIcon::ResizeWest,
+        ResizeDirection::NorthEast => CursorIcon::ResizeNorthEast,
+        ResizeDirection::SouthEast => CursorIcon::ResizeSouthEast,
+        ResizeDirection::NorthWest => CursorIcon::ResizeNorthWest,
+        ResizeDirection::SouthWest => CursorIcon::ResizeSouthWest,
     }
 }
 
