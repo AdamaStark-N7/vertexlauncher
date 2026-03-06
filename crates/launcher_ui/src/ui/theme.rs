@@ -33,6 +33,25 @@ pub struct Theme {
     pub warning: Oklch,
     pub success: Oklch,
     pub info: Oklch,
+    #[serde(default)]
+    pub motion: ThemeMotion,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ThemeMotion {
+    #[serde(default = "default_animation_time_seconds")]
+    pub animation_time_seconds: f32,
+    #[serde(default)]
+    pub reduced_motion: bool,
+}
+
+impl Default for ThemeMotion {
+    fn default() -> Self {
+        Self {
+            animation_time_seconds: default_animation_time_seconds(),
+            reduced_motion: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -147,7 +166,7 @@ impl Theme {
         visuals.widgets.open.bg_stroke = Stroke::new(1.0, border);
 
         visuals.selection.bg_fill = self.primary.to_color32();
-        visuals.selection.stroke = Stroke::new(1.0, self.secondary.to_color32());
+        visuals.selection.stroke = Stroke::new(1.0, border);
         visuals.hyperlink_color = self.info.to_color32();
         visuals.warn_fg_color = self.warning.to_color32();
         visuals.error_fg_color = self.danger.to_color32();
@@ -162,6 +181,11 @@ impl Theme {
         visuals.widgets.active.corner_radius = rounding;
         visuals.widgets.open.corner_radius = rounding;
 
+        style.animation_time = if self.motion.reduced_motion {
+            0.0
+        } else {
+            self.motion.animation_time_seconds.clamp(0.0, 1.0)
+        };
         style.visuals = visuals;
         ctx.set_style(style);
     }
@@ -241,6 +265,7 @@ impl Theme {
                 c: 0.2,
                 h: 260.0,
             },
+            motion: ThemeMotion::default(),
         }
     }
 
@@ -319,6 +344,7 @@ impl Theme {
                 c: 0.20,
                 h: 260.0,
             },
+            motion: ThemeMotion::default(),
         }
     }
 
@@ -398,6 +424,7 @@ impl Theme {
                 c: 0.25,
                 h: 260.0,
             },
+            motion: ThemeMotion::default(),
         }
     }
 
@@ -476,6 +503,7 @@ impl Theme {
                 c: 0.20,
                 h: 210.0,
             },
+            motion: ThemeMotion::default(),
         }
     }
 }
@@ -583,6 +611,10 @@ fn linear_to_srgb_u8(value: f32) -> u8 {
 
 fn with_alpha(color: Color32, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
+fn default_animation_time_seconds() -> f32 {
+    0.15
 }
 
 #[derive(Clone, Copy)]

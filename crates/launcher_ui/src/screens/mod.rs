@@ -5,6 +5,7 @@ use textui::TextUi;
 
 use crate::ui::theme::Theme;
 
+mod console;
 mod instance;
 mod legal;
 mod library;
@@ -17,15 +18,17 @@ pub enum AppScreen {
     Skins,
     Settings,
     Legal,
+    Console,
     Instance,
 }
 
 impl AppScreen {
-    pub const FIXED_NAV: [AppScreen; 4] = [
+    pub const FIXED_NAV: [AppScreen; 5] = [
         AppScreen::Library,
         AppScreen::Skins,
         AppScreen::Settings,
         AppScreen::Legal,
+        AppScreen::Console,
     ];
 
     pub fn label(self) -> &'static str {
@@ -34,6 +37,7 @@ impl AppScreen {
             AppScreen::Skins => "Skins",
             AppScreen::Settings => "Settings",
             AppScreen::Legal => "Legal",
+            AppScreen::Console => "Console",
             AppScreen::Instance => "Instance",
         }
     }
@@ -69,6 +73,10 @@ pub fn render(
         }
         AppScreen::Legal => {
             legal::render(ui, text_ui);
+            ScreenOutput::default()
+        }
+        AppScreen::Console => {
+            console::render(ui, text_ui);
             ScreenOutput::default()
         }
         AppScreen::Instance => ScreenOutput {

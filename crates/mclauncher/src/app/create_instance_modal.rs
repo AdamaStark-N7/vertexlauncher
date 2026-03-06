@@ -17,6 +17,12 @@ use textui::{LabelOptions, TextUi};
 
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
 const CUSTOM_MODLOADER_INDEX: usize = MODLOADER_OPTIONS.len() - 1;
+const ACTION_BUTTON_MAX_WIDTH: f32 = 260.0;
+const MODAL_GAP_SM: f32 = 6.0;
+const MODAL_GAP_MD: f32 = 8.0;
+const MODAL_GAP_LG: f32 = 10.0;
+const PRIMARY_ACTION_WIDTH: f32 = 160.0;
+const SECONDARY_ACTION_WIDTH: f32 = 100.0;
 
 #[derive(Debug)]
 pub struct CreateInstanceState {
@@ -161,7 +167,7 @@ pub fn render(
                 .inner_margin(egui::Margin::same(14)),
         )
         .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+            ui.spacing_mut().item_spacing = egui::vec2(MODAL_GAP_MD, MODAL_GAP_MD);
             let text_color = ui.visuals().text_color();
             let heading_style = LabelOptions {
                 font_size: 34.0,
@@ -196,17 +202,22 @@ pub fn render(
                 Some("Display name shown in the sidebar."),
                 &mut state.name,
             );
-            ui.add_space(6.0);
+            ui.add_space(MODAL_GAP_SM);
 
-            if settings_widgets::full_width_button(
-                text_ui,
-                ui,
-                "instance_create_refresh_versions",
-                "Refresh version list",
-                ui.available_width().clamp(1.0, 200.0),
-                false,
-            )
-                .clicked()
+            let refresh_versions_clicked = ui
+                .add_enabled_ui(!state.version_catalog_in_flight, |ui| {
+                    settings_widgets::full_width_button(
+                        text_ui,
+                        ui,
+                        "instance_create_refresh_versions",
+                        "Refresh version list",
+                        ui.available_width().clamp(1.0, ACTION_BUTTON_MAX_WIDTH),
+                        false,
+                    )
+                })
+                .inner
+                .clicked();
+            if refresh_versions_clicked
             {
                 sync_version_catalog(state, include_snapshots_and_betas, true);
                 state.modloader_versions_cache.clear();
@@ -277,7 +288,7 @@ pub fn render(
                 );
             }
 
-            ui.add_space(6.0);
+            ui.add_space(MODAL_GAP_SM);
 
             let _ = text_ui.label(
                 ui,
@@ -333,7 +344,7 @@ pub fn render(
             });
 
             if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
-                ui.add_space(6.0);
+                ui.add_space(MODAL_GAP_SM);
                 let _ = settings_widgets::full_width_text_input_row(
                     text_ui,
                     ui,
@@ -344,7 +355,7 @@ pub fn render(
                 );
             }
 
-            ui.add_space(6.0);
+            ui.add_space(MODAL_GAP_SM);
             let selected_modloader_label = selected_modloader_label(state);
             let modloader_versions_key = modloader_versions_cache_key(
                 selected_modloader_label.as_str(),
@@ -452,6 +463,30 @@ pub fn render(
                     }
                 }
 
+                if state.selected_modloader != CUSTOM_MODLOADER_INDEX {
+                    let refresh_clicked = ui
+                        .add_enabled_ui(!in_flight, |ui| {
+                            settings_widgets::full_width_button(
+                                text_ui,
+                                ui,
+                                "instance_create_modloader_versions_refresh",
+                                "Refresh modloader versions",
+                                ui.available_width().clamp(1.0, ACTION_BUTTON_MAX_WIDTH),
+                                false,
+                            )
+                        })
+                        .inner
+                        .clicked();
+                    if refresh_clicked {
+                        request_modloader_versions(
+                            state,
+                            selected_modloader_label.as_str(),
+                            selected_game_version.as_str(),
+                            true,
+                        );
+                    }
+                }
+
                 if resolved_modloader_versions.is_empty()
                     && state.selected_modloader != CUSTOM_MODLOADER_INDEX
                 {
@@ -465,29 +500,11 @@ pub fn render(
                             ..LabelOptions::default()
                         },
                     );
-                    if !in_flight
-                        && settings_widgets::full_width_button(
-                            text_ui,
-                            ui,
-                            "instance_create_modloader_versions_retry",
-                            "Retry modloader versions fetch",
-                            ui.available_width().clamp(1.0, 260.0),
-                            false,
-                        )
-                        .clicked()
-                    {
-                        request_modloader_versions(
-                            state,
-                            selected_modloader_label.as_str(),
-                            selected_game_version.as_str(),
-                            true,
-                        );
-                    }
                 }
             }
 
             if let Some(error) = state.error.as_deref() {
-                ui.add_space(8.0);
+                ui.add_space(MODAL_GAP_MD);
                 let _ = text_ui.label(
                     ui,
                     "instance_create_error",
@@ -500,9 +517,9 @@ pub fn render(
                 );
             }
 
-            ui.add_space(10.0);
+            ui.add_space(MODAL_GAP_LG);
             ui.separator();
-            ui.add_space(10.0);
+            ui.add_space(MODAL_GAP_LG);
 
             let mut create_clicked = false;
             let mut cancel_clicked = false;
@@ -519,7 +536,7 @@ pub fn render(
                     true,
                 )
                     .clicked();
-                ui.add_space(6.0);
+                ui.add_space(MODAL_GAP_SM);
                 cancel_clicked = settings_widgets::full_width_button(
                     text_ui,
                     ui,
@@ -536,7 +553,7 @@ pub fn render(
                         ui,
                         "instance_create_confirm",
                         "Create instance",
-                        160.0,
+                        PRIMARY_ACTION_WIDTH,
                         true,
                     )
                         .clicked();
@@ -545,7 +562,7 @@ pub fn render(
                         ui,
                         "instance_create_cancel",
                         "Cancel",
-                        100.0,
+                        SECONDARY_ACTION_WIDTH,
                         false,
                     )
                         .clicked();

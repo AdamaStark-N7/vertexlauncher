@@ -1,7 +1,10 @@
 use egui::{self, Frame, ScrollArea, Stroke, Ui};
 use textui::{CodeBlockOptions, LabelOptions, TextUi};
 
-use crate::assets;
+use crate::{
+    assets,
+    ui::{motion, style},
+};
 
 struct LegalNotice {
     friendly_name: &'static str,
@@ -19,14 +22,13 @@ macro_rules! legal_notice {
     };
 }
 
-// Add new legal files here using (Friendly Name, include_str path).
 const LEGAL_NOTICES: &[LegalNotice] = &[
     legal_notice!("Tabler Icons (MIT)", "../legal/TABLER_LICENSE.txt"),
     legal_notice!("Maple Mono NF (SIL OFL 1.1)", "../legal/MAPLE_LICENSE.txt"),
 ];
 
 pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
-    ui.add_space(12.0);
+    ui.add_space(style::SPACE_XL);
 
     let content_height = ui.available_height().max(0.0);
     ui.allocate_ui_with_layout(
@@ -59,9 +61,9 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                             "Included Notices",
                             &heading,
                         );
-                        ui.add_space(4.0);
+                        ui.add_space(style::SPACE_XS);
                         ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(style::SPACE_XS);
                         let _ = text_ui.label(
                             ui,
                             "legal_open_notice",
@@ -80,7 +82,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                         );
                     });
 
-                    ui.add_space(12.0);
+                    ui.add_space(style::SPACE_XL);
 
                     let notices_height = ui.available_height().max(0.0);
                     ScrollArea::vertical()
@@ -90,10 +92,8 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                             for (index, notice) in LEGAL_NOTICES.iter().enumerate() {
                                 section_frame(ui).show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    let open_id = ui.make_persistent_id((
-                                        "legal_notice_open",
-                                        notice.source_path,
-                                    ));
+                                    let open_id =
+                                        ui.make_persistent_id(("legal_notice_open", notice.source_path));
                                     let mut is_open = ui
                                         .ctx()
                                         .data_mut(|d| d.get_persisted::<bool>(open_id))
@@ -171,59 +171,72 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                                         },
                                     );
 
-                                    let openness = ui
-                                        .ctx()
-                                        .animate_bool_responsive(open_id.with("anim"), is_open);
-                                    if openness > 0.01 {
-                                        ui.add_space(4.0 * openness);
-                                        let mut weak = LabelOptions::default();
-                                        weak.color = ui.visuals().weak_text_color();
-                                        weak.font_size = 13.0;
-                                        weak.line_height = 16.0;
-                                        weak.wrap = true;
-                                        let _ = text_ui.label(
-                                            ui,
-                                            ("notice_path", index),
-                                            notice.source_path,
-                                            &weak,
-                                        );
-                                        ui.add_space(8.0);
-                                        ui.separator();
-                                        ui.add_space(8.0);
+                                    let openness = motion::progress(ui.ctx(), open_id.with("anim"), is_open);
+                                    if motion::is_animating(openness) {
+                                        ui.ctx().request_repaint();
+                                    }
+                                    if openness > 0.001 {
+                                        ui.add_space(style::SPACE_XS * openness);
+                                        ui.scope(|ui| {
+                                            ui.set_opacity(openness);
+                                            let mut weak = LabelOptions::default();
+                                            weak.color = ui.visuals().weak_text_color();
+                                            weak.font_size = 13.0;
+                                            weak.line_height = 16.0;
+                                            weak.wrap = true;
+                                            let _ = text_ui.label(
+                                                ui,
+                                                ("notice_path", index),
+                                                notice.source_path,
+                                                &weak,
+                                            );
+                                            ui.add_space(style::SPACE_MD);
+                                            ui.separator();
+                                            ui.add_space(style::SPACE_MD);
 
-                                        let text_height =
-                                            (ui.available_height() * 0.45).clamp(180.0, 480.0);
-                                        let text_width = ui.available_width();
-                                        ScrollArea::vertical()
-                                            .id_salt(format!("legal_notice_text_{index}"))
-                                            .max_height(text_height)
-                                            .auto_shrink([false, false])
-                                            .show(ui, |ui| {
-                                                ui.set_min_width(text_width);
-                                                let code_options = CodeBlockOptions {
-                                                    text_color: ui.visuals().text_color(),
-                                                    background_color: ui.visuals().code_bg_color,
-                                                    stroke: ui
-                                                        .visuals()
-                                                        .widgets
-                                                        .noninteractive
-                                                        .bg_stroke,
-                                                    language: Some("text".to_owned()),
-                                                    wrap: true,
-                                                    ..CodeBlockOptions::default()
-                                                };
-                                                let _ = text_ui.code_block(
-                                                    ui,
-                                                    ("notice_text", index),
-                                                    notice.text,
-                                                    &code_options,
+                                            let full_text_height =
+                                                (ui.available_height() * 0.45).clamp(180.0, 480.0);
+                                            let text_height = full_text_height * openness;
+                                            let code_options = CodeBlockOptions {
+                                                text_color: ui.visuals().text_color(),
+                                                background_color: ui.visuals().code_bg_color,
+                                                stroke: ui.visuals().widgets.noninteractive.bg_stroke,
+                                                language: Some("text".to_owned()),
+                                                wrap: true,
+                                                ..CodeBlockOptions::default()
+                                            };
+                                            if openness >= 0.98 {
+                                                ScrollArea::vertical()
+                                                    .id_salt(format!("legal_notice_text_{index}"))
+                                                    .max_height(text_height)
+                                                    .auto_shrink([false, false])
+                                                    .show(ui, |ui| {
+                                                        let _ = text_ui.code_block_async(
+                                                            ui,
+                                                            ("notice_text_async", index),
+                                                            notice.text,
+                                                            &code_options,
+                                                        );
+                                                    });
+                                            } else {
+                                                let (placeholder_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(ui.available_width(), text_height.max(0.0)),
+                                                    egui::Sense::hover(),
                                                 );
-                                            });
+                                                if text_height > 1.0 {
+                                                    ui.painter().rect_filled(
+                                                        placeholder_rect,
+                                                        egui::CornerRadius::same(style::CORNER_RADIUS_SM),
+                                                        ui.visuals().faint_bg_color,
+                                                    );
+                                                }
+                                            }
+                                        });
                                     }
                                 });
 
                                 if index + 1 < LEGAL_NOTICES.len() {
-                                    ui.add_space(10.0);
+                                    ui.add_space(style::SPACE_LG);
                                 }
                             }
                         });
@@ -240,8 +253,8 @@ fn section_frame(ui: &Ui) -> Frame {
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
         ))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(12))
+        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
+        .inner_margin(egui::Margin::same(style::SPACE_XL as i8))
 }
 
 fn themed_svg_image(

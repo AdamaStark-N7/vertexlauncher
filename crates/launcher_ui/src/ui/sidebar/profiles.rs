@@ -2,6 +2,7 @@ use egui::Ui;
 
 use crate::assets;
 use crate::ui::components::icon_button;
+use crate::ui::style;
 
 use super::{ProfileShortcut, SidebarOutput};
 
@@ -16,7 +17,7 @@ pub fn render(
     }
 
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.spacing_mut().item_spacing.y = style::SPACE_SM;
         for profile in profile_shortcuts {
             let response = ui
                 .horizontal_centered(|ui| {

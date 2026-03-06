@@ -484,7 +484,7 @@ pub fn full_width_button(
         fill: ui.visuals().widgets.inactive.bg_fill,
         fill_hovered: ui.visuals().widgets.hovered.bg_fill,
         fill_active: ui.visuals().widgets.active.bg_fill,
-        fill_selected: ui.visuals().selection.bg_fill,
+        fill_selected: ui.visuals().widgets.active.bg_fill,
         stroke: ui.visuals().widgets.inactive.bg_stroke,
         ..ButtonOptions::default()
     };
@@ -514,15 +514,15 @@ pub fn selectable_chip_button(
         fill: ui.visuals().widgets.inactive.bg_fill,
         fill_hovered: ui.visuals().widgets.hovered.bg_fill,
         fill_active: ui.visuals().widgets.active.bg_fill,
-        fill_selected: ui.visuals().selection.bg_fill,
+        fill_selected: ui.visuals().widgets.active.bg_fill,
         stroke: ui.visuals().widgets.inactive.bg_stroke,
         ..ButtonOptions::default()
     };
 
     if selected {
-        style.fill = ui.visuals().selection.bg_fill;
-        style.fill_hovered = ui.visuals().selection.bg_fill.gamma_multiply(1.08);
-        style.fill_active = ui.visuals().selection.bg_fill.gamma_multiply(0.92);
+        style.fill = ui.visuals().widgets.active.bg_fill;
+        style.fill_hovered = ui.visuals().widgets.active.bg_fill.gamma_multiply(1.08);
+        style.fill_active = ui.visuals().widgets.active.bg_fill.gamma_multiply(0.92);
         style.text_color = ui.visuals().widgets.active.fg_stroke.color;
     }
 
@@ -878,7 +878,7 @@ fn dropdown(
                 fill: ui.visuals().widgets.inactive.bg_fill,
                 fill_hovered: ui.visuals().widgets.hovered.bg_fill,
                 fill_active: ui.visuals().widgets.active.bg_fill,
-                fill_selected: ui.visuals().selection.bg_fill,
+                fill_selected: ui.visuals().widgets.active.bg_fill,
                 stroke: ui.visuals().widgets.inactive.bg_stroke,
                 ..ButtonOptions::default()
             };

@@ -5,9 +5,9 @@ use config::{
 use egui::Ui;
 use installation::purge_cache as purge_installation_cache;
 use std::sync::OnceLock;
-use textui::{ButtonOptions, LabelOptions, TextUi};
+use textui::{ButtonOptions, TextUi};
 
-use crate::ui::{components::settings_widgets, theme::Theme};
+use crate::ui::{components::settings_widgets, style, theme::Theme};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -34,15 +34,15 @@ fn render_settings_contents(
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
 ) {
-    ui.add_space(10.0);
+    ui.add_space(style::SPACE_LG);
     ui.separator();
-    ui.add_space(10.0);
+    ui.add_space(style::SPACE_LG);
 
     config.for_each_toggle_mut(|setting, value| {
         ui.push_id(setting.id, |ui| {
             settings_widgets::toggle_row(text_ui, ui, setting.label, setting.info_tooltip, value);
         });
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     });
 
     if !available_themes.is_empty() {
@@ -68,7 +68,7 @@ fn render_settings_contents(
                 config.set_theme_id(theme.id.clone());
             }
         }
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     }
 
     config.for_each_dropdown_mut(|setting, value| {
@@ -109,7 +109,7 @@ fn render_settings_contents(
                 }
             }
         });
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     });
 
     config.for_each_float_mut(|setting, value| {
@@ -126,7 +126,7 @@ fn render_settings_contents(
                 setting.step,
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     });
 
     config.for_each_int_mut(|setting, value| {
@@ -143,7 +143,7 @@ fn render_settings_contents(
                 setting.step,
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     });
 
     config.for_each_text_mut(|setting, value| {
@@ -157,27 +157,19 @@ fn render_settings_contents(
                 value,
             );
         });
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
     });
 
     render_instance_defaults_section(ui, text_ui, config);
 }
 
 fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
-    ui.add_space(10.0);
+    ui.add_space(style::SPACE_LG);
     ui.separator();
-    ui.add_space(10.0);
+    ui.add_space(style::SPACE_LG);
 
-    let heading_style = LabelOptions {
-        font_size: 20.0,
-        line_height: 24.0,
-        weight: 700,
-        color: ui.visuals().text_color(),
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let mut body_style = LabelOptions::default();
-    body_style.color = ui.visuals().weak_text_color();
+    let heading_style = style::section_heading(ui);
+    let mut body_style = style::muted(ui);
     body_style.wrap = false;
 
     let _ = text_ui.label(
@@ -192,7 +184,7 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         "Used when creating new instances. You can still override values per instance.",
         &body_style,
     );
-    ui.add_space(8.0);
+    ui.add_space(style::SPACE_MD);
 
     let mut installations_root = config.minecraft_installations_root().to_owned();
     let installations_root_response = settings_widgets::full_width_text_input_row(
@@ -208,10 +200,10 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
     if installations_root_response.changed() {
         config.set_minecraft_installations_root(installations_root);
     }
-    ui.add_space(8.0);
+    ui.add_space(style::SPACE_MD);
 
     let cache_button_style = ButtonOptions {
-        min_size: egui::vec2(220.0, 32.0),
+        min_size: egui::vec2(220.0, style::CONTROL_HEIGHT_LG),
         text_color: ui.visuals().text_color(),
         fill: ui.visuals().widgets.inactive.bg_fill,
         fill_hovered: ui.visuals().widgets.hovered.bg_fill,
@@ -248,7 +240,7 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         ui.ctx()
             .data_mut(|d| d.insert_temp(cache_status_id, message));
     }
-    ui.add_space(8.0);
+    ui.add_space(style::SPACE_MD);
 
     let mut default_memory = config.default_instance_max_memory_mib();
     let max_memory_mib = memory_slider_max_mib();

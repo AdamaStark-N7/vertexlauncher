@@ -1,23 +1,14 @@
 use egui::Ui;
-use textui::{LabelOptions, TextUi};
+use textui::TextUi;
+
+use crate::ui::style;
 
 pub fn render(ui: &mut Ui, text_ui: &mut TextUi, selected_instance_id: Option<&str>) {
-    let text_color = ui.visuals().text_color();
-    let heading = LabelOptions {
-        font_size: 30.0,
-        line_height: 34.0,
-        weight: 700,
-        color: text_color,
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let body = LabelOptions {
-        color: text_color,
-        ..LabelOptions::default()
-    };
+    let heading = style::page_heading(ui);
+    let body = style::body(ui);
 
     let _ = text_ui.label(ui, "library_heading", "Library", &heading);
-    ui.add_space(8.0);
+    ui.add_space(style::SPACE_MD);
     let _ = text_ui.label(
         ui,
         "library_desc",
@@ -26,7 +17,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi, selected_instance_id: Option<&s
     );
 
     if let Some(instance_id) = selected_instance_id {
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
         let _ = text_ui.label(
             ui,
             "library_instance_scope",

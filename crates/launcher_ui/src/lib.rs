@@ -5,6 +5,8 @@ pub mod app {
 }
 
 pub mod assets;
+pub mod console;
+pub mod notification;
 pub mod screens;
 pub mod ui;
 pub mod window_effects;

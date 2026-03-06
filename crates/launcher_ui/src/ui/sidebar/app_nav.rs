@@ -3,6 +3,7 @@ use egui::Ui;
 use crate::assets;
 use crate::screens::AppScreen;
 use crate::ui::components::icon_button;
+use crate::ui::style;
 
 use super::SidebarOutput;
 
@@ -13,7 +14,7 @@ pub fn render(
     max_icon_width: f32,
 ) {
     ui.scope(|ui| {
-        ui.spacing_mut().item_spacing.y = 6.0;
+        ui.spacing_mut().item_spacing.y = style::SPACE_SM;
         for screen in AppScreen::FIXED_NAV {
             let selected = active_screen == screen;
             let (icon_id, icon_bytes) = icon_for_screen(screen);
@@ -42,6 +43,7 @@ fn icon_for_screen(screen: AppScreen) -> (&'static str, &'static [u8]) {
         AppScreen::Skins => ("skin_selector", assets::SKIN_SELECTOR_SVG),
         AppScreen::Settings => ("settings", assets::SETTINGS_SVG),
         AppScreen::Legal => ("legal", assets::LEGAL_SVG),
+        AppScreen::Console => ("console", assets::TERMINAL_SVG),
         AppScreen::Instance => ("library", assets::LIBRARY_SVG),
     }
 }

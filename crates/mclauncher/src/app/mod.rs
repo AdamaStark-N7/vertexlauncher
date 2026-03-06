@@ -4,9 +4,16 @@ use config::{
 use eframe::{self, egui};
 use egui::CentralPanel;
 use instances::{InstanceStore, create_instance, load_store, save_store as save_instance_store};
-use launcher_ui::{screens, ui, window_effects};
+use launcher_ui::{console, notification, screens, ui, window_effects};
+use std::fs::File;
+use std::io::Write as _;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 use textui::TextUi;
+use tracing::Subscriber;
+use tracing_subscriber::layer::{Context as LayerContext, Layer};
+use tracing_subscriber::prelude::*;
 
 use self::auth_state::{AuthState, REPAINT_INTERVAL};
 use self::config_format_modal::ModalAction;
@@ -67,7 +74,7 @@ impl VertexApp {
         let instance_store = match load_store() {
             Ok(store) => store,
             Err(err) => {
-                eprintln!("Failed to load instance store: {err}");
+                notification::error!("instance_store", "Failed to load instance store: {err}");
                 InstanceStore::default()
             }
         };
@@ -183,6 +190,7 @@ impl eframe::App for VertexApp {
                 accounts: &profile_accounts,
             },
         );
+        notification::render_popups(ctx, &mut self.text_ui);
 
         if top_bar_output.start_sign_in {
             self.auth.start_sign_in();
@@ -291,7 +299,7 @@ impl eframe::App for VertexApp {
             .ensure_selected_font_is_available(&mut self.config);
         if self.config != previous_config {
             if let Err(err) = save_config(&self.config) {
-                eprintln!("Failed to save config: {err}");
+                tracing::error!(target: "mclauncher/app/config", "Failed to save config: {err}");
             }
             self.fonts
                 .apply_from_config(ctx, &self.config, &mut self.text_ui);
@@ -314,7 +322,7 @@ impl eframe::App for VertexApp {
             }
             self.refresh_instance_shortcuts();
             if let Err(err) = save_instance_store(&self.instance_store) {
-                eprintln!("Failed to save instances: {err}");
+                tracing::error!(target: "mclauncher/app/instances", "Failed to save instances: {err}");
             }
         }
 
@@ -323,6 +331,8 @@ impl eframe::App for VertexApp {
 }
 
 pub fn run() -> eframe::Result<()> {
+    let log_path = init_tracing();
+    tracing::info!(target: "mclauncher/app/startup", "Launcher started. Log file: {}", log_path.display());
     launcher_runtime::init();
     let config_state = load_config();
     let startup_config = match &config_state {
@@ -341,4 +351,109 @@ pub fn run() -> eframe::Result<()> {
 
 pub fn maybe_run_webview_helper() -> Result<bool, String> {
     webview_sign_in::maybe_run_helper_from_args()
+}
+
+#[derive(Clone)]
+struct AppLogLayer {
+    file: Arc<Mutex<File>>,
+}
+
+impl<S> Layer<S> for AppLogLayer
+where
+    S: Subscriber,
+{
+    fn on_event(&self, event: &tracing::Event<'_>, _ctx: LayerContext<'_, S>) {
+        let meta = event.metadata();
+        let mut visitor = MessageVisitor::default();
+        event.record(&mut visitor);
+
+        let (date, time) = current_date_time_parts();
+        let level = meta.level().as_str();
+        let module_path = format_module_path(meta.target(), meta.file());
+        let message = if visitor.message.is_empty() {
+            visitor.fields
+        } else {
+            visitor.message
+        };
+        let line = format!("[{date}][{time}][{level}][{module_path}]: {message}");
+
+        console::push_line(line.clone());
+        if let Ok(mut file) = self.file.lock() {
+            let _ = writeln!(file, "{line}");
+        }
+    }
+}
+
+#[derive(Default)]
+struct MessageVisitor {
+    message: String,
+    fields: String,
+}
+
+impl tracing::field::Visit for MessageVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        let rendered = format!("{value:?}");
+        if field.name() == "message" {
+            self.message = rendered.trim_matches('"').to_owned();
+            return;
+        }
+        if !self.fields.is_empty() {
+            self.fields.push(' ');
+        }
+        self.fields.push_str(field.name());
+        self.fields.push('=');
+        self.fields.push_str(rendered.trim_matches('"'));
+    }
+}
+
+fn init_tracing() -> PathBuf {
+    let started_epoch = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let log_dir = PathBuf::from("logs");
+    let _ = std::fs::create_dir_all(&log_dir);
+    let log_path = log_dir.join(format!("vertex_{started_epoch}.log"));
+    let file = File::create(&log_path).unwrap_or_else(|_| {
+        let fallback = log_dir.join("vertex_fallback.log");
+        File::create(fallback).expect("unable to create fallback log file")
+    });
+    let file = Arc::new(Mutex::new(file));
+
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+
+    let stderr_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(false)
+        .without_time()
+        .with_target(false)
+        .with_level(false)
+        .with_writer(std::io::stderr);
+    let app_layer = AppLogLayer { file };
+
+    let _ = tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stderr_layer)
+        .with(app_layer)
+        .try_init();
+
+    log_path
+}
+
+fn current_date_time_parts() -> (String, String) {
+    let ts = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
+    if let Some((date, time)) = ts.split_once('T') {
+        return (date.to_owned(), time.trim_end_matches('Z').to_owned());
+    }
+    ("unknown-date".to_owned(), "unknown-time".to_owned())
+}
+
+fn format_module_path(target: &str, file: Option<&str>) -> String {
+    if let Some(file) = file
+        && let Some((crate_name, rest)) = file.split_once("/src/")
+    {
+        let crate_name = crate_name.rsplit('/').next().unwrap_or(crate_name);
+        return format!("{crate_name}/{}", rest.replace('\\', "/"));
+    }
+    target.replace("::", "/")
 }

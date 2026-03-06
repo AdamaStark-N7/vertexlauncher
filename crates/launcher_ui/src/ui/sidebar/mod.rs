@@ -3,6 +3,7 @@ use egui::{Context, ScrollArea, SidePanel, Ui};
 use crate::assets;
 use crate::screens::AppScreen;
 use crate::ui::components::icon_button;
+use crate::ui::style;
 
 mod app_nav;
 mod profiles;
@@ -78,9 +79,10 @@ fn render_segments(
     layout: SidebarLayout,
 ) {
     ui.vertical(|ui| {
+        ui.add_space(style::SPACE_XS);
         app_nav::render(ui, active_screen, output, layout.max_icon_width);
 
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
         let create_response = ui
             .horizontal_centered(|ui| {
                 icon_button::svg(
@@ -97,9 +99,9 @@ fn render_segments(
             output.create_instance_clicked = true;
         }
 
-        ui.add_space(10.0);
+        ui.add_space(style::SPACE_LG);
         ui.separator();
-        ui.add_space(8.0);
+        ui.add_space(style::SPACE_MD);
 
         ScrollArea::vertical()
             .id_salt("profiles_scroll")

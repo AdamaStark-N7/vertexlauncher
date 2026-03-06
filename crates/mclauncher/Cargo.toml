@@ -15,6 +15,9 @@ instances.workspace = true
 installation.workspace = true
 launcher_runtime.workspace = true
 launcher_ui.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+humantime.workspace = true
 rfd = "0.15.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]

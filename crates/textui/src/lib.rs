@@ -1,5 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::sync::mpsc;
 
 use cosmic_text::{
     Action, Attrs, AttrsOwned, Buffer, Color, Edit, Editor, Family, FontFeatures, FontSystem,
@@ -220,6 +221,49 @@ struct TextureEntry {
     last_used_frame: u64,
 }
 
+#[derive(Clone, Debug)]
+enum AsyncRasterKind {
+    Plain(String),
+    Rich(Vec<RichSpan>),
+}
+
+#[derive(Clone, Debug)]
+struct AsyncRasterRequest {
+    key_hash: u64,
+    kind: AsyncRasterKind,
+    options: LabelOptions,
+    width_points_opt: Option<f32>,
+    scale: f32,
+    typography: TypographySnapshot,
+}
+
+#[derive(Clone, Debug)]
+struct AsyncRasterResponse {
+    key_hash: u64,
+    raster: RasterizedText,
+}
+
+#[derive(Clone, Debug)]
+struct TypographySnapshot {
+    ui_font_family: Option<String>,
+    ui_font_size_scale: f32,
+    ui_font_weight: i32,
+    open_type_features_enabled: bool,
+    open_type_features_to_enable: String,
+}
+
+struct AsyncRasterState {
+    tx: mpsc::Sender<AsyncRasterWorkerMessage>,
+    rx: mpsc::Receiver<AsyncRasterResponse>,
+    pending: HashSet<u64>,
+    cache: HashMap<u64, RasterizedText>,
+}
+
+enum AsyncRasterWorkerMessage {
+    RegisterFont(Vec<u8>),
+    Render(AsyncRasterRequest),
+}
+
 #[derive(Debug)]
 struct InputState {
     editor: Editor<'static>,
@@ -253,6 +297,7 @@ pub struct TextUi {
     open_type_features_enabled: bool,
     open_type_features_to_enable: String,
     open_type_features: Option<FontFeatures>,
+    async_raster: AsyncRasterState,
     current_frame: u64,
 }
 
@@ -278,6 +323,13 @@ impl TextUi {
                 Theme::default()
             });
 
+        let (worker_tx, worker_rx) = mpsc::channel::<AsyncRasterWorkerMessage>();
+        let (result_tx, result_rx) = mpsc::channel::<AsyncRasterResponse>();
+        std::thread::Builder::new()
+            .name("textui-async-raster-worker".to_owned())
+            .spawn(move || async_raster_worker_loop(worker_rx, result_tx))
+            .expect("failed to spawn textui async raster worker");
+
         Self {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
@@ -291,6 +343,12 @@ impl TextUi {
             open_type_features_enabled: false,
             open_type_features_to_enable: String::new(),
             open_type_features: None,
+            async_raster: AsyncRasterState {
+                tx: worker_tx,
+                rx: result_rx,
+                pending: HashSet::new(),
+                cache: HashMap::new(),
+            },
             current_frame: 0,
         }
     }
@@ -299,12 +357,124 @@ impl TextUi {
         self.current_frame = ctx.cumulative_frame_nr();
         self.textures
             .retain(|_, entry| self.current_frame.saturating_sub(entry.last_used_frame) <= 600);
+        self.poll_async_raster_results();
     }
 
     pub fn register_font_data(&mut self, bytes: Vec<u8>) {
+        let _ = self
+            .async_raster
+            .tx
+            .send(AsyncRasterWorkerMessage::RegisterFont(bytes.clone()));
         self.font_system.db_mut().load_font_data(bytes);
         self.textures.clear();
         self.input_states.clear();
+    }
+
+    pub fn label_async(
+        &mut self,
+        ui: &mut Ui,
+        id_source: impl Hash,
+        text: &str,
+        options: &LabelOptions,
+    ) -> Response {
+        self.label_impl(ui, id_source, text, options, Sense::hover(), true)
+    }
+
+    pub fn code_block_async(
+        &mut self,
+        ui: &mut Ui,
+        id_source: impl Hash,
+        code: &str,
+        options: &CodeBlockOptions,
+    ) -> Response {
+        let scale = ui.ctx().pixels_per_point();
+        let width_points_opt = if options.wrap {
+            Some((ui.available_width() - options.padding.x * 2.0).max(1.0))
+        } else {
+            None
+        };
+
+        let spans =
+            self.highlight_code_spans(code, options.language.as_deref(), options.text_color);
+        let label_options = LabelOptions {
+            font_size: options.font_size,
+            line_height: options.line_height,
+            color: options.text_color,
+            wrap: options.wrap,
+            monospace: true,
+            weight: 400,
+            italic: false,
+            padding: egui::Vec2::ZERO,
+        };
+
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "code_async".hash(&mut hasher);
+        code.hash(&mut hasher);
+        options.font_size.to_bits().hash(&mut hasher);
+        options.line_height.to_bits().hash(&mut hasher);
+        options.wrap.hash(&mut hasher);
+        options.text_color.hash(&mut hasher);
+        options.background_color.hash(&mut hasher);
+        options.language.hash(&mut hasher);
+        width_points_opt
+            .map(f32::to_bits)
+            .unwrap_or(0)
+            .hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let texture_id = ui.make_persistent_id(id_source).with("textui_code");
+
+        let raster = self.get_or_queue_async_rich_raster(
+            fingerprint,
+            spans,
+            &label_options,
+            width_points_opt,
+            scale,
+        );
+
+        if let Some(raster) = raster {
+            let desired_size = raster.size_points + options.padding * 2.0;
+            let (rect, response) = ui.allocate_exact_size(desired_size, Sense::hover());
+
+            let bg_shape = egui::Shape::rect_filled(
+                rect,
+                CornerRadius::same(options.corner_radius),
+                options.background_color,
+            );
+            ui.painter().add(bg_shape);
+            if options.stroke.width > 0.0 {
+                ui.painter().rect_stroke(
+                    rect,
+                    CornerRadius::same(options.corner_radius),
+                    options.stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+
+            let texture = self.update_texture(
+                ui.ctx(),
+                texture_id,
+                fingerprint,
+                raster.image,
+                raster.size_points,
+            );
+            let image_rect = Rect::from_min_size(rect.min + options.padding, raster.size_points);
+            paint_texture(ui, &texture, image_rect);
+            return response;
+        }
+
+        let fallback_height = (options.line_height * 2.0 + options.padding.y * 2.0).max(32.0);
+        let desired_size = egui::vec2(
+            width_points_opt.unwrap_or_else(|| ui.available_width().max(1.0)),
+            fallback_height,
+        );
+        let (rect, response) = ui.allocate_exact_size(desired_size, Sense::hover());
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(options.corner_radius),
+            options.background_color,
+        );
+        ui.ctx().request_repaint();
+        response
     }
 
     pub fn apply_typography(&mut self, family_candidates: &[&str], size_points: f32, weight: i32) {
@@ -441,7 +611,7 @@ impl TextUi {
         text: &str,
         options: &LabelOptions,
     ) -> Response {
-        self.label_impl(ui, id_source, text, options, Sense::hover())
+        self.label_impl(ui, id_source, text, options, Sense::hover(), false)
     }
 
     pub fn clickable_label(
@@ -451,7 +621,7 @@ impl TextUi {
         text: &str,
         options: &LabelOptions,
     ) -> Response {
-        self.label_impl(ui, id_source, text, options, Sense::click())
+        self.label_impl(ui, id_source, text, options, Sense::click(), false)
     }
 
     pub fn measure_text_size(&mut self, ui: &Ui, text: &str, options: &LabelOptions) -> Vec2 {
@@ -495,6 +665,7 @@ impl TextUi {
         text: &str,
         options: &LabelOptions,
         sense: Sense,
+        async_mode: bool,
     ) -> Response {
         let scale = ui.ctx().pixels_per_point();
         let width_points_opt = if options.wrap {
@@ -527,7 +698,27 @@ impl TextUi {
             return response;
         }
 
-        let raster = self.rasterize_plain_text(text, options, width_points_opt, scale);
+        let raster = if async_mode {
+            self.get_or_queue_async_plain_raster(
+                fingerprint,
+                text.to_owned(),
+                options,
+                width_points_opt,
+                scale,
+            )
+        } else {
+            Some(self.rasterize_plain_text(text, options, width_points_opt, scale))
+        };
+        let Some(raster) = raster else {
+            let fallback_height = (options.line_height + options.padding.y * 2.0).max(20.0);
+            let fallback_width = width_points_opt.unwrap_or_else(|| ui.available_width().max(1.0));
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(fallback_width, fallback_height), sense);
+            ui.painter()
+                .rect_filled(rect, CornerRadius::same(4), ui.visuals().faint_bg_color);
+            ui.ctx().request_repaint();
+            return response;
+        };
         let desired_size = raster.size_points + options.padding * 2.0;
         let (rect, response) = ui.allocate_exact_size(desired_size, sense);
 
@@ -1416,6 +1607,86 @@ impl TextUi {
         }
     }
 
+    fn typography_snapshot(&self) -> TypographySnapshot {
+        TypographySnapshot {
+            ui_font_family: self.ui_font_family.clone(),
+            ui_font_size_scale: self.ui_font_size_scale,
+            ui_font_weight: self.ui_font_weight,
+            open_type_features_enabled: self.open_type_features_enabled,
+            open_type_features_to_enable: self.open_type_features_to_enable.clone(),
+        }
+    }
+
+    fn poll_async_raster_results(&mut self) {
+        loop {
+            match self.async_raster.rx.try_recv() {
+                Ok(response) => {
+                    self.async_raster.pending.remove(&response.key_hash);
+                    self.async_raster
+                        .cache
+                        .insert(response.key_hash, response.raster);
+                }
+                Err(mpsc::TryRecvError::Empty) | Err(mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+    }
+
+    fn get_or_queue_async_plain_raster(
+        &mut self,
+        key_hash: u64,
+        text: String,
+        options: &LabelOptions,
+        width_points_opt: Option<f32>,
+        scale: f32,
+    ) -> Option<RasterizedText> {
+        if let Some(raster) = self.async_raster.cache.get(&key_hash) {
+            return Some(raster.clone());
+        }
+        if self.async_raster.pending.insert(key_hash) {
+            let request = AsyncRasterRequest {
+                key_hash,
+                kind: AsyncRasterKind::Plain(text),
+                options: options.clone(),
+                width_points_opt,
+                scale,
+                typography: self.typography_snapshot(),
+            };
+            let _ = self
+                .async_raster
+                .tx
+                .send(AsyncRasterWorkerMessage::Render(request));
+        }
+        None
+    }
+
+    fn get_or_queue_async_rich_raster(
+        &mut self,
+        key_hash: u64,
+        spans: Vec<RichSpan>,
+        options: &LabelOptions,
+        width_points_opt: Option<f32>,
+        scale: f32,
+    ) -> Option<RasterizedText> {
+        if let Some(raster) = self.async_raster.cache.get(&key_hash) {
+            return Some(raster.clone());
+        }
+        if self.async_raster.pending.insert(key_hash) {
+            let request = AsyncRasterRequest {
+                key_hash,
+                kind: AsyncRasterKind::Rich(spans),
+                options: options.clone(),
+                width_points_opt,
+                scale,
+                typography: self.typography_snapshot(),
+            };
+            let _ = self
+                .async_raster
+                .tx
+                .send(AsyncRasterWorkerMessage::Render(request));
+        }
+        None
+    }
+
     fn get_cached_texture(&mut self, id: Id, fingerprint: u64) -> Option<(TextureHandle, Vec2)> {
         let entry = self.textures.get_mut(&id)?;
         if entry.fingerprint != fingerprint {
@@ -1537,6 +1808,164 @@ fn parse_feature_tag_list(feature_tags_csv: &str) -> Vec<[u8; 4]> {
     }
 
     tags.into_iter().collect()
+}
+
+fn async_raster_worker_loop(
+    rx: mpsc::Receiver<AsyncRasterWorkerMessage>,
+    tx: mpsc::Sender<AsyncRasterResponse>,
+) {
+    let mut font_system = FontSystem::new();
+    let mut swash_cache = SwashCache::new();
+
+    while let Ok(msg) = rx.recv() {
+        match msg {
+            AsyncRasterWorkerMessage::RegisterFont(bytes) => {
+                font_system.db_mut().load_font_data(bytes);
+            }
+            AsyncRasterWorkerMessage::Render(req) => {
+                let raster = async_rasterize_request(&mut font_system, &mut swash_cache, &req);
+                let _ = tx.send(AsyncRasterResponse {
+                    key_hash: req.key_hash,
+                    raster,
+                });
+            }
+        }
+    }
+}
+
+fn async_rasterize_request(
+    font_system: &mut FontSystem,
+    swash_cache: &mut SwashCache,
+    req: &AsyncRasterRequest,
+) -> RasterizedText {
+    let metrics = Metrics::new(
+        (req.options.font_size * req.typography.ui_font_size_scale * req.scale).max(1.0),
+        (req.options.line_height * req.typography.ui_font_size_scale * req.scale).max(1.0),
+    );
+    let mut buffer = Buffer::new(font_system, metrics);
+    let width_px_opt = req.width_points_opt.map(|w| (w * req.scale).max(1.0));
+    let feature_tags = if req.typography.open_type_features_enabled {
+        parse_feature_tag_list(&req.typography.open_type_features_to_enable)
+    } else {
+        Vec::new()
+    };
+    let features = if feature_tags.is_empty() {
+        None
+    } else {
+        Some(build_font_features(&feature_tags))
+    };
+
+    {
+        let mut borrowed = buffer.borrow_with(font_system);
+        borrowed.set_wrap(if req.options.wrap {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
+        borrowed.set_size(width_px_opt, None);
+
+        match &req.kind {
+            AsyncRasterKind::Plain(text) => {
+                let attrs_owned = async_build_text_attrs_owned(
+                    req,
+                    &SpanStyle {
+                        color: req.options.color,
+                        monospace: req.options.monospace,
+                        italic: req.options.italic,
+                        weight: req.options.weight,
+                    },
+                    features.clone(),
+                );
+                let attrs = attrs_owned.as_attrs();
+                borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+            }
+            AsyncRasterKind::Rich(spans) => {
+                let default_attrs_owned = async_build_text_attrs_owned(
+                    req,
+                    &SpanStyle {
+                        color: req.options.color,
+                        monospace: req.options.monospace,
+                        italic: req.options.italic,
+                        weight: req.options.weight,
+                    },
+                    features.clone(),
+                );
+                let span_attrs_owned = spans
+                    .iter()
+                    .map(|span| async_build_text_attrs_owned(req, &span.style, features.clone()))
+                    .collect::<Vec<_>>();
+                let rich_text = spans
+                    .iter()
+                    .zip(span_attrs_owned.iter())
+                    .map(|(span, attrs)| (span.text.as_str(), attrs.as_attrs()))
+                    .collect::<Vec<_>>();
+                let default_attrs = default_attrs_owned.as_attrs();
+                borrowed.set_rich_text(rich_text, &default_attrs, Shaping::Advanced, None);
+            }
+        }
+        borrowed.shape_until_scroll(true);
+    }
+
+    let (mut measured_width_px, measured_height_px) = measure_buffer_pixels(&buffer);
+    if let Some(width_points) = req.width_points_opt {
+        measured_width_px = (width_points * req.scale).ceil() as usize;
+    }
+    let width_px = measured_width_px.max(1);
+    let height_px = measured_height_px.max(1);
+
+    let mut image = ColorImage::new(
+        [width_px, height_px],
+        vec![Color32::TRANSPARENT; width_px * height_px],
+    );
+    buffer.draw(
+        font_system,
+        swash_cache,
+        to_cosmic_color(req.options.color),
+        |x, y, w, h, color| {
+            blend_rect(
+                &mut image,
+                x,
+                y,
+                w as i32,
+                h as i32,
+                cosmic_to_egui_color(color),
+            );
+        },
+    );
+
+    RasterizedText {
+        image,
+        size_points: egui::vec2(width_px as f32 / req.scale, height_px as f32 / req.scale),
+    }
+}
+
+fn async_build_text_attrs_owned(
+    req: &AsyncRasterRequest,
+    style: &SpanStyle,
+    features: Option<FontFeatures>,
+) -> AttrsOwned {
+    let effective_weight =
+        (i32::from(style.weight) + (req.typography.ui_font_weight - 400)).clamp(100, 900) as u16;
+    let mut attrs = Attrs::new()
+        .color(to_cosmic_color(style.color))
+        .weight(Weight(effective_weight))
+        .metrics(Metrics::new(
+            (req.options.font_size * req.typography.ui_font_size_scale).max(1.0),
+            (req.options.line_height * req.typography.ui_font_size_scale).max(1.0),
+        ));
+
+    if style.monospace {
+        attrs = attrs.family(Family::Monospace);
+    } else if let Some(family) = req.typography.ui_font_family.as_deref() {
+        attrs = attrs.family(Family::Name(family));
+    }
+    if style.italic {
+        attrs = attrs.style(FontStyle::Italic);
+    }
+    if let Some(features) = features {
+        attrs = attrs.font_features(features);
+    }
+    AttrsOwned::new(&attrs)
 }
 
 fn build_font_features(tags: &[[u8; 4]]) -> FontFeatures {

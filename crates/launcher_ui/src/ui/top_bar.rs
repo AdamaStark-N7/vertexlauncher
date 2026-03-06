@@ -7,7 +7,11 @@ use egui::{
 };
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
-use crate::{assets, screens::AppScreen, ui::components::icon_button};
+use crate::{
+    assets,
+    screens::AppScreen,
+    ui::{components::icon_button, style},
+};
 
 const TOP_BAR_HEIGHT: f32 = 38.0;
 const CONTROL_SLOT_WIDTH: f32 = 20.0;
@@ -15,7 +19,7 @@ const CONTROL_ICON_MAX_WIDTH: f32 = 20.0;
 const CONTROL_GAP: f32 = 7.0;
 const CONTROL_GROUP_PADDING: f32 = 12.0;
 const PROFILE_BUTTON_VERTICAL_PADDING: f32 = 5.0;
-const PROFILE_TO_CONTROLS_GAP: f32 = 8.0;
+const PROFILE_TO_CONTROLS_GAP: f32 = style::SPACE_MD;
 const PROFILE_POPUP_MIN_WIDTH: f32 = 310.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 
@@ -93,7 +97,7 @@ pub fn render(
 
             ui.scope_builder(egui::UiBuilder::new().max_rect(drag_rect), |ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    ui.add_space(10.0);
+                    ui.add_space(style::SPACE_LG);
                     let mut section_style = LabelOptions {
                         font_size: 18.0,
                         line_height: 24.0,
@@ -118,20 +122,29 @@ pub fn render(
 
                     let profile_response =
                         render_profile_button(ui, profile_ui, profile_button_size);
-                    let profile_popup_id = ui.id().with("profile_selector_popup");
-                    let _ = egui::Popup::menu(&profile_response)
-                        .id(profile_popup_id)
-                        .width(PROFILE_POPUP_MIN_WIDTH)
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show(|ui| {
-                            render_profile_popup(
-                                ui,
-                                text_ui,
-                                profile_ui,
-                                &mut output,
-                                profile_popup_id,
-                            );
-                        });
+                    let direct_sign_in = profile_ui.display_name.is_none()
+                        && profile_ui.accounts.is_empty()
+                        && !profile_ui.sign_in_in_progress;
+                    if direct_sign_in {
+                        if profile_response.clicked() {
+                            output.start_sign_in = true;
+                        }
+                    } else {
+                        let profile_popup_id = ui.id().with("profile_selector_popup");
+                        let _ = egui::Popup::menu(&profile_response)
+                            .id(profile_popup_id)
+                            .width(PROFILE_POPUP_MIN_WIDTH)
+                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                            .show(|ui| {
+                                render_profile_popup(
+                                    ui,
+                                    text_ui,
+                                    profile_ui,
+                                    &mut output,
+                                    profile_popup_id,
+                                );
+                            });
+                    }
 
                     ui.add_space(CONTROL_GROUP_PADDING);
                 });
@@ -277,6 +290,18 @@ fn render_profile_button(
             });
 
         ui.add_sized([button_size, button_size], button)
+    } else if profile_ui.display_name.is_none() && !profile_ui.sign_in_in_progress {
+        let sign_in_button = Button::new("Sign in")
+            .frame(true)
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.inactive.bg_stroke.color,
+            ))
+            .fill(ui.visuals().widgets.inactive.weak_bg_fill);
+        ui.add_sized(
+            [(button_size * 3.2).clamp(68.0, 110.0), button_size],
+            sign_in_button,
+        )
     } else {
         ui.allocate_ui_with_layout(
             egui::vec2(button_size, button_size),
@@ -303,7 +328,7 @@ fn render_profile_popup(
     output: &mut TopBarOutput,
     popup_id: egui::Id,
 ) {
-    ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
+    ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
 
     let muted_text = ui.visuals().weak_text_color();
     let heading_style = LabelOptions {
@@ -323,9 +348,9 @@ fn render_profile_popup(
     muted_style.color = muted_text;
 
     let button_style = ButtonOptions {
-        min_size: egui::vec2(220.0, 30.0),
-        corner_radius: 8,
-        padding: egui::vec2(8.0, 4.0),
+        min_size: egui::vec2(220.0, style::CONTROL_HEIGHT),
+        corner_radius: style::CORNER_RADIUS_SM,
+        padding: egui::vec2(style::SPACE_MD, style::SPACE_XS),
         text_color: ui.visuals().text_color(),
         fill: ui.visuals().widgets.inactive.bg_fill,
         fill_hovered: ui.visuals().widgets.hovered.bg_fill,
@@ -341,8 +366,8 @@ fn render_profile_popup(
             1.0,
             ui.visuals().widgets.noninteractive.bg_stroke.color,
         ))
-        .corner_radius(egui::CornerRadius::same(10))
-        .inner_margin(egui::Margin::same(10))
+        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
+        .inner_margin(egui::Margin::same(style::SPACE_LG as i8))
         .show(ui, |ui| {
             if let Some(name) = profile_ui.display_name {
                 let _ = text_ui.label(
@@ -366,7 +391,7 @@ fn render_profile_popup(
         });
 
     if !profile_ui.accounts.is_empty() {
-        ui.add_space(2.0);
+        ui.add_space(style::SPACE_XS / 2.0);
         let _ = text_ui.label(
             ui,
             "profile_popup_accounts_title",
@@ -380,14 +405,14 @@ fn render_profile_popup(
                 1.0,
                 ui.visuals().widgets.inactive.bg_stroke.color,
             ))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::same(8))
+            .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
+            .inner_margin(egui::Margin::same(style::SPACE_MD as i8))
             .show(ui, |ui| {
                 let mut list_button_style = button_style.clone();
-                list_button_style.min_size = egui::vec2(150.0, 30.0);
+                list_button_style.min_size = egui::vec2(150.0, style::CONTROL_HEIGHT);
 
                 let mut remove_button_style = button_style.clone();
-                remove_button_style.min_size = egui::vec2(72.0, 30.0);
+                remove_button_style.min_size = egui::vec2(72.0, style::CONTROL_HEIGHT);
 
                 for account in profile_ui.accounts {
                     ui.horizontal(|ui| {
@@ -426,9 +451,9 @@ fn render_profile_popup(
             });
     }
 
-    ui.add_space(2.0);
+    ui.add_space(style::SPACE_XS / 2.0);
     ui.separator();
-    ui.add_space(2.0);
+    ui.add_space(style::SPACE_XS / 2.0);
 
     let mut primary_button_style = button_style.clone();
     primary_button_style.text_color = ui.visuals().text_color();
@@ -451,7 +476,7 @@ fn render_profile_popup(
         .button(
             ui,
             "profile_popup_signin_action",
-            "Sign in with Microsoft",
+            "Sign in",
             &primary_button_style,
         )
         .clicked()
