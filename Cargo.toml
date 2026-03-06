@@ -1,7 +1,18 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/*",
+    "crates/auth",
+    "crates/config",
+    "crates/curseforge",
+    "crates/fontloader",
+    "crates/installation",
+    "crates/instances",
+    "crates/launcher_runtime",
+    "crates/launcher_ui",
+    "crates/mclauncher",
+    "crates/modprovider",
+    "crates/modrinth",
+    "crates/textui",
 ]
 default-members = [
     "crates/mclauncher",
@@ -32,14 +43,10 @@ config = { path = "crates/config" }
 curseforge = { path = "crates/curseforge" }
 installation = { path = "crates/installation" }
 instances = { path = "crates/instances" }
+launcher_runtime = { path = "crates/launcher_runtime" }
+launcher_ui = { path = "crates/launcher_ui" }
 modrinth = { path = "crates/modrinth" }
-skinmanager = { path = "crates/skinmanager" }
-worldmanager = { path = "crates/worldmanager" }
-contentbrowser = { path = "crates/contentbrowser" }
 modprovider = { path = "crates/modprovider" }
-serverbrowser = { path = "crates/serverbrowser" }
-servermanager = { path = "crates/servermanager" }
-serverprotocol = { path = "crates/serverprotocol" }
 fontloader = { path = "crates/fontloader" }
 textui = { path = "crates/textui" }
 

@@ -19,10 +19,18 @@ const PROFILE_TO_CONTROLS_GAP: f32 = 8.0;
 const PROFILE_POPUP_MIN_WIDTH: f32 = 310.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct TopBarOutput {
     pub start_sign_in: bool,
-    pub sign_out: bool,
+    pub select_account_id: Option<String>,
+    pub remove_account_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ProfileAccountOption {
+    pub profile_id: String,
+    pub display_name: String,
+    pub is_active: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -31,6 +39,7 @@ pub struct ProfileUiModel<'a> {
     pub avatar_png: Option<&'a [u8]>,
     pub sign_in_in_progress: bool,
     pub status_message: Option<&'a str>,
+    pub accounts: &'a [ProfileAccountOption],
 }
 
 pub fn render(
@@ -356,6 +365,67 @@ fn render_profile_popup(
             }
         });
 
+    if !profile_ui.accounts.is_empty() {
+        ui.add_space(2.0);
+        let _ = text_ui.label(
+            ui,
+            "profile_popup_accounts_title",
+            "Saved accounts",
+            &muted_style,
+        );
+
+        egui::Frame::new()
+            .fill(ui.visuals().widgets.inactive.bg_fill)
+            .stroke(egui::Stroke::new(
+                1.0,
+                ui.visuals().widgets.inactive.bg_stroke.color,
+            ))
+            .corner_radius(egui::CornerRadius::same(10))
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                let mut list_button_style = button_style.clone();
+                list_button_style.min_size = egui::vec2(150.0, 30.0);
+
+                let mut remove_button_style = button_style.clone();
+                remove_button_style.min_size = egui::vec2(72.0, 30.0);
+
+                for account in profile_ui.accounts {
+                    ui.horizontal(|ui| {
+                        let label = if account.is_active {
+                            format!("{} (active)", account.display_name)
+                        } else {
+                            account.display_name.clone()
+                        };
+
+                        if text_ui
+                            .selectable_button(
+                                ui,
+                                ("profile_popup_account_select", &account.profile_id),
+                                &label,
+                                account.is_active,
+                                &list_button_style,
+                            )
+                            .clicked()
+                        {
+                            output.select_account_id = Some(account.profile_id.clone());
+                        }
+
+                        if text_ui
+                            .button(
+                                ui,
+                                ("profile_popup_account_remove", &account.profile_id),
+                                "Remove",
+                                &remove_button_style,
+                            )
+                            .clicked()
+                        {
+                            output.remove_account_id = Some(account.profile_id.clone());
+                        }
+                    });
+                }
+            });
+    }
+
     ui.add_space(2.0);
     ui.separator();
     ui.add_space(2.0);
@@ -388,19 +458,5 @@ fn render_profile_popup(
     {
         output.start_sign_in = true;
         egui::Popup::open_id(ui.ctx(), popup_id);
-    }
-
-    if profile_ui.display_name.is_some()
-        && text_ui
-            .button(
-                ui,
-                "profile_popup_signout_action",
-                "Sign out",
-                &button_style,
-            )
-            .clicked()
-    {
-        output.sign_out = true;
-        egui::Popup::close_id(ui.ctx(), popup_id);
     }
 }

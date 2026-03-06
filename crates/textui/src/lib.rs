@@ -270,8 +270,13 @@ impl TextUi {
             .themes
             .get("base16-ocean.dark")
             .or_else(|| theme_set.themes.values().next())
-            .expect("ThemeSet should include at least one theme")
-            .clone();
+            .cloned()
+            .unwrap_or_else(|| {
+                eprintln!(
+                    "Syntect theme set was unexpectedly empty; falling back to default code theme."
+                );
+                Theme::default()
+            });
 
         Self {
             font_system: FontSystem::new(),

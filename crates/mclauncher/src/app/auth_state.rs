@@ -1,4 +1,4 @@
-use auth::CachedAccount;
+use auth::{CachedAccount, CachedAccountsState};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -12,7 +12,6 @@ pub enum AuthUiStatus {
     Starting,
     AwaitingBrowser,
     WaitingForAuthorization,
-    Success(String),
     Error(String),
 }
 
@@ -25,7 +24,7 @@ impl AuthUiStatus {
                 Some("Complete sign-in in the Microsoft webview window...")
             }
             AuthUiStatus::WaitingForAuthorization => Some("Finalizing sign-in..."),
-            AuthUiStatus::Success(message) | AuthUiStatus::Error(message) => Some(message.as_str()),
+            AuthUiStatus::Error(message) => Some(message.as_str()),
         }
     }
 }
@@ -37,26 +36,37 @@ enum AuthFlowEvent {
     Failed(String),
 }
 
+#[derive(Clone, Debug)]
+pub struct AccountUiEntry {
+    pub profile_id: String,
+    pub display_name: String,
+    pub is_active: bool,
+}
+
 pub struct AuthState {
-    account: Option<CachedAccount>,
-    avatar_png: Option<Vec<u8>>,
+    accounts_state: CachedAccountsState,
+    active_avatar_png: Option<Vec<u8>>,
     flow: Option<Receiver<AuthFlowEvent>>,
     status: AuthUiStatus,
 }
 
 impl AuthState {
     pub fn load() -> Self {
-        let (account, status) = match auth::load_cached_account() {
-            Ok(account) => (account, AuthUiStatus::Idle),
+        let (accounts_state, status) = match auth::load_cached_accounts() {
+            Ok(state) => (state, AuthUiStatus::Idle),
             Err(err) => (
-                None,
+                CachedAccountsState::default(),
                 AuthUiStatus::Error(format!("Failed to load cached account state: {err}")),
             ),
         };
 
+        let active_avatar_png = accounts_state
+            .active_account()
+            .and_then(CachedAccount::avatar_png_bytes);
+
         Self {
-            avatar_png: account.as_ref().and_then(CachedAccount::avatar_png_bytes),
-            account,
+            accounts_state,
+            active_avatar_png,
             flow: None,
             status,
         }
@@ -76,14 +86,14 @@ impl AuthState {
                             self.status = AuthUiStatus::WaitingForAuthorization;
                         }
                         AuthFlowEvent::Completed(account) => {
-                            self.avatar_png = account.avatar_png_bytes();
-                            self.status = AuthUiStatus::Success(format!(
-                                "Signed in as {}",
-                                account.minecraft_profile.name
-                            ));
-                            self.account = Some(account.clone());
+                            self.accounts_state.upsert_and_activate(account);
+                            self.active_avatar_png = self
+                                .accounts_state
+                                .active_account()
+                                .and_then(CachedAccount::avatar_png_bytes);
+                            self.status = AuthUiStatus::Idle;
 
-                            if let Err(err) = auth::save_cached_account(&account) {
+                            if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
                                 self.status = AuthUiStatus::Error(format!(
                                     "Sign-in succeeded, but failed to cache account state: {err}",
                                 ));
@@ -138,15 +148,38 @@ impl AuthState {
         self.flow = Some(receiver);
     }
 
-    pub fn sign_out(&mut self) {
-        self.flow = None;
-        self.account = None;
-        self.avatar_png = None;
+    pub fn select_account(&mut self, profile_id: &str) {
+        if !self.accounts_state.set_active_profile_id(profile_id) {
+            return;
+        }
+
+        self.active_avatar_png = self
+            .accounts_state
+            .active_account()
+            .and_then(CachedAccount::avatar_png_bytes);
         self.status = AuthUiStatus::Idle;
 
-        if let Err(err) = auth::clear_cached_account() {
+        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
             self.status = AuthUiStatus::Error(format!(
-                "Signed out in memory, but failed to clear cached account state: {err}",
+                "Switched account in memory, but failed to cache account state: {err}",
+            ));
+        }
+    }
+
+    pub fn remove_account(&mut self, profile_id: &str) {
+        if !self.accounts_state.remove_by_profile_id(profile_id) {
+            return;
+        }
+
+        self.active_avatar_png = self
+            .accounts_state
+            .active_account()
+            .and_then(CachedAccount::avatar_png_bytes);
+        self.status = AuthUiStatus::Idle;
+
+        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+            self.status = AuthUiStatus::Error(format!(
+                "Removed account in memory, but failed to cache account state: {err}",
             ));
         }
     }
@@ -160,17 +193,43 @@ impl AuthState {
     }
 
     pub fn display_name(&self) -> Option<&str> {
-        self.account
-            .as_ref()
+        self.accounts_state
+            .active_account()
             .map(|account| account.minecraft_profile.name.as_str())
     }
 
     pub fn avatar_png(&self) -> Option<&[u8]> {
-        self.avatar_png.as_deref()
+        self.active_avatar_png.as_deref()
     }
 
     pub fn status_message(&self) -> Option<&str> {
         self.status.status_message()
+    }
+
+    pub fn account_entries(&self) -> Vec<AccountUiEntry> {
+        let active_id = self.accounts_state.active_profile_id.as_deref();
+
+        let mut entries = self
+            .accounts_state
+            .accounts
+            .iter()
+            .map(|account| AccountUiEntry {
+                profile_id: account.minecraft_profile.id.clone(),
+                display_name: account.minecraft_profile.name.clone(),
+                is_active: active_id
+                    .map(|id| id == account.minecraft_profile.id)
+                    .unwrap_or(false),
+            })
+            .collect::<Vec<_>>();
+
+        if let Some(active_pos) = entries.iter().position(|entry| entry.is_active) {
+            if active_pos != 0 {
+                let active = entries.remove(active_pos);
+                entries.insert(0, active);
+            }
+        }
+
+        entries
     }
 }
 

@@ -38,6 +38,7 @@ pub struct Theme {
 #[derive(Debug, Clone)]
 pub struct ThemeCatalog {
     themes: Vec<Theme>,
+    fallback: Theme,
 }
 
 impl ThemeCatalog {
@@ -45,16 +46,17 @@ impl ThemeCatalog {
         let themes_dir = PathBuf::from(THEMES_DIR);
         ensure_themes_dir_and_defaults(&themes_dir);
 
+        let fallback = Theme::matrix_oled();
         let mut themes = load_themes_from_dir(&themes_dir);
         let mut seen = HashSet::new();
         themes.retain(|theme| seen.insert(theme.id.clone()));
 
         if !themes.iter().any(|theme| theme.id == DEFAULT_THEME_ID) {
-            themes.push(Theme::matrix_oled());
+            themes.push(fallback.clone());
         }
 
         themes.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        Self { themes }
+        Self { themes, fallback }
     }
 
     pub fn themes(&self) -> &[Theme] {
@@ -79,7 +81,7 @@ impl ThemeCatalog {
                     .find(|theme| theme.id == DEFAULT_THEME_ID)
             })
             .or_else(|| self.themes.first())
-            .expect("theme catalog must contain at least one theme")
+            .unwrap_or(&self.fallback)
     }
 }
 

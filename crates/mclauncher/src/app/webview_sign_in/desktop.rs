@@ -1,79 +1,10 @@
-use std::io::Write;
-use std::process::{Command, Stdio};
-
-const HELPER_FLAG: &str = "--vertex-webview-signin";
-
-pub fn maybe_run_helper_from_args() -> Result<bool, String> {
-    let mut args = std::env::args();
-    let _ = args.next();
-
-    let Some(flag) = args.next() else {
-        return Ok(false);
-    };
-    if flag != HELPER_FLAG {
-        return Ok(false);
-    }
-
-    let Some(auth_request_uri) = args.next() else {
-        return Err("Missing auth request URL for webview helper".to_owned());
-    };
-    let Some(redirect_uri) = args.next() else {
-        return Err("Missing redirect URI for webview helper".to_owned());
-    };
-
-    if args.next().is_some() {
-        return Err("Unexpected extra arguments for webview helper".to_owned());
-    }
-
-    let callback_url = run_webview_window(&auth_request_uri, &redirect_uri)?;
-    println!("{callback_url}");
-    std::io::stdout()
-        .flush()
-        .map_err(|err| format!("Failed to flush webview helper output: {err}"))?;
-
-    Ok(true)
-}
-
-pub fn open_microsoft_sign_in(
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+pub(super) fn run_webview_window(
     auth_request_uri: &str,
     redirect_uri: &str,
 ) -> Result<String, String> {
-    let current_exe = std::env::current_exe()
-        .map_err(|err| format!("Failed to resolve launcher executable path: {err}"))?;
-
-    let output = Command::new(current_exe)
-        .arg(HELPER_FLAG)
-        .arg(auth_request_uri)
-        .arg(redirect_uri)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|err| format!("Failed to start webview helper process: {err}"))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        if stderr.is_empty() {
-            return Err("Webview sign-in helper failed without an error message".to_owned());
-        }
-
-        return Err(format!("Webview sign-in helper failed: {stderr}"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let callback_url = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .next_back()
-        .ok_or_else(|| "Webview sign-in helper returned no callback URL".to_owned())?;
-
-    Ok(callback_url.to_owned())
-}
-
-#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
-fn run_webview_window(auth_request_uri: &str, redirect_uri: &str) -> Result<String, String> {
     use std::sync::{Arc, Mutex};
+
     use tao::dpi::LogicalSize;
     use tao::event::{Event, WindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -107,6 +38,12 @@ fn run_webview_window(auth_request_uri: &str, redirect_uri: &str) -> Result<Stri
         .with_url(auth_request_uri)
         .with_navigation_handler(move |uri: String| {
             let current_uri = uri;
+
+            // Disallow high-risk local file navigation inside auth webview.
+            if current_uri.starts_with("file://") {
+                return false;
+            }
+
             if current_uri.starts_with(&redirect_prefix) {
                 if let Ok(mut slot) = result_for_nav.lock() {
                     *slot = Some(Ok(current_uri));
@@ -162,6 +99,9 @@ fn run_webview_window(auth_request_uri: &str, redirect_uri: &str) -> Result<Stri
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
-fn run_webview_window(_auth_request_uri: &str, _redirect_uri: &str) -> Result<String, String> {
+pub(super) fn run_webview_window(
+    _auth_request_uri: &str,
+    _redirect_uri: &str,
+) -> Result<String, String> {
     Err("Webview sign-in is not supported on this platform".to_owned())
 }

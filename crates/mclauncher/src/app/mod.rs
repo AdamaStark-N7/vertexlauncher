@@ -4,10 +4,9 @@ use config::{
 use eframe::{self, egui};
 use egui::CentralPanel;
 use instances::{InstanceStore, create_instance, load_store, save_store as save_instance_store};
+use launcher_ui::{screens, ui, window_effects};
 use std::path::PathBuf;
 use textui::TextUi;
-
-use crate::{screens, ui, window_effects};
 
 use self::auth_state::{AuthState, REPAINT_INTERVAL};
 use self::config_format_modal::ModalAction;
@@ -18,7 +17,6 @@ mod config_format_modal;
 mod create_instance_modal;
 mod fonts;
 mod native_options;
-pub(crate) mod tokio_runtime;
 mod webview_sign_in;
 
 struct VertexApp {
@@ -162,6 +160,17 @@ impl eframe::App for VertexApp {
         self.fonts
             .apply_from_config(ctx, &self.config, &mut self.text_ui);
 
+        let profile_accounts = self
+            .auth
+            .account_entries()
+            .into_iter()
+            .map(|entry| ui::top_bar::ProfileAccountOption {
+                profile_id: entry.profile_id,
+                display_name: entry.display_name,
+                is_active: entry.is_active,
+            })
+            .collect::<Vec<_>>();
+
         let top_bar_output = ui::top_bar::render(
             ctx,
             self.active_screen,
@@ -171,14 +180,18 @@ impl eframe::App for VertexApp {
                 avatar_png: self.auth.avatar_png(),
                 sign_in_in_progress: self.auth.sign_in_in_progress(),
                 status_message: self.auth.status_message(),
+                accounts: &profile_accounts,
             },
         );
 
         if top_bar_output.start_sign_in {
             self.auth.start_sign_in();
         }
-        if top_bar_output.sign_out {
-            self.auth.sign_out();
+        if let Some(profile_id) = top_bar_output.select_account_id.as_deref() {
+            self.auth.select_account(profile_id);
+        }
+        if let Some(profile_id) = top_bar_output.remove_account_id.as_deref() {
+            self.auth.remove_account(profile_id);
         }
 
         let sidebar_output = ui::sidebar::render(ctx, self.active_screen, &self.instance_shortcuts);
@@ -310,7 +323,7 @@ impl eframe::App for VertexApp {
 }
 
 pub fn run() -> eframe::Result<()> {
-    tokio_runtime::init();
+    launcher_runtime::init();
     let config_state = load_config();
     let startup_config = match &config_state {
         LoadConfigResult::Loaded(config) => config.clone(),

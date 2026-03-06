@@ -223,13 +223,12 @@ pub mod egui_integration {
         );
 
         defs.families
-            .get_mut(&FontFamily::Proportional)
-            .unwrap()
+            .entry(FontFamily::Proportional)
+            .or_default()
             .insert(0, font_key.to_owned());
-
         defs.families
-            .get_mut(&FontFamily::Monospace)
-            .unwrap()
+            .entry(FontFamily::Monospace)
+            .or_default()
             .insert(0, font_key.to_owned());
 
         ctx.set_fonts(defs);

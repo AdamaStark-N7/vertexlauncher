@@ -12,7 +12,7 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
             title: Some("Vertex Launcher".into()),
             inner_size: Some(egui::vec2(1280.0, 800.0)),
-            min_inner_size: Some(egui::vec2(320.0, 240.0)),
+            min_inner_size: Some(egui::vec2(900.0, 460.0)),
             resizable: Some(true),
             decorations: Some(false),
             transparent: Some(startup_config.window_blur_enabled()),

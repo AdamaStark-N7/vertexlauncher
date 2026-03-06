@@ -8,11 +8,9 @@ use installation::{
     LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry, VersionCatalog,
     fetch_version_catalog_with_refresh,
 };
+use launcher_runtime as tokio_runtime;
+use launcher_ui::ui::components::settings_widgets;
 use textui::{LabelOptions, TextUi};
-
-use crate::ui::components::settings_widgets;
-
-use super::tokio_runtime;
 
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
 const CUSTOM_MODLOADER_INDEX: usize = MODLOADER_OPTIONS.len() - 1;
