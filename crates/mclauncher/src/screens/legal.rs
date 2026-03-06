@@ -25,9 +25,6 @@ const LEGAL_NOTICES: &[LegalNotice] = &[
 ];
 
 pub fn render(ui: &mut Ui) {
-    ui.heading("Legal");
-    ui.add_space(8.0);
-    ui.label("Third-party license notices bundled with Vertex.");
     ui.add_space(12.0);
 
     let content_height = ui.available_height().max(0.0);

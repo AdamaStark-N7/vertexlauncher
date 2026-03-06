@@ -1,4 +1,7 @@
-use config::{Config, ConfigFormat, LoadConfigResult, create_default_config, load_config};
+use config::{
+    Config, ConfigFormat, DropdownSettingId, LoadConfigResult, UiFontFamily, create_default_config,
+    load_config, save_config,
+};
 use eframe::{self, egui};
 use egui::CentralPanel;
 use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
@@ -7,9 +10,20 @@ mod assets;
 mod screens;
 mod ui;
 
+const MAPLE_MONO_NF_REGULAR_TTF: &[u8] = include_bytes!("included_fonts/MapleMono-NF-Regular.ttf");
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct AppliedFontSignature {
+    family: UiFontFamily,
+    size: f32,
+    weight: i32,
+}
+
 struct VertexApp {
-    _font_catalog: FontCatalog,
+    font_catalog: FontCatalog,
+    available_ui_fonts: Vec<UiFontFamily>,
     config: Config,
+    applied_font_signature: Option<AppliedFontSignature>,
     theme: ui::theme::Theme,
     show_config_format_modal: bool,
     selected_config_format: ConfigFormat,
@@ -24,26 +38,7 @@ impl VertexApp {
     fn new(cc: &eframe::CreationContext<'_>, config_state: LoadConfigResult) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
-        let mut cat = FontCatalog::new();
-        cat.load_system();
-
-        let spec = FontSpec::new(&["Maple Mono NF"])
-            .weight(Weight::REGULAR)
-            .slant(Slant::Upright)
-            .stretch(Stretch::Normal);
-
-        if let Ok((bytes, _face_index)) = cat.query_bytes(&spec) {
-            fontloader::egui_integration::install_font_as_primary(
-                &cc.egui_ctx,
-                "maple_mono_nf_regular",
-                bytes,
-                18.0,
-            );
-        } else {
-            eprintln!("Maple Mono NF Regular not found; using egui default fonts.");
-        }
-
-        let (config, show_config_format_modal, selected_config_format, default_config_format) =
+        let (mut config, show_config_format_modal, selected_config_format, default_config_format) =
             match config_state {
                 LoadConfigResult::Loaded(config) => {
                     (config, false, ConfigFormat::Json, ConfigFormat::Json)
@@ -52,10 +47,16 @@ impl VertexApp {
                     (Config::default(), true, default_format, default_format)
                 }
             };
+        config.normalize();
 
-        Self {
-            _font_catalog: cat,
+        let mut cat = FontCatalog::new();
+        cat.load_system();
+        let available_ui_fonts = detect_available_ui_fonts(&cat);
+        let mut app = Self {
+            font_catalog: cat,
+            available_ui_fonts,
             config,
+            applied_font_signature: None,
             theme: ui::theme::Theme::default(),
             show_config_format_modal,
             selected_config_format,
@@ -64,13 +65,18 @@ impl VertexApp {
             active_screen: screens::AppScreen::Library,
             profile_shortcuts: Vec::new(),
             selected_profile_id: None,
-        }
+        };
+        app.ensure_selected_font_is_available();
+        app.apply_ui_font_from_config(&cc.egui_ctx);
+        app
     }
 
     fn create_config_with_choice(&mut self, choice: ConfigFormat) {
         match create_default_config(choice) {
             Ok(config) => {
                 self.config = config;
+                self.config.normalize();
+                self.ensure_selected_font_is_available();
                 self.show_config_format_modal = false;
                 self.config_creation_error = None;
             }
@@ -78,6 +84,64 @@ impl VertexApp {
                 self.config_creation_error = Some(format!("Failed to create config: {err}"));
             }
         }
+    }
+
+    fn apply_ui_font_from_config(&mut self, ctx: &egui::Context) {
+        let desired = AppliedFontSignature {
+            family: self.config.ui_font_family(),
+            size: self.config.ui_font_size(),
+            weight: self.config.ui_font_weight(),
+        };
+
+        if self.applied_font_signature == Some(desired) {
+            return;
+        }
+
+        if desired.family.is_included_default() {
+            Self::install_included_maple_font(ctx, desired.size);
+        } else {
+            let spec = FontSpec::new(desired.family.query_families())
+                .weight(Weight(desired.weight.clamp(100, 900) as u16))
+                .slant(Slant::Upright)
+                .stretch(Stretch::Normal);
+
+            if let Ok((bytes, _face_index)) = self.font_catalog.query_bytes(&spec) {
+                fontloader::egui_integration::install_font_as_primary(
+                    ctx,
+                    font_key(desired.family),
+                    bytes,
+                    desired.size,
+                );
+            } else {
+                eprintln!(
+                    "Configured font '{}' not available; falling back to included default.",
+                    desired.family.label(),
+                );
+                Self::install_included_maple_font(ctx, desired.size);
+            }
+        }
+
+        self.applied_font_signature = Some(desired);
+    }
+
+    fn ensure_selected_font_is_available(&mut self) {
+        let available_ui_fonts = &self.available_ui_fonts;
+        self.config.for_each_dropdown_mut(|setting, value| {
+            if matches!(setting.id, DropdownSettingId::UiFontFamily)
+                && !available_ui_fonts.contains(value)
+            {
+                *value = UiFontFamily::MapleMonoNf;
+            }
+        });
+    }
+
+    fn install_included_maple_font(ctx: &egui::Context, size_pt: f32) {
+        fontloader::egui_integration::install_font_as_primary(
+            ctx,
+            font_key(UiFontFamily::MapleMonoNf),
+            MAPLE_MONO_NF_REGULAR_TTF.to_vec(),
+            size_pt,
+        );
     }
 
     fn render_config_format_modal(&mut self, ctx: &egui::Context) {
@@ -137,8 +201,11 @@ impl VertexApp {
 impl eframe::App for VertexApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.theme.apply(ctx);
+        self.ensure_selected_font_is_available();
+        self.apply_ui_font_from_config(ctx);
         ui::top_bar::render(ctx, self.active_screen);
 
+        let previous_config = self.config.clone();
         let modal_open = self.show_config_format_modal;
         let sidebar_output = ui::sidebar::render(ctx, self.active_screen, &self.profile_shortcuts);
 
@@ -167,6 +234,7 @@ impl eframe::App for VertexApp {
                     self.active_screen,
                     self.selected_profile_id.as_deref(),
                     &mut self.config,
+                    &self.available_ui_fonts,
                 );
             });
 
@@ -174,11 +242,48 @@ impl eframe::App for VertexApp {
             self.render_config_format_modal(ctx);
         }
 
+        self.config.normalize();
+        self.ensure_selected_font_is_available();
+        if self.config != previous_config {
+            if let Err(err) = save_config(&self.config) {
+                eprintln!("Failed to save config: {err}");
+            }
+            self.apply_ui_font_from_config(ctx);
+        }
+
         ui::top_bar::handle_window_resize(ctx);
     }
 }
 
+fn detect_available_ui_fonts(font_catalog: &FontCatalog) -> Vec<UiFontFamily> {
+    let mut available = vec![UiFontFamily::MapleMonoNf];
+
+    for candidate in UiFontFamily::system_options() {
+        let spec = FontSpec::new(candidate.query_families())
+            .weight(Weight::REGULAR)
+            .slant(Slant::Upright)
+            .stretch(Stretch::Normal);
+
+        if font_catalog.query(&spec).is_ok() {
+            available.push(*candidate);
+        }
+    }
+
+    available
+}
+
 fn main() -> eframe::Result<()> {
+    let config_state = load_config();
+    let startup_config = match &config_state {
+        LoadConfigResult::Loaded(config) => config.clone(),
+        LoadConfigResult::Missing { .. } => Config::default(),
+    };
+    let startup_power_preference = if startup_config.low_power_gpu_preferred() {
+        eframe::egui_wgpu::wgpu::PowerPreference::LowPower
+    } else {
+        eframe::egui_wgpu::wgpu::PowerPreference::HighPerformance
+    };
+
     let options: eframe::NativeOptions = eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
             title: Some("Vertex Launcher".into()),
@@ -210,7 +315,7 @@ fn main() -> eframe::Result<()> {
                         backends: eframe::egui_wgpu::wgpu::Backends::VULKAN,
                         ..Default::default()
                     },
-                    power_preference: eframe::egui_wgpu::wgpu::PowerPreference::LowPower,
+                    power_preference: startup_power_preference,
                     ..Default::default()
                 },
             ),
@@ -221,10 +326,19 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
-    let config_state = load_config();
     eframe::run_native(
         "Vertex Launcher",
         options,
         Box::new(|cc| Ok(Box::new(VertexApp::new(cc, config_state)))),
     )
+}
+
+fn font_key(family: UiFontFamily) -> &'static str {
+    match family {
+        UiFontFamily::MapleMonoNf => "ui_font_maple_mono_nf",
+        UiFontFamily::JetBrainsMono => "ui_font_jetbrains_mono",
+        UiFontFamily::FiraCode => "ui_font_fira_code",
+        UiFontFamily::CascadiaCode => "ui_font_cascadia_code",
+        UiFontFamily::Iosevka => "ui_font_iosevka",
+    }
 }

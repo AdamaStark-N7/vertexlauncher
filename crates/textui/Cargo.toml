@@ -1,0 +1,10 @@
+[package]
+name = "textui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cosmic-text = "0.18.2"
+glyphon = "0.10.0"
+pulldown-cmark = "0.13.1"
+syntect = "5.3.0"
