@@ -1,7 +1,8 @@
-use auth::{CachedAccount, DeviceCodeLoginFlow, DeviceCodePrompt, LoginEvent};
+use auth::CachedAccount;
+use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
-use super::tokio_runtime;
+use super::webview_sign_in;
 
 pub const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 
@@ -9,7 +10,7 @@ pub const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 pub enum AuthUiStatus {
     Idle,
     Starting,
-    AwaitingCode,
+    AwaitingBrowser,
     WaitingForAuthorization,
     Success(String),
     Error(String),
@@ -19,22 +20,28 @@ impl AuthUiStatus {
     fn status_message(&self) -> Option<&str> {
         match self {
             AuthUiStatus::Idle => None,
-            AuthUiStatus::Starting => Some("Requesting Microsoft device code..."),
-            AuthUiStatus::AwaitingCode => Some("Waiting for you to finish Microsoft sign-in..."),
-            AuthUiStatus::WaitingForAuthorization => {
-                Some("Waiting for Microsoft authorization confirmation...")
+            AuthUiStatus::Starting => Some("Preparing Microsoft sign-in..."),
+            AuthUiStatus::AwaitingBrowser => {
+                Some("Complete sign-in in the Microsoft webview window...")
             }
+            AuthUiStatus::WaitingForAuthorization => Some("Finalizing sign-in..."),
             AuthUiStatus::Success(message) | AuthUiStatus::Error(message) => Some(message.as_str()),
         }
     }
 }
 
+enum AuthFlowEvent {
+    AwaitingBrowser,
+    WaitingForAuthorization,
+    Completed(CachedAccount),
+    Failed(String),
+}
+
 pub struct AuthState {
     account: Option<CachedAccount>,
     avatar_png: Option<Vec<u8>>,
-    flow: Option<DeviceCodeLoginFlow>,
+    flow: Option<Receiver<AuthFlowEvent>>,
     status: AuthUiStatus,
-    device_prompt: Option<DeviceCodePrompt>,
 }
 
 impl AuthState {
@@ -52,7 +59,6 @@ impl AuthState {
             account,
             flow: None,
             status,
-            device_prompt: None,
         }
     }
 
@@ -60,42 +66,47 @@ impl AuthState {
         let mut flow_finished = false;
 
         if let Some(flow) = self.flow.as_mut() {
-            for event in flow.poll_events() {
-                match event {
-                    LoginEvent::DeviceCode(prompt) => {
-                        self.device_prompt = Some(prompt);
-                        self.status = AuthUiStatus::AwaitingCode;
-                    }
-                    LoginEvent::WaitingForAuthorization => {
-                        self.status = AuthUiStatus::WaitingForAuthorization;
-                    }
-                    LoginEvent::Completed(account) => {
-                        self.avatar_png = account.avatar_png_bytes();
-                        self.status = AuthUiStatus::Success(format!(
-                            "Signed in as {}",
-                            account.minecraft_profile.name
-                        ));
-                        self.account = Some(account.clone());
-
-                        if let Err(err) = auth::save_cached_account(&account) {
-                            self.status = AuthUiStatus::Error(format!(
-                                "Sign-in succeeded, but failed to cache account state: {err}",
-                            ));
+            loop {
+                match flow.try_recv() {
+                    Ok(event) => match event {
+                        AuthFlowEvent::AwaitingBrowser => {
+                            self.status = AuthUiStatus::AwaitingBrowser;
                         }
+                        AuthFlowEvent::WaitingForAuthorization => {
+                            self.status = AuthUiStatus::WaitingForAuthorization;
+                        }
+                        AuthFlowEvent::Completed(account) => {
+                            self.avatar_png = account.avatar_png_bytes();
+                            self.status = AuthUiStatus::Success(format!(
+                                "Signed in as {}",
+                                account.minecraft_profile.name
+                            ));
+                            self.account = Some(account.clone());
 
-                        self.device_prompt = None;
+                            if let Err(err) = auth::save_cached_account(&account) {
+                                self.status = AuthUiStatus::Error(format!(
+                                    "Sign-in succeeded, but failed to cache account state: {err}",
+                                ));
+                            }
+
+                            flow_finished = true;
+                        }
+                        AuthFlowEvent::Failed(err) => {
+                            self.status = AuthUiStatus::Error(err);
+                            flow_finished = true;
+                        }
+                    },
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        if !flow_finished {
+                            self.status = AuthUiStatus::Error(
+                                "Sign-in stopped unexpectedly before completion".to_owned(),
+                            );
+                        }
                         flow_finished = true;
-                    }
-                    LoginEvent::Failed(err) => {
-                        self.status = AuthUiStatus::Error(err);
-                        self.device_prompt = None;
-                        flow_finished = true;
+                        break;
                     }
                 }
-            }
-
-            if flow.is_finished() {
-                flow_finished = true;
             }
         }
 
@@ -117,19 +128,20 @@ impl AuthState {
             }
         };
 
-        self.device_prompt = None;
         self.status = AuthUiStatus::Starting;
-        self.flow = Some(auth::start_device_code_login_with_handle(
-            client_id,
-            tokio_runtime::handle(),
-        ));
+
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            run_sign_in_flow(client_id, sender);
+        });
+
+        self.flow = Some(receiver);
     }
 
     pub fn sign_out(&mut self) {
         self.flow = None;
         self.account = None;
         self.avatar_png = None;
-        self.device_prompt = None;
         self.status = AuthUiStatus::Idle;
 
         if let Err(err) = auth::clear_cached_account() {
@@ -160,9 +172,39 @@ impl AuthState {
     pub fn status_message(&self) -> Option<&str> {
         self.status.status_message()
     }
+}
 
-    pub fn device_prompt(&self) -> Option<&DeviceCodePrompt> {
-        self.device_prompt.as_ref()
+fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
+    let flow = match auth::login_begin(client_id) {
+        Ok(flow) => flow,
+        Err(err) => {
+            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+            return;
+        }
+    };
+
+    let _ = sender.send(AuthFlowEvent::AwaitingBrowser);
+
+    let callback_url = match webview_sign_in::open_microsoft_sign_in(
+        &flow.auth_request_uri,
+        auth::oauth_redirect_uri(),
+    ) {
+        Ok(callback_url) => callback_url,
+        Err(err) => {
+            let _ = sender.send(AuthFlowEvent::Failed(err));
+            return;
+        }
+    };
+
+    let _ = sender.send(AuthFlowEvent::WaitingForAuthorization);
+
+    match auth::login_finish_from_redirect(&callback_url, flow) {
+        Ok(account) => {
+            let _ = sender.send(AuthFlowEvent::Completed(account));
+        }
+        Err(err) => {
+            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+        }
     }
 }
 

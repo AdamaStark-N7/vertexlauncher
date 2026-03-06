@@ -1,7 +1,7 @@
 use std::future::Future;
 use std::sync::OnceLock;
 
-use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::runtime::{Builder, Runtime};
 
 static TOKIO_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
@@ -19,10 +19,6 @@ fn runtime() -> &'static Runtime {
 
 pub fn init() {
     let _ = runtime();
-}
-
-pub fn handle() -> &'static Handle {
-    runtime().handle()
 }
 
 pub fn spawn<F>(future: F) -> tokio::task::JoinHandle<F::Output>

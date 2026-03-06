@@ -1,8 +1,9 @@
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
 use image::{DynamicImage, ImageFormat, RgbaImage, imageops};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{self, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
@@ -12,13 +13,20 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 use tokio::runtime::{Builder, Handle, Runtime};
+use url::Url;
 use zeroize::Zeroizing;
 
 const OAUTH_BASE_URL: &str = "https://login.microsoftonline.com";
+const LIVE_AUTHORIZE_URL: &str = "https://login.live.com/oauth20_authorize.srf";
+const LIVE_TOKEN_URL: &str = "https://login.live.com/oauth20_token.srf";
+const LIVE_REDIRECT_URI: &str = "https://login.live.com/oauth20_desktop.srf";
+const LIVE_SCOPE: &str = "service::user.auth.xboxlive.com::MBI_SSL";
 const XBOX_USER_AUTH_URL: &str = "https://user.auth.xboxlive.com/user/authenticate";
 const XSTS_AUTH_URL: &str = "https://xsts.auth.xboxlive.com/xsts/authorize";
-const MINECRAFT_LOGIN_URL: &str =
+const MINECRAFT_LOGIN_URL: &str = "https://api.minecraftservices.com/launcher/login";
+const MINECRAFT_LOGIN_LEGACY_URL: &str =
     "https://api.minecraftservices.com/authentication/login_with_xbox";
+const MINECRAFT_ENTITLEMENTS_URL: &str = "https://api.minecraftservices.com/entitlements/mcstore";
 const MINECRAFT_PROFILE_URL: &str = "https://api.minecraftservices.com/minecraft/profile";
 const ACCOUNT_CACHE_DEFAULT_PATH: &str = "account_cache.json";
 const DEVICE_CODE_SCOPE: &str = "XboxLive.signin offline_access";
@@ -40,13 +48,27 @@ fn auth_runtime_handle() -> &'static Handle {
 
 /// Built-in Microsoft OAuth client id used when `VERTEX_MSA_CLIENT_ID` is not set.
 /// Leave empty to force env-based configuration.
-pub const BUILTIN_MICROSOFT_CLIENT_ID: &str = "2a674004-0bc7-4136-b863-def55befdfa2";
+pub const BUILTIN_MICROSOFT_CLIENT_ID: &str = "00000000402b5328";
 /// Built-in OAuth tenant used when `VERTEX_MSA_TENANT` is not set.
 pub const BUILTIN_MICROSOFT_TENANT: &str = "consumers";
 
 pub fn builtin_client_id() -> Option<&'static str> {
     let value = BUILTIN_MICROSOFT_CLIENT_ID.trim();
     if value.is_empty() { None } else { Some(value) }
+}
+
+pub fn oauth_redirect_uri() -> &'static str {
+    LIVE_REDIRECT_URI
+}
+
+#[derive(Debug, Clone)]
+pub struct MinecraftLoginFlow {
+    pub verifier: String,
+    pub challenge: String,
+    pub session_id: String,
+    pub auth_request_uri: String,
+    state: String,
+    client_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -200,6 +222,64 @@ pub fn start_device_code_login_with_handle(
     }
 }
 
+pub fn login_begin(client_id: impl Into<String>) -> Result<MinecraftLoginFlow, AuthError> {
+    let client_id = client_id.into();
+    let verifier = generate_pkce_verifier();
+    let challenge = pkce_challenge(&verifier);
+    let state = generate_random_token(24);
+    let session_id = generate_random_token(16);
+
+    let mut auth_url = Url::parse(LIVE_AUTHORIZE_URL)
+        .map_err(|err| AuthError::OAuth(format!("Failed to build authorize URL: {err}")))?;
+    {
+        let mut query = auth_url.query_pairs_mut();
+        query.append_pair("client_id", &client_id);
+        query.append_pair("response_type", "code");
+        query.append_pair("redirect_uri", LIVE_REDIRECT_URI);
+        query.append_pair("scope", LIVE_SCOPE);
+        query.append_pair("code_challenge", &challenge);
+        query.append_pair("code_challenge_method", "S256");
+        query.append_pair("state", &state);
+        query.append_pair("prompt", "select_account");
+    }
+
+    Ok(MinecraftLoginFlow {
+        verifier,
+        challenge,
+        session_id,
+        auth_request_uri: auth_url.to_string(),
+        state,
+        client_id,
+    })
+}
+
+pub fn login_finish(code: &str, flow: MinecraftLoginFlow) -> Result<CachedAccount, AuthError> {
+    let agent = build_http_agent();
+
+    let microsoft_token = exchange_auth_code_for_microsoft_token(&agent, code, &flow)?;
+    let microsoft_access_token = Zeroizing::new(microsoft_token.access_token);
+    let xbox_user = authenticate_with_xbox_live(&agent, &microsoft_access_token)?;
+    let xsts_token = Zeroizing::new(authorize_xsts(&agent, &xbox_user.token)?);
+
+    let minecraft_token = Zeroizing::new(authenticate_with_minecraft(
+        &agent,
+        &xbox_user.user_hash,
+        &xsts_token,
+    )?);
+    let _ = fetch_minecraft_entitlements(&agent, &minecraft_token);
+    let profile = fetch_minecraft_profile(&agent, &minecraft_token)?;
+
+    Ok(build_cached_account(&agent, profile))
+}
+
+pub fn login_finish_from_redirect(
+    callback_url: &str,
+    flow: MinecraftLoginFlow,
+) -> Result<CachedAccount, AuthError> {
+    let code = extract_authorization_code(callback_url, &flow.state)?;
+    login_finish(&code, flow)
+}
+
 pub fn load_cached_account() -> Result<Option<CachedAccount>, AuthError> {
     let path = account_cache_path();
     if !path.exists() {
@@ -226,11 +306,7 @@ pub fn clear_cached_account() -> Result<(), AuthError> {
 }
 
 fn run_device_code_login(client_id: String, sender: &Sender<LoginEvent>) -> Result<(), AuthError> {
-    let agent = ureq::AgentBuilder::new()
-        .timeout_connect(Duration::from_secs(10))
-        .timeout_read(Duration::from_secs(20))
-        .timeout_write(Duration::from_secs(20))
-        .build();
+    let agent = build_http_agent();
     let tenant = oauth_tenant();
 
     let device_code = request_device_code(&agent, &client_id, &tenant)?;
@@ -257,8 +333,113 @@ fn run_device_code_login(client_id: String, sender: &Sender<LoginEvent>) -> Resu
         &xbox_user.user_hash,
         &xsts_token,
     )?);
+    let _ = fetch_minecraft_entitlements(&agent, &minecraft_token);
     let profile = fetch_minecraft_profile(&agent, &minecraft_token)?;
+    let account = build_cached_account(&agent, profile);
 
+    let _ = sender.send(LoginEvent::Completed(account));
+    Ok(())
+}
+
+fn build_http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(10))
+        .timeout_read(Duration::from_secs(20))
+        .timeout_write(Duration::from_secs(20))
+        .build()
+}
+
+fn exchange_auth_code_for_microsoft_token(
+    agent: &ureq::Agent,
+    code: &str,
+    flow: &MinecraftLoginFlow,
+) -> Result<MicrosoftTokenResponse, AuthError> {
+    let response = agent
+        .post(LIVE_TOKEN_URL)
+        .set("Accept", "application/json")
+        .send_form(&[
+            ("client_id", flow.client_id.as_str()),
+            ("code", code),
+            ("code_verifier", flow.verifier.as_str()),
+            ("grant_type", "authorization_code"),
+            ("redirect_uri", LIVE_REDIRECT_URI),
+            ("scope", LIVE_SCOPE),
+        ]);
+
+    match response {
+        Ok(ok) => Ok(ok.into_json::<MicrosoftTokenResponse>()?),
+        Err(ureq::Error::Status(_, err_response)) => {
+            if let Ok(oauth_error) = err_response.into_json::<OAuthErrorResponse>() {
+                let description = oauth_error
+                    .error_description
+                    .unwrap_or_else(|| "No details provided".to_owned());
+                return Err(AuthError::OAuth(format!(
+                    "{}: {}",
+                    oauth_error.error, description
+                )));
+            }
+
+            Err(AuthError::OAuth(
+                "Authorization-code exchange failed with an unknown response".to_owned(),
+            ))
+        }
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
+fn extract_authorization_code(
+    callback_url: &str,
+    expected_state: &str,
+) -> Result<String, AuthError> {
+    let parsed = Url::parse(callback_url)
+        .map_err(|err| AuthError::OAuth(format!("Failed to parse callback URL: {err}")))?;
+
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("login.live.com")
+        || parsed.path() != "/oauth20_desktop.srf"
+    {
+        return Err(AuthError::OAuth(
+            "Microsoft callback URL did not match the expected redirect URI".to_owned(),
+        ));
+    }
+
+    let mut code = None;
+    let mut state = None;
+    let mut error = None;
+    let mut error_description = None;
+
+    for (key, value) in parsed.query_pairs() {
+        match key.as_ref() {
+            "code" => code = Some(value.into_owned()),
+            "state" => state = Some(value.into_owned()),
+            "error" => error = Some(value.into_owned()),
+            "error_description" => error_description = Some(value.into_owned()),
+            _ => {}
+        }
+    }
+
+    if let Some(error) = error {
+        let description = error_description.unwrap_or_else(|| "No details provided".to_owned());
+        return Err(AuthError::OAuth(format!(
+            "Microsoft sign-in failed: {error}: {description}"
+        )));
+    }
+
+    let returned_state = state.ok_or_else(|| {
+        AuthError::OAuth("Microsoft callback was missing the OAuth state".to_owned())
+    })?;
+    if returned_state != expected_state {
+        return Err(AuthError::OAuth(
+            "Microsoft callback state did not match the login session".to_owned(),
+        ));
+    }
+
+    code.ok_or_else(|| {
+        AuthError::OAuth("Microsoft callback did not include an auth code".to_owned())
+    })
+}
+
+fn build_cached_account(agent: &ureq::Agent, profile: MinecraftProfileResponse) -> CachedAccount {
     let mut minecraft_profile = MinecraftProfileState {
         id: profile.id,
         name: profile.name,
@@ -267,7 +448,7 @@ fn run_device_code_login(client_id: String, sender: &Sender<LoginEvent>) -> Resu
     };
 
     for raw_skin in profile.skins {
-        let texture_png_base64 = fetch_texture_base64(&agent, &raw_skin.url);
+        let texture_png_base64 = fetch_texture_base64(agent, &raw_skin.url);
         minecraft_profile.skins.push(MinecraftSkinState {
             id: raw_skin.id,
             state: raw_skin.state,
@@ -279,7 +460,7 @@ fn run_device_code_login(client_id: String, sender: &Sender<LoginEvent>) -> Resu
     }
 
     for raw_cape in profile.capes {
-        let texture_png_base64 = fetch_texture_base64(&agent, &raw_cape.url);
+        let texture_png_base64 = fetch_texture_base64(agent, &raw_cape.url);
         minecraft_profile.capes.push(MinecraftCapeState {
             id: raw_cape.id,
             state: raw_cape.state,
@@ -291,14 +472,11 @@ fn run_device_code_login(client_id: String, sender: &Sender<LoginEvent>) -> Resu
 
     let avatar_png_base64 = generate_avatar_from_profile(&minecraft_profile);
 
-    let account = CachedAccount {
+    CachedAccount {
         minecraft_profile,
         avatar_png_base64,
         cached_at_unix_secs: unix_now_secs(),
-    };
-
-    let _ = sender.send(LoginEvent::Completed(account));
-    Ok(())
+    }
 }
 
 fn request_device_code(
@@ -419,6 +597,30 @@ fn authenticate_with_xbox_live(
     agent: &ureq::Agent,
     microsoft_access_token: &str,
 ) -> Result<XboxUserAuthResult, AuthError> {
+    match authenticate_with_xbox_live_rps(agent, microsoft_access_token, "d=") {
+        Ok(result) => Ok(result),
+        Err(first_err) => {
+            let first_is_401 = matches!(&first_err, AuthError::Http(message) if message.starts_with("HTTP status 401"));
+
+            if !first_is_401 {
+                return Err(first_err);
+            }
+
+            match authenticate_with_xbox_live_rps(agent, microsoft_access_token, "t=") {
+                Ok(result) => Ok(result),
+                Err(second_err) => Err(AuthError::Http(format!(
+                    "Xbox user auth failed with both RPS ticket formats (d= then t=). First error: {first_err}; second error: {second_err}",
+                ))),
+            }
+        }
+    }
+}
+
+fn authenticate_with_xbox_live_rps(
+    agent: &ureq::Agent,
+    microsoft_access_token: &str,
+    ticket_prefix: &str,
+) -> Result<XboxUserAuthResult, AuthError> {
     let response = agent
         .post(XBOX_USER_AUTH_URL)
         .set("Accept", "application/json")
@@ -426,7 +628,7 @@ fn authenticate_with_xbox_live(
             "Properties": {
                 "AuthMethod": "RPS",
                 "SiteName": "user.auth.xboxlive.com",
-                "RpsTicket": format!("d={microsoft_access_token}"),
+                "RpsTicket": format!("{ticket_prefix}{microsoft_access_token}"),
             },
             "RelyingParty": "http://auth.xboxlive.com",
             "TokenType": "JWT",
@@ -480,31 +682,59 @@ fn authenticate_with_minecraft(
     user_hash: &str,
     xsts_token: &str,
 ) -> Result<String, AuthError> {
-    let identity_token = format!("XBL3.0 x={user_hash};{xsts_token}");
-    let response = agent
+    let xtoken = format!("XBL3.0 x={user_hash};{xsts_token}");
+    let launcher_response = agent
         .post(MINECRAFT_LOGIN_URL)
         .set("Accept", "application/json")
         .send_json(json!({
-            "identityToken": identity_token,
+            "platform": "PC_LAUNCHER",
+            "xtoken": xtoken,
         }));
 
-    match response {
+    match launcher_response {
         Ok(ok) => {
             let parsed = ok.into_json::<MinecraftLoginResponse>()?;
             Ok(parsed.access_token)
         }
-        Err(ureq::Error::Status(403, err_response)) => {
-            let mut body = String::new();
-            let _ = err_response.into_reader().read_to_string(&mut body);
-            if body.contains("Invalid app registration") {
-                return Err(AuthError::OAuth(
-                    "Minecraft services rejected this Azure app registration (403 Invalid app registration). \
-Register/verify the app for Minecraft API access at https://aka.ms/AppRegInfo and then retry."
-                        .to_owned(),
-                ));
-            }
+        Err(ureq::Error::Status(code, response)) if matches!(code, 400 | 401 | 403 | 404) => {
+            let launcher_error = map_http_error(ureq::Error::Status(code, response)).to_string();
 
-            Err(AuthError::Http(format!("HTTP status 403: {}", body.trim())))
+            let legacy_response = agent
+                .post(MINECRAFT_LOGIN_LEGACY_URL)
+                .set("Accept", "application/json")
+                .send_json(json!({
+                    "identityToken": format!("XBL3.0 x={user_hash};{xsts_token}"),
+                }));
+
+            match legacy_response {
+                Ok(ok) => {
+                    let parsed = ok.into_json::<MinecraftLoginResponse>()?;
+                    Ok(parsed.access_token)
+                }
+                Err(err) => Err(AuthError::Http(format!(
+                    "Minecraft token exchange failed on both endpoints. launcher/login error: {launcher_error}; legacy login_with_xbox error: {}",
+                    map_http_error(err)
+                ))),
+            }
+        }
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
+fn fetch_minecraft_entitlements(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+) -> Result<(), AuthError> {
+    let response = agent
+        .get(MINECRAFT_ENTITLEMENTS_URL)
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {minecraft_access_token}"))
+        .call();
+
+    match response {
+        Ok(ok) => {
+            let _ = ok.into_json::<serde_json::Value>()?;
+            Ok(())
         }
         Err(err) => Err(map_http_error(err)),
     }
@@ -704,6 +934,25 @@ and add a 'Mobile and desktop applications' platform (native client)."
     }
 
     AuthError::OAuth(format!("{error}: {description}"))
+}
+
+fn generate_pkce_verifier() -> String {
+    generate_random_token(64)
+}
+
+fn pkce_challenge(verifier: &str) -> String {
+    let digest = Sha256::digest(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn generate_random_token(length: usize) -> String {
+    let mut out = Vec::with_capacity(length);
+    while out.len() < length {
+        let chunk: [u8; 48] = rand::random();
+        let encoded = URL_SAFE_NO_PAD.encode(chunk);
+        out.extend_from_slice(encoded.as_bytes());
+    }
+    String::from_utf8_lossy(&out[..length]).to_string()
 }
 
 fn encode_base64(bytes: &[u8]) -> String {

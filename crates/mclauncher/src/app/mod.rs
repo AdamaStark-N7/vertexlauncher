@@ -19,6 +19,7 @@ mod create_instance_modal;
 mod fonts;
 mod native_options;
 pub(crate) mod tokio_runtime;
+mod webview_sign_in;
 
 struct VertexApp {
     fonts: FontController,
@@ -161,7 +162,6 @@ impl eframe::App for VertexApp {
         self.fonts
             .apply_from_config(ctx, &self.config, &mut self.text_ui);
 
-        let device_prompt = self.auth.device_prompt();
         let top_bar_output = ui::top_bar::render(
             ctx,
             self.active_screen,
@@ -171,10 +171,6 @@ impl eframe::App for VertexApp {
                 avatar_png: self.auth.avatar_png(),
                 sign_in_in_progress: self.auth.sign_in_in_progress(),
                 status_message: self.auth.status_message(),
-                device_user_code: device_prompt.map(|prompt| prompt.user_code.as_str()),
-                verification_uri: device_prompt.map(|prompt| prompt.verification_uri.as_str()),
-                verification_uri_complete: device_prompt
-                    .and_then(|prompt| prompt.verification_uri_complete.as_deref()),
             },
         );
 
@@ -328,4 +324,8 @@ pub fn run() -> eframe::Result<()> {
         options,
         Box::new(move |cc| Ok(Box::new(VertexApp::new(cc, config_state)))),
     )
+}
+
+pub fn maybe_run_webview_helper() -> Result<bool, String> {
+    webview_sign_in::maybe_run_helper_from_args()
 }

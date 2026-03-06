@@ -31,9 +31,6 @@ pub struct ProfileUiModel<'a> {
     pub avatar_png: Option<&'a [u8]>,
     pub sign_in_in_progress: bool,
     pub status_message: Option<&'a str>,
-    pub device_user_code: Option<&'a str>,
-    pub verification_uri: Option<&'a str>,
-    pub verification_uri_complete: Option<&'a str>,
 }
 
 pub fn render(
@@ -313,12 +310,6 @@ fn render_profile_popup(
         wrap: false,
         ..LabelOptions::default()
     };
-    let mut code_style = body_style.clone();
-    code_style.monospace = true;
-    code_style.wrap = false;
-    code_style.font_size = 20.0;
-    code_style.line_height = 24.0;
-    code_style.weight = 700;
     let mut muted_style = body_style.clone();
     muted_style.color = muted_text;
 
@@ -364,100 +355,6 @@ fn render_profile_popup(
                 let _ = text_ui.label(ui, "profile_popup_status", message, &muted_style);
             }
         });
-
-    if let Some(user_code) = profile_ui.device_user_code {
-        egui::Frame::new()
-            .fill(ui.visuals().widgets.inactive.bg_fill)
-            .stroke(egui::Stroke::new(
-                1.0,
-                ui.visuals().widgets.inactive.bg_stroke.color,
-            ))
-            .corner_radius(egui::CornerRadius::same(10))
-            .inner_margin(egui::Margin::same(10))
-            .show(ui, |ui| {
-                let _ = text_ui.label(
-                    ui,
-                    "profile_popup_code_caption",
-                    "Enter this code at Microsoft sign-in:",
-                    &muted_style,
-                );
-                let code_bar_size = egui::vec2(ui.available_width(), 40.0);
-                let (code_bar_rect, _) = ui.allocate_exact_size(code_bar_size, Sense::hover());
-                ui.painter().rect(
-                    code_bar_rect,
-                    egui::CornerRadius::same(9),
-                    ui.visuals().faint_bg_color,
-                    egui::Stroke::new(1.6, ui.visuals().widgets.hovered.bg_stroke.color),
-                    egui::StrokeKind::Inside,
-                );
-                ui.painter().text(
-                    code_bar_rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    user_code,
-                    egui::FontId::monospace(code_style.font_size),
-                    ui.visuals().text_color(),
-                );
-
-                ui.vertical(|ui| {
-                    let mut compact_button_style = button_style.clone();
-                    compact_button_style.min_size = egui::vec2(ui.available_width(), 30.0);
-                    compact_button_style.fill = ui.visuals().widgets.noninteractive.bg_fill;
-                    compact_button_style.fill_hovered = ui.visuals().widgets.inactive.bg_fill;
-                    compact_button_style.fill_active = ui.visuals().widgets.hovered.bg_fill;
-                    compact_button_style.fill_selected = ui.visuals().widgets.inactive.bg_fill;
-                    compact_button_style.stroke =
-                        egui::Stroke::new(1.8, ui.visuals().widgets.noninteractive.fg_stroke.color);
-
-                    if text_ui
-                        .button(
-                            ui,
-                            "profile_popup_copy_code",
-                            "Copy code",
-                            &compact_button_style,
-                        )
-                        .clicked()
-                    {
-                        ui.ctx().copy_text(user_code.to_owned());
-                    }
-
-                    if let Some(url) = profile_ui
-                        .verification_uri_complete
-                        .or(profile_ui.verification_uri)
-                    {
-                        if text_ui
-                            .button(
-                                ui,
-                                "profile_popup_open_url",
-                                "Open sign-in page",
-                                &compact_button_style,
-                            )
-                            .clicked()
-                        {
-                            ui.ctx().open_url(egui::OpenUrl::same_tab(url));
-                        }
-
-                        if text_ui
-                            .button(
-                                ui,
-                                "profile_popup_copy_url",
-                                "Copy sign-in URL",
-                                &compact_button_style,
-                            )
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(url.to_owned());
-                        }
-                    }
-                });
-            });
-
-        let _ = text_ui.label(
-            ui,
-            "profile_popup_keep_open_hint",
-            "This menu stays open while you complete sign-in.",
-            &muted_style,
-        );
-    }
 
     ui.add_space(2.0);
     ui.separator();
