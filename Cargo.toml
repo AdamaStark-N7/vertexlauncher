@@ -9,13 +9,13 @@ members = [
     "crates/instances",
     "crates/launcher_runtime",
     "crates/launcher_ui",
-    "crates/mclauncher",
+    "crates/vertexlauncher",
     "crates/modprovider",
     "crates/modrinth",
     "crates/textui",
 ]
 default-members = [
-    "crates/mclauncher",
+    "crates/vertexlauncher",
 ]
 
 [workspace.dependencies]

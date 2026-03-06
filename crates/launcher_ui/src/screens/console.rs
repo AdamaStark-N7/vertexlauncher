@@ -73,15 +73,21 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
 }
 
 fn color_for_line(ui: &Ui, line: &str) -> egui::Color32 {
-    if line.contains("][ERROR][") {
+    if has_level(line, "ERROR") {
         ui.visuals().error_fg_color
-    } else if line.contains("][WARN][") {
+    } else if has_level(line, "WARN") {
         ui.visuals().warn_fg_color
-    } else if line.contains("][INFO][") {
+    } else if has_level(line, "INFO") {
         ui.visuals().hyperlink_color
-    } else if line.contains("][DEBUG][") || line.contains("][TRACE][") {
+    } else if has_level(line, "DEBUG") || has_level(line, "TRACE") {
         ui.visuals().weak_text_color()
     } else {
         ui.visuals().text_color()
     }
+}
+
+fn has_level(line: &str, level: &str) -> bool {
+    let with_module = format!("][{level}][");
+    let without_module = format!("][{level}]:");
+    line.contains(&with_module) || line.contains(&without_module)
 }

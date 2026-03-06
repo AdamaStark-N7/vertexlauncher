@@ -5,3 +5,4 @@ Cargo.lock
 config.json
 config.toml
 cache
+logs/

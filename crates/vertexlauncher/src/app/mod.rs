@@ -299,7 +299,7 @@ impl eframe::App for VertexApp {
             .ensure_selected_font_is_available(&mut self.config);
         if self.config != previous_config {
             if let Err(err) = save_config(&self.config) {
-                tracing::error!(target: "mclauncher/app/config", "Failed to save config: {err}");
+                tracing::error!(target: "vertexlauncher/app/config", "Failed to save config: {err}");
             }
             self.fonts
                 .apply_from_config(ctx, &self.config, &mut self.text_ui);
@@ -322,7 +322,7 @@ impl eframe::App for VertexApp {
             }
             self.refresh_instance_shortcuts();
             if let Err(err) = save_instance_store(&self.instance_store) {
-                tracing::error!(target: "mclauncher/app/instances", "Failed to save instances: {err}");
+                tracing::error!(target: "vertexlauncher/app/instances", "Failed to save instances: {err}");
             }
         }
 
@@ -332,7 +332,7 @@ impl eframe::App for VertexApp {
 
 pub fn run() -> eframe::Result<()> {
     let log_path = init_tracing();
-    tracing::info!(target: "mclauncher/app/startup", "Launcher started. Log file: {}", log_path.display());
+    tracing::info!(target: "vertexlauncher/app/startup", "Launcher started. Log file: {}", log_path.display());
     launcher_runtime::init();
     let config_state = load_config();
     let startup_config = match &config_state {
@@ -375,7 +375,11 @@ where
         } else {
             visitor.message
         };
-        let line = format!("[{date}][{time}][{level}][{module_path}]: {message}");
+        let line = if should_omit_module_path(meta.target(), &module_path) {
+            format!("[{date}][{time}][{level}]: {message}")
+        } else {
+            format!("[{date}][{time}][{level}][{module_path}]: {message}")
+        };
 
         console::push_line(line.clone());
         if let Ok(mut file) = self.file.lock() {
@@ -456,4 +460,8 @@ fn format_module_path(target: &str, file: Option<&str>) -> String {
         return format!("{crate_name}/{}", rest.replace('\\', "/"));
     }
     target.replace("::", "/")
+}
+
+fn should_omit_module_path(target: &str, module_path: &str) -> bool {
+    target == "log" || module_path == "log"
 }
