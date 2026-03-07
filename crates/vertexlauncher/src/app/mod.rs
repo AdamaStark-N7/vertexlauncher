@@ -195,9 +195,19 @@ impl eframe::App for VertexApp {
             })
             .collect::<Vec<_>>();
 
+        let top_bar_section_label = if self.active_screen == screens::AppScreen::Instance {
+            self.selected_instance_id
+                .as_deref()
+                .and_then(|id| self.instance_store.find(id))
+                .map(|instance| instance.name.clone())
+                .unwrap_or_else(|| self.active_screen.label().to_owned())
+        } else {
+            self.active_screen.label().to_owned()
+        };
+
         let top_bar_output = ui::top_bar::render(
             ctx,
-            self.active_screen,
+            top_bar_section_label.as_str(),
             &mut self.text_ui,
             ui::top_bar::ProfileUiModel {
                 display_name: self.auth.display_name(),
@@ -277,6 +287,9 @@ impl eframe::App for VertexApp {
 
         if screen_output.instances_changed {
             self.refresh_instance_shortcuts();
+        }
+        if let Some(requested_screen) = screen_output.requested_screen {
+            self.active_screen = requested_screen;
         }
 
         if self.show_config_format_modal {

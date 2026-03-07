@@ -46,6 +46,7 @@ impl AppScreen {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScreenOutput {
     pub instances_changed: bool,
+    pub requested_screen: Option<AppScreen>,
 }
 
 #[derive(Debug, Clone)]
@@ -92,8 +93,8 @@ pub fn render(
             console::render(ui, text_ui);
             ScreenOutput::default()
         }
-        AppScreen::Instance => ScreenOutput {
-            instances_changed: instance::render(
+        AppScreen::Instance => {
+            let output = instance::render(
                 ui,
                 text_ui,
                 selected_instance_id,
@@ -102,7 +103,11 @@ pub fn render(
                 active_account_owns_minecraft,
                 instances,
                 config,
-            ),
-        },
+            );
+            ScreenOutput {
+                instances_changed: output.instances_changed,
+                requested_screen: output.requested_screen,
+            }
+        }
     }
 }

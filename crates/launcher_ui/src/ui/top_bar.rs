@@ -9,7 +9,6 @@ use textui::{ButtonOptions, LabelOptions, TextUi};
 
 use crate::{
     assets,
-    screens::AppScreen,
     ui::{components::icon_button, style},
 };
 
@@ -48,7 +47,7 @@ pub struct ProfileUiModel<'a> {
 
 pub fn render(
     ctx: &Context,
-    active_screen: AppScreen,
+    section_label: &str,
     text_ui: &mut TextUi,
     profile_ui: ProfileUiModel<'_>,
 ) -> TopBarOutput {
@@ -107,8 +106,8 @@ pub fn render(
                     section_style.color = ui.visuals().weak_text_color();
                     let _ = text_ui.label(
                         ui,
-                        ("topbar_screen", active_screen.label()),
-                        active_screen.label(),
+                        ("topbar_screen", section_label),
+                        section_label,
                         &section_style,
                     );
                 });
