@@ -99,7 +99,7 @@ pub fn render(
             }
         }
         AppScreen::Skins => {
-            skins::render(ui, text_ui, selected_instance_id);
+            skins::render(ui, text_ui, selected_instance_id, active_launch_auth);
             ScreenOutput::default()
         }
         AppScreen::Settings => {

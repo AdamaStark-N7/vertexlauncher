@@ -14,6 +14,10 @@ pub(crate) const MINECRAFT_ENTITLEMENTS_URL: &str =
     "https://api.minecraftservices.com/entitlements/mcstore";
 pub(crate) const MINECRAFT_PROFILE_URL: &str =
     "https://api.minecraftservices.com/minecraft/profile";
+pub(crate) const MINECRAFT_PROFILE_SKINS_URL: &str =
+    "https://api.minecraftservices.com/minecraft/profile/skins";
+pub(crate) const MINECRAFT_PROFILE_CAPE_ACTIVE_URL: &str =
+    "https://api.minecraftservices.com/minecraft/profile/capes/active";
 
 pub(crate) const ACCOUNT_CACHE_FILENAME: &str = "account_cache.json";
 pub(crate) const ACCOUNT_CACHE_APP_DIR: &str = "vertex-launcher";

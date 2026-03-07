@@ -8,10 +8,14 @@ use zeroize::Zeroizing;
 
 use crate::constants::{
     MINECRAFT_ENTITLEMENTS_URL, MINECRAFT_LOGIN_LEGACY_URL, MINECRAFT_LOGIN_URL,
-    MINECRAFT_PROFILE_URL, XBOX_USER_AUTH_URL, XSTS_AUTH_URL,
+    MINECRAFT_PROFILE_CAPE_ACTIVE_URL, MINECRAFT_PROFILE_SKINS_URL, MINECRAFT_PROFILE_URL,
+    XBOX_USER_AUTH_URL, XSTS_AUTH_URL,
 };
 use crate::error::{AuthError, map_http_error, prefix_auth_error};
-use crate::types::{CachedAccount, MinecraftCapeState, MinecraftProfileState, MinecraftSkinState};
+use crate::types::{
+    CachedAccount, MinecraftCapeState, MinecraftProfileState, MinecraftSkinState,
+    MinecraftSkinVariant,
+};
 use crate::util::{decode_base64, encode_base64, unix_now_secs};
 
 pub(crate) fn complete_minecraft_login(
@@ -223,40 +227,90 @@ fn fetch_minecraft_profile(
     }
 }
 
+pub(crate) fn fetch_profile_state_with_textures(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+) -> Result<MinecraftProfileState, AuthError> {
+    let profile = fetch_minecraft_profile(agent, minecraft_access_token)?;
+    Ok(build_profile_state_from_response(agent, profile))
+}
+
+pub(crate) fn upload_profile_skin(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+    skin_png_bytes: &[u8],
+    variant: MinecraftSkinVariant,
+) -> Result<(), AuthError> {
+    let boundary = format!("----vertexlauncher-{}", unix_now_secs());
+    let mut body = Vec::with_capacity(skin_png_bytes.len() + 512);
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"variant\"\r\n\r\n");
+    body.extend_from_slice(variant.as_api_str().as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
+    body.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"skin.png\"\r\n",
+    );
+    body.extend_from_slice(b"Content-Type: image/png\r\n\r\n");
+    body.extend_from_slice(skin_png_bytes);
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+
+    let response = agent
+        .post(MINECRAFT_PROFILE_SKINS_URL)
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {minecraft_access_token}"))
+        .set(
+            "Content-Type",
+            &format!("multipart/form-data; boundary={boundary}"),
+        )
+        .send_bytes(&body);
+
+    match response {
+        Ok(_) => Ok(()),
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
+pub(crate) fn set_active_profile_cape(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+    cape_id: &str,
+) -> Result<(), AuthError> {
+    let response = agent
+        .put(MINECRAFT_PROFILE_CAPE_ACTIVE_URL)
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {minecraft_access_token}"))
+        .send_json(json!({ "capeId": cape_id }));
+
+    match response {
+        Ok(_) => Ok(()),
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
+pub(crate) fn clear_active_profile_cape(
+    agent: &ureq::Agent,
+    minecraft_access_token: &str,
+) -> Result<(), AuthError> {
+    let response = agent
+        .delete(MINECRAFT_PROFILE_CAPE_ACTIVE_URL)
+        .set("Accept", "application/json")
+        .set("Authorization", &format!("Bearer {minecraft_access_token}"))
+        .call();
+
+    match response {
+        Ok(_) => Ok(()),
+        Err(err) => Err(map_http_error(err)),
+    }
+}
+
 fn build_cached_account(
     agent: &ureq::Agent,
     profile: MinecraftProfileResponse,
     minecraft_access_token: &str,
 ) -> CachedAccount {
-    let mut minecraft_profile = MinecraftProfileState {
-        id: profile.id,
-        name: profile.name,
-        skins: Vec::new(),
-        capes: Vec::new(),
-    };
-
-    for raw_skin in profile.skins {
-        let texture_png_base64 = fetch_texture_base64(agent, &raw_skin.url);
-        minecraft_profile.skins.push(MinecraftSkinState {
-            id: raw_skin.id,
-            state: raw_skin.state,
-            url: raw_skin.url,
-            variant: raw_skin.variant,
-            alias: raw_skin.alias,
-            texture_png_base64,
-        });
-    }
-
-    for raw_cape in profile.capes {
-        let texture_png_base64 = fetch_texture_base64(agent, &raw_cape.url);
-        minecraft_profile.capes.push(MinecraftCapeState {
-            id: raw_cape.id,
-            state: raw_cape.state,
-            url: raw_cape.url,
-            alias: raw_cape.alias,
-            texture_png_base64,
-        });
-    }
+    let minecraft_profile = build_profile_state_from_response(agent, profile);
 
     let avatar_png_base64 = generate_avatar_from_profile(&minecraft_profile);
 
@@ -268,6 +322,43 @@ fn build_cached_account(
         avatar_png_base64,
         cached_at_unix_secs: unix_now_secs(),
     }
+}
+
+fn build_profile_state_from_response(
+    agent: &ureq::Agent,
+    profile: MinecraftProfileResponse,
+) -> MinecraftProfileState {
+    let mut out = MinecraftProfileState {
+        id: profile.id,
+        name: profile.name,
+        skins: Vec::new(),
+        capes: Vec::new(),
+    };
+
+    for raw_skin in profile.skins {
+        let texture_png_base64 = fetch_texture_base64(agent, &raw_skin.url);
+        out.skins.push(MinecraftSkinState {
+            id: raw_skin.id,
+            state: raw_skin.state,
+            url: raw_skin.url,
+            variant: raw_skin.variant,
+            alias: raw_skin.alias,
+            texture_png_base64,
+        });
+    }
+
+    for raw_cape in profile.capes {
+        let texture_png_base64 = fetch_texture_base64(agent, &raw_cape.url);
+        out.capes.push(MinecraftCapeState {
+            id: raw_cape.id,
+            state: raw_cape.state,
+            url: raw_cape.url,
+            alias: raw_cape.alias,
+            texture_png_base64,
+        });
+    }
+
+    out
 }
 
 fn fetch_texture_base64(agent: &ureq::Agent, url: &str) -> Option<String> {

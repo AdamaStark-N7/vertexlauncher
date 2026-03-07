@@ -15,6 +15,22 @@ pub struct MinecraftLoginFlow {
     pub(crate) client_id: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MinecraftSkinVariant {
+    Classic,
+    Slim,
+}
+
+impl MinecraftSkinVariant {
+    pub fn as_api_str(self) -> &'static str {
+        match self {
+            MinecraftSkinVariant::Classic => "classic",
+            MinecraftSkinVariant::Slim => "slim",
+        }
+    }
+}
+
 /// One Minecraft skin entry from profile API.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MinecraftSkinState {
@@ -74,6 +90,24 @@ impl CachedAccount {
     /// Decodes avatar PNG bytes from base64, if present and valid.
     pub fn avatar_png_bytes(&self) -> Option<Vec<u8>> {
         self.avatar_png_base64
+            .as_deref()
+            .and_then(|raw| decode_base64(raw).ok())
+    }
+}
+
+impl MinecraftSkinState {
+    /// Decodes skin PNG bytes from base64, if present and valid.
+    pub fn texture_png_bytes(&self) -> Option<Vec<u8>> {
+        self.texture_png_base64
+            .as_deref()
+            .and_then(|raw| decode_base64(raw).ok())
+    }
+}
+
+impl MinecraftCapeState {
+    /// Decodes cape PNG bytes from base64, if present and valid.
+    pub fn texture_png_bytes(&self) -> Option<Vec<u8>> {
+        self.texture_png_base64
             .as_deref()
             .and_then(|raw| decode_base64(raw).ok())
     }

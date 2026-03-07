@@ -16,6 +16,9 @@ launcher_runtime.workspace = true
 toml.workspace = true
 raw-window-handle = "0.6.2"
 tracing.workspace = true
+auth.workspace = true
+image.workspace = true
+rfd = "0.15.4"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_System_SystemInformation"] }

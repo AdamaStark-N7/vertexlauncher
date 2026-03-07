@@ -19,6 +19,7 @@ pub use error::AuthError;
 pub use types::{
     CachedAccount, CachedAccountsState, DeviceCodeLoginFlow, DeviceCodePrompt, LoginEvent,
     MinecraftCapeState, MinecraftLoginFlow, MinecraftProfileState, MinecraftSkinState,
+    MinecraftSkinVariant,
 };
 
 /// Returns the built-in Microsoft OAuth client id if configured.
@@ -102,6 +103,34 @@ pub fn login_finish_from_redirect(
 ) -> Result<CachedAccount, AuthError> {
     let code = oauth::extract_authorization_code(callback_url, &flow.state)?;
     login_finish(&code, flow)
+}
+
+/// Fetches the active user's latest Minecraft profile, including decoded texture payloads.
+pub fn fetch_minecraft_profile(access_token: &str) -> Result<MinecraftProfileState, AuthError> {
+    let agent = util::build_http_agent();
+    minecraft::fetch_profile_state_with_textures(&agent, access_token)
+}
+
+/// Uploads and activates a new skin texture for the active profile.
+pub fn upload_minecraft_skin(
+    access_token: &str,
+    skin_png_bytes: &[u8],
+    variant: MinecraftSkinVariant,
+) -> Result<(), AuthError> {
+    let agent = util::build_http_agent();
+    minecraft::upload_profile_skin(&agent, access_token, skin_png_bytes, variant)
+}
+
+/// Activates one owned cape id for the active profile.
+pub fn set_active_minecraft_cape(access_token: &str, cape_id: &str) -> Result<(), AuthError> {
+    let agent = util::build_http_agent();
+    minecraft::set_active_profile_cape(&agent, access_token, cape_id)
+}
+
+/// Clears the active cape for the active profile.
+pub fn clear_active_minecraft_cape(access_token: &str) -> Result<(), AuthError> {
+    let agent = util::build_http_agent();
+    minecraft::clear_active_profile_cape(&agent, access_token)
 }
 
 /// Loads all cached accounts from the persistent auth cache file.
