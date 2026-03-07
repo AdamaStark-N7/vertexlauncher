@@ -684,19 +684,6 @@ pub fn ensure_game_files(
         "Version dependency download phase completed."
     );
 
-    report_install_progress(
-        progress.as_deref(),
-        InstallProgress {
-            stage: InstallStage::InstallingModloader,
-            message: "Installing modloader artifacts...".to_owned(),
-            downloaded_files,
-            total_files: downloaded_files.max(1),
-            downloaded_bytes: 0,
-            total_bytes: None,
-            bytes_per_second: 0.0,
-            eta_seconds: None,
-        },
-    );
     let resolved_modloader_version = install_selected_modloader(
         instance_root,
         game_version,
@@ -780,9 +767,9 @@ fn process_registry() -> &'static Mutex<HashMap<String, RunningInstanceProcess>>
 }
 
 pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, InstallationError> {
-    let instance_key = request.instance_root.display().to_string();
     let instance_root = fs_canonicalize(request.instance_root.as_path())
         .unwrap_or_else(|_| request.instance_root.clone());
+    let instance_key = instance_root.display().to_string();
     let requested_account = normalize_account_key(request.account_key.as_deref());
     if let Ok(mut processes) = process_registry().lock() {
         prune_finished_processes(&mut processes);
@@ -916,7 +903,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
 }
 
 pub fn stop_running_instance(instance_root: &Path) -> bool {
-    let key = instance_root.display().to_string();
+    let key = instance_process_key(instance_root);
     let Ok(mut processes) = process_registry().lock() else {
         return false;
     };
@@ -929,7 +916,7 @@ pub fn stop_running_instance(instance_root: &Path) -> bool {
 }
 
 pub fn is_instance_running(instance_root: &Path) -> bool {
-    let key = instance_root.display().to_string();
+    let key = instance_process_key(instance_root);
     let Ok(mut processes) = process_registry().lock() else {
         return false;
     };
@@ -972,6 +959,13 @@ pub fn running_instance_roots() -> Vec<String> {
 
 fn prune_finished_processes(processes: &mut HashMap<String, RunningInstanceProcess>) {
     processes.retain(|_, process| matches!(process.child.try_wait(), Ok(None)));
+}
+
+fn instance_process_key(instance_root: &Path) -> String {
+    fs_canonicalize(instance_root)
+        .unwrap_or_else(|_| instance_root.to_path_buf())
+        .display()
+        .to_string()
 }
 
 fn normalize_account_key(value: Option<&str>) -> Option<String> {
@@ -2344,6 +2338,22 @@ fn install_selected_modloader(
             };
             let resolved =
                 resolve_loader_version(loader_kind, loader_label, game_version, modloader_version)?;
+            if has_fabric_or_quilt_profile(instance_root, game_version, loader_kind, &resolved)? {
+                tracing::info!(
+                    target: "vertexlauncher/installation/modloader",
+                    loader = %loader_label,
+                    game_version = %game_version,
+                    resolved = %resolved,
+                    "Modloader profile already present; skipping profile install."
+                );
+                return Ok(Some(resolved));
+            }
+            emit_installing_modloader_progress(
+                loader_label,
+                &resolved,
+                *downloaded_files,
+                progress,
+            );
             *downloaded_files += install_fabric_or_quilt_profile(
                 instance_root,
                 game_version,
@@ -2358,6 +2368,17 @@ fn install_selected_modloader(
         LoaderKind::Forge => {
             let resolved =
                 resolve_loader_version(loader_kind, "Forge", game_version, modloader_version)?;
+            if verify_modloader_profile(instance_root, loader_kind, game_version, &resolved)? {
+                tracing::info!(
+                    target: "vertexlauncher/installation/modloader",
+                    loader = "Forge",
+                    game_version = %game_version,
+                    resolved = %resolved,
+                    "Modloader profile already present; skipping installer execution."
+                );
+                return Ok(Some(resolved));
+            }
+            emit_installing_modloader_progress("Forge", &resolved, *downloaded_files, progress);
             *downloaded_files += install_forge_installer(
                 instance_root,
                 game_version,
@@ -2372,6 +2393,17 @@ fn install_selected_modloader(
         LoaderKind::NeoForge => {
             let resolved =
                 resolve_loader_version(loader_kind, "NeoForge", game_version, modloader_version)?;
+            if verify_modloader_profile(instance_root, loader_kind, game_version, &resolved)? {
+                tracing::info!(
+                    target: "vertexlauncher/installation/modloader",
+                    loader = "NeoForge",
+                    game_version = %game_version,
+                    resolved = %resolved,
+                    "Modloader profile already present; skipping installer execution."
+                );
+                return Ok(Some(resolved));
+            }
+            emit_installing_modloader_progress("NeoForge", &resolved, *downloaded_files, progress);
             *downloaded_files += install_neoforge_installer(
                 instance_root,
                 game_version,
@@ -2446,6 +2478,76 @@ fn is_latest_loader_version_alias(value: &str) -> bool {
     )
 }
 
+fn emit_installing_modloader_progress(
+    loader_label: &str,
+    loader_version: &str,
+    downloaded_files: u32,
+    progress: Option<&InstallProgressSink>,
+) {
+    report_install_progress(
+        progress,
+        InstallProgress {
+            stage: InstallStage::InstallingModloader,
+            message: format!("Installing {loader_label} {loader_version} artifacts..."),
+            downloaded_files,
+            total_files: downloaded_files.max(1),
+            downloaded_bytes: 0,
+            total_bytes: None,
+            bytes_per_second: 0.0,
+            eta_seconds: None,
+        },
+    );
+}
+
+fn has_fabric_or_quilt_profile(
+    instance_root: &Path,
+    game_version: &str,
+    loader_kind: LoaderKind,
+    loader_version: &str,
+) -> Result<bool, InstallationError> {
+    let id_prefix = match loader_kind {
+        LoaderKind::Fabric => "fabric-loader",
+        LoaderKind::Quilt => "quilt-loader",
+        _ => return Ok(false),
+    };
+    let version_id = format!("{id_prefix}-{loader_version}-{game_version}");
+    let profile_path = instance_root
+        .join("versions")
+        .join(version_id.as_str())
+        .join(format!("{version_id}.json"));
+    if !profile_path.exists() {
+        return Ok(false);
+    }
+    let raw = match fs_read_to_string(profile_path.as_path()) {
+        Ok(contents) => contents,
+        Err(_) => return Ok(false),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(_) => return Ok(false),
+    };
+    let id = parsed
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if id.eq_ignore_ascii_case(version_id.as_str()) {
+        return Ok(true);
+    }
+    let inherits = parsed
+        .get("inheritsFrom")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let game_version_lower = game_version.to_ascii_lowercase();
+    let loader_version_lower = loader_version.to_ascii_lowercase();
+    let id_lower = id.to_ascii_lowercase();
+    Ok(id_lower.contains(loader_version_lower.as_str())
+        && id_lower.contains(id_prefix)
+        && (inherits == game_version_lower || inherits.starts_with(game_version_lower.as_str())))
+}
+
 fn install_fabric_or_quilt_profile(
     instance_root: &Path,
     game_version: &str,
@@ -2515,13 +2617,17 @@ fn install_forge_installer(
         .join(game_version)
         .join(loader_version)
         .join(installer_file);
-    let downloaded = download_files_concurrent(
-        InstallStage::InstallingModloader,
-        vec![FileDownloadTask {
+    let mut tasks = Vec::new();
+    if !destination.exists() {
+        tasks.push(FileDownloadTask {
             url,
             destination,
             expected_size: None,
-        }],
+        });
+    }
+    let downloaded = download_files_concurrent(
+        InstallStage::InstallingModloader,
+        tasks,
         policy,
         downloaded_files_offset,
         progress,
@@ -2555,13 +2661,17 @@ fn install_neoforge_installer(
         .join(game_version)
         .join(loader_version)
         .join(installer_file);
-    let downloaded = download_files_concurrent(
-        InstallStage::InstallingModloader,
-        vec![FileDownloadTask {
+    let mut tasks = Vec::new();
+    if !destination.exists() {
+        tasks.push(FileDownloadTask {
             url,
             destination,
             expected_size: None,
-        }],
+        });
+    }
+    let downloaded = download_files_concurrent(
+        InstallStage::InstallingModloader,
+        tasks,
         policy,
         downloaded_files_offset,
         progress,

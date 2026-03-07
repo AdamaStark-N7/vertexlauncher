@@ -660,10 +660,10 @@ impl ThemeAlphaProfile {
     };
 
     const TRANSPARENT: Self = Self {
-        window_fill: 95,
+        window_fill: 255,
         panel_fill: 72,
         faint_bg: 58,
-        extreme_bg: 118,
+        extreme_bg: 255,
         code_bg: 130,
         noninteractive_bg: 62,
         noninteractive_weak_bg: 50,

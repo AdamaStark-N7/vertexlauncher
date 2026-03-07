@@ -361,11 +361,8 @@ fn render_profile_popup(
     };
 
     egui::Frame::new()
-        .fill(ui.visuals().widgets.noninteractive.bg_fill)
-        .stroke(egui::Stroke::new(
-            1.0,
-            ui.visuals().widgets.noninteractive.bg_stroke.color,
-        ))
+        .fill(ui.visuals().window_fill)
+        .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color))
         .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
         .inner_margin(egui::Margin::same(style::SPACE_LG as i8))
         .show(ui, |ui| {
@@ -400,11 +397,8 @@ fn render_profile_popup(
         );
 
         egui::Frame::new()
-            .fill(ui.visuals().widgets.inactive.bg_fill)
-            .stroke(egui::Stroke::new(
-                1.0,
-                ui.visuals().widgets.inactive.bg_stroke.color,
-            ))
+            .fill(ui.visuals().window_fill)
+            .stroke(egui::Stroke::new(1.0, ui.visuals().window_stroke.color))
             .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
             .inner_margin(egui::Margin::same(style::SPACE_MD as i8))
             .show(ui, |ui| {

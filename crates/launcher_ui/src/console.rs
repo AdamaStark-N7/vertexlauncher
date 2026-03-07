@@ -25,6 +25,7 @@ struct ConsoleTab {
     id: String,
     label: String,
     instance_root: Option<String>,
+    keep_alive_while_loading: bool,
     missing_since: Option<Instant>,
     lines: VecDeque<String>,
 }
@@ -44,6 +45,7 @@ fn store() -> &'static Mutex<ConsoleState> {
                 id: DEFAULT_TAB_ID.to_owned(),
                 label: DEFAULT_TAB_LABEL.to_owned(),
                 instance_root: None,
+                keep_alive_while_loading: false,
                 missing_since: None,
                 lines: VecDeque::new(),
             }],
@@ -99,6 +101,7 @@ pub fn ensure_instance_tab(instance_name: &str, username: &str, instance_root: &
         } else {
             Some(normalized_instance_root.clone())
         };
+        existing.keep_alive_while_loading = false;
         existing.missing_since = None;
     } else {
         state.tabs.push(ConsoleTab {
@@ -109,12 +112,31 @@ pub fn ensure_instance_tab(instance_name: &str, username: &str, instance_root: &
             } else {
                 Some(normalized_instance_root)
             },
+            keep_alive_while_loading: false,
             missing_since: None,
             lines: VecDeque::new(),
         });
     }
     state.active_tab_id = id.clone();
     id
+}
+
+pub fn set_instance_tab_loading(instance_root: &str, loading: bool) {
+    let normalized = instance_root.trim();
+    if normalized.is_empty() {
+        return;
+    }
+    let Ok(mut state) = store().lock() else {
+        return;
+    };
+    for tab in &mut state.tabs {
+        if tab.instance_root.as_deref() == Some(normalized) {
+            tab.keep_alive_while_loading = loading;
+            if loading {
+                tab.missing_since = None;
+            }
+        }
+    }
 }
 
 pub fn prune_instance_tabs(active_instance_roots: &[String]) {
@@ -139,6 +161,9 @@ pub fn prune_instance_tabs(active_instance_roots: &[String]) {
         let Some(_) = tab.instance_root.as_deref() else {
             return true;
         };
+        if tab.keep_alive_while_loading {
+            return true;
+        }
         tab.missing_since.is_none_or(|missing_since| {
             now.duration_since(missing_since) < INSTANCE_TAB_PRUNE_GRACE
         })
@@ -149,6 +174,7 @@ pub fn prune_instance_tabs(active_instance_roots: &[String]) {
             id: DEFAULT_TAB_ID.to_owned(),
             label: DEFAULT_TAB_LABEL.to_owned(),
             instance_root: None,
+            keep_alive_while_loading: false,
             missing_since: None,
             lines: VecDeque::new(),
         });

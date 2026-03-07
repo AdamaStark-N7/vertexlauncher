@@ -18,8 +18,8 @@ use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 
 use crate::app::tokio_runtime;
 use crate::screens::LaunchAuthContext;
-use crate::ui::components::settings_widgets;
-use crate::{console, install_activity, notification};
+use crate::ui::components::{icon_button, settings_widgets};
+use crate::{assets, console, install_activity, notification};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -67,6 +67,8 @@ struct InstanceScreenState {
     runtime_progress_rx: Option<Arc<Mutex<mpsc::Receiver<InstallProgress>>>>,
     runtime_latest_progress: Option<InstallProgress>,
     runtime_last_notification_at: Option<Instant>,
+    runtime_prepare_instance_root: Option<String>,
+    show_settings_modal: bool,
     launch_username: Option<String>,
 }
 
@@ -121,6 +123,8 @@ impl InstanceScreenState {
             runtime_progress_rx: None,
             runtime_latest_progress: None,
             runtime_last_notification_at: None,
+            runtime_prepare_instance_root: None,
+            show_settings_modal: false,
             launch_username: None,
         }
     }
@@ -149,6 +153,14 @@ pub fn render(
     let body_style = LabelOptions {
         color: text_color,
         wrap: true,
+        ..LabelOptions::default()
+    };
+    let section_style = LabelOptions {
+        font_size: 24.0,
+        line_height: 28.0,
+        weight: 700,
+        color: text_color,
+        wrap: false,
         ..LabelOptions::default()
     };
     let mut muted_style = body_style.clone();
@@ -250,164 +262,35 @@ pub fn render(
         external_activity.as_ref(),
         state.runtime_prepare_in_flight,
     );
-    ui.add_space(12.0);
-    ui.separator();
     ui.add_space(10.0);
-
-    let section_style = LabelOptions {
-        font_size: 22.0,
-        line_height: 26.0,
-        weight: 700,
-        color: text_color,
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let _ = text_ui.label(
-        ui,
-        ("instance_versions_heading", instance_id),
-        "Instance Metadata & Versions",
-        &section_style,
-    );
-    ui.add_space(8.0);
-
-    let _ = settings_widgets::full_width_text_input_row(
-        text_ui,
-        ui,
-        ("instance_name_input", instance_id),
-        "Name",
-        Some("Display name shown in the sidebar."),
-        &mut state.name_input,
-    );
-    ui.add_space(6.0);
-
-    let _ = settings_widgets::full_width_text_input_row(
-        text_ui,
-        ui,
-        ("instance_thumbnail_input", instance_id),
-        "Thumbnail path (optional)",
-        Some("Local image path for this instance."),
-        &mut state.thumbnail_input,
-    );
-    ui.add_space(6.0);
-
-    let refresh_style = ButtonOptions {
-        min_size: egui::vec2(190.0, 30.0),
-        text_color: ui.visuals().text_color(),
-        fill: ui.visuals().widgets.inactive.bg_fill,
-        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-        fill_active: ui.visuals().widgets.active.bg_fill,
-        fill_selected: ui.visuals().selection.bg_fill,
-        stroke: ui.visuals().widgets.inactive.bg_stroke,
-        ..ButtonOptions::default()
-    };
-    if text_ui
-        .button(
+    ui.horizontal(|ui| {
+        let settings_button_id = format!("instance_settings_open_{instance_id}");
+        let settings_button = icon_button::svg(
             ui,
-            ("instance_refresh_versions", instance_id),
-            "Refresh version list",
-            &refresh_style,
-        )
-        .clicked()
-    {
-        sync_version_catalog(&mut state, config.include_snapshots_and_betas(), true);
-    }
-    if state.version_catalog_in_flight {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            let _ = text_ui.label(
-                ui,
-                ("instance_versions_loading", instance_id),
-                "Fetching version catalog...",
-                &muted_style,
-            );
-        });
-    }
-
-    if let Some(catalog_error) = state.version_catalog_error.as_deref() {
-        let _ = text_ui.label(
-            ui,
-            ("instance_version_catalog_error", instance_id),
-            catalog_error,
-            &LabelOptions {
-                color: ui.visuals().error_fg_color,
-                wrap: true,
-                ..LabelOptions::default()
-            },
+            settings_button_id.as_str(),
+            assets::SETTINGS_SVG,
+            "Open instance settings",
+            state.show_settings_modal,
+            30.0,
         );
-    }
-
-    let version_labels: Vec<String> = state
-        .available_game_versions
-        .iter()
-        .map(MinecraftVersionEntry::display_label)
-        .collect();
-    let version_refs: Vec<&str> = version_labels.iter().map(String::as_str).collect();
-    if !version_refs.is_empty() {
-        let mut selected_index = state
-            .selected_game_version_index
-            .min(version_refs.len().saturating_sub(1));
-        let response = settings_widgets::dropdown_row(
-            text_ui,
-            ui,
-            ("instance_game_version_dropdown", instance_id),
-            "Minecraft game version",
-            Some("Pick from available Minecraft versions."),
-            &mut selected_index,
-            &version_refs,
-        );
-        if response.changed() {
-            state.selected_game_version_index = selected_index;
-            if let Some(version) = state.available_game_versions.get(selected_index) {
-                state.game_version_input = version.id.clone();
-            }
+        if settings_button.clicked() {
+            state.show_settings_modal = true;
         }
-    } else {
         let _ = text_ui.label(
             ui,
-            ("instance_game_version_empty", instance_id),
-            "No game versions available yet.",
+            ("instance_settings_hint", instance_id),
+            "Open instance settings",
             &muted_style,
         );
-    }
-    ui.add_space(6.0);
-
-    let _ = text_ui.label(
-        ui,
-        ("instance_modloader_label", instance_id),
-        "Modloader",
-        &body_style,
-    );
-    ui.add_space(4.0);
-    let selected_game_version_for_loader = selected_game_version(&state).to_owned();
-    render_modloader_selector(
-        ui,
+    });
+    instances_changed |= render_instance_settings_modal(
+        ui.ctx(),
         text_ui,
-        &mut state,
         instance_id,
-        selected_game_version_for_loader.as_str(),
+        &mut state,
+        instances,
+        config,
     );
-    if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
-        ui.add_space(6.0);
-        let _ = settings_widgets::full_width_text_input_row(
-            text_ui,
-            ui,
-            ("instance_custom_modloader_input", instance_id),
-            "Custom modloader id",
-            Some("Use any custom modloader name."),
-            &mut state.custom_modloader,
-        );
-    }
-    ui.add_space(6.0);
-
-    let _ = settings_widgets::full_width_text_input_row(
-        text_ui,
-        ui,
-        ("instance_modloader_version_input", instance_id),
-        "Modloader version",
-        Some("Version for the selected modloader. Leave blank for latest/default."),
-        &mut state.modloader_version_input,
-    );
-    ui.add_space(8.0);
 
     let action_button_style = ButtonOptions {
         min_size: egui::vec2(220.0, 34.0),
@@ -419,174 +302,6 @@ pub fn render(
         stroke: ui.visuals().selection.stroke,
         ..ButtonOptions::default()
     };
-
-    if text_ui
-        .button(
-            ui,
-            ("instance_save_versions", instance_id),
-            "Save metadata & versions",
-            &action_button_style,
-        )
-        .clicked()
-    {
-        let trimmed_name = state.name_input.trim();
-        if trimmed_name.is_empty() {
-            state.status_message = Some("Name cannot be empty.".to_owned());
-        } else {
-            let modloader = selected_modloader_value(&state);
-            let game_version = state.game_version_input.trim().to_owned();
-            if game_version.is_empty() {
-                state.status_message = Some("Minecraft game version cannot be empty.".to_owned());
-            } else if modloader.trim().is_empty() {
-                state.status_message = Some("Modloader cannot be empty.".to_owned());
-            } else if support_catalog_ready(&state)
-                && !state
-                    .loader_support
-                    .supports_loader(modloader.as_str(), game_version.as_str())
-                && state.selected_modloader != CUSTOM_MODLOADER_INDEX
-            {
-                state.status_message = Some(format!(
-                    "{modloader} is not available for Minecraft {game_version}.",
-                ));
-            } else {
-                let mut update_failed = None;
-                let requested_modloader = modloader.clone();
-                let requested_game_version = game_version.clone();
-                let requested_modloader_version = state.modloader_version_input.trim().to_owned();
-                tracing::info!(
-                    target: "vertexlauncher/ui/instance",
-                    instance_id = %instance_id,
-                    requested_modloader = %requested_modloader,
-                    requested_game_version = %requested_game_version,
-                    requested_modloader_version = %requested_modloader_version,
-                    "Saving instance metadata and versions from instance screen."
-                );
-
-                if let Some(instance) = instances.find_mut(instance_id) {
-                    instance.name = trimmed_name.to_owned();
-                    instance.thumbnail_path = normalize_optional(state.thumbnail_input.as_str());
-                } else {
-                    update_failed = Some("Instance was removed before save.".to_owned());
-                }
-
-                if update_failed.is_none()
-                    && let Err(err) = set_instance_versions(
-                        instances,
-                        instance_id,
-                        modloader,
-                        game_version,
-                        requested_modloader_version,
-                    )
-                {
-                    update_failed = Some(err.to_string());
-                }
-
-                if let Some(err) = update_failed {
-                    tracing::warn!(
-                        target: "vertexlauncher/ui/instance",
-                        instance_id = %instance_id,
-                        error = %err,
-                        "Failed to save instance metadata and versions."
-                    );
-                    state.status_message = Some(err);
-                } else {
-                    instances_changed = true;
-                    if let Some(saved) = instances.find(instance_id) {
-                        tracing::info!(
-                            target: "vertexlauncher/ui/instance",
-                            instance_id = %instance_id,
-                            saved_modloader = %saved.modloader,
-                            saved_game_version = %saved.game_version,
-                            saved_modloader_version = %saved.modloader_version,
-                            "Saved instance metadata and versions."
-                        );
-                    }
-                    state.status_message = Some("Saved metadata and version settings.".to_owned());
-                }
-            }
-        }
-    }
-
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(10.0);
-
-    let _ = text_ui.label(
-        ui,
-        ("instance_settings_heading", instance_id),
-        "Instance Settings",
-        &section_style,
-    );
-    ui.add_space(8.0);
-
-    let _ = settings_widgets::toggle_row(
-        text_ui,
-        ui,
-        "Override max memory for this instance",
-        Some("When disabled, launcher instance default memory is used."),
-        &mut state.memory_override_enabled,
-    );
-    ui.add_space(6.0);
-
-    let memory_slider_max = memory_slider_max_mib();
-    if state.memory_override_enabled {
-        let mut memory_mib = state
-            .memory_override_mib
-            .clamp(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, memory_slider_max);
-        let response = settings_widgets::u128_slider_with_input_row(
-            text_ui,
-            ui,
-            ("instance_memory_override", instance_id),
-            "Max memory allocation (MiB)",
-            Some("Per-instance memory limit."),
-            &mut memory_mib,
-            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
-            memory_slider_max,
-            INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP,
-        );
-        if response.changed() {
-            state.memory_override_mib = memory_mib;
-        }
-        ui.add_space(6.0);
-    }
-
-    let _ = settings_widgets::full_width_text_input_row(
-        text_ui,
-        ui,
-        ("instance_cli_args_override", instance_id),
-        "JVM args override (optional)",
-        Some("Leave blank to use launcher instance default JVM args."),
-        &mut state.cli_args_input,
-    );
-    ui.add_space(8.0);
-
-    if text_ui
-        .button(
-            ui,
-            ("instance_save_settings", instance_id),
-            "Save instance settings",
-            &action_button_style,
-        )
-        .clicked()
-    {
-        let memory_override = if state.memory_override_enabled {
-            Some(
-                state
-                    .memory_override_mib
-                    .clamp(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, memory_slider_max),
-            )
-        } else {
-            None
-        };
-        let cli_override = normalize_optional(state.cli_args_input.as_str());
-        match set_instance_settings(instances, instance_id, memory_override, cli_override) {
-            Ok(()) => {
-                instances_changed = true;
-                state.status_message = Some("Saved instance settings.".to_owned());
-            }
-            Err(err) => state.status_message = Some(err.to_string()),
-        }
-    }
 
     ui.add_space(12.0);
     ui.separator();
@@ -756,6 +471,417 @@ pub fn render(
     instances_changed
 }
 
+fn render_instance_settings_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &mut InstanceScreenState,
+    instances: &mut InstanceStore,
+    config: &mut Config,
+) -> bool {
+    if !state.show_settings_modal {
+        return false;
+    }
+
+    let mut instances_changed = false;
+    let mut open = state.show_settings_modal;
+    let viewport_rect = ctx.input(|i| i.content_rect());
+    let modal_width = (viewport_rect.width() * 0.8).clamp(520.0, 980.0);
+    let modal_height = (viewport_rect.height() * 0.85).clamp(420.0, 900.0);
+    let mut close_requested = false;
+
+    egui::Window::new("Instance Settings")
+        .id(egui::Id::new(("instance_settings_modal", instance_id)))
+        .open(&mut open)
+        .collapsible(false)
+        .resizable(true)
+        .default_size(egui::vec2(modal_width, modal_height))
+        .min_size(egui::vec2(500.0, 380.0))
+        .show(ctx, |ui| {
+            let text_color = ui.visuals().text_color();
+            let mut muted_style = LabelOptions::default();
+            muted_style.color = ui.visuals().weak_text_color();
+            muted_style.wrap = true;
+            let section_style = LabelOptions {
+                font_size: 22.0,
+                line_height: 26.0,
+                weight: 700,
+                color: text_color,
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let body_style = LabelOptions {
+                color: text_color,
+                wrap: true,
+                ..LabelOptions::default()
+            };
+            let action_button_style = ButtonOptions {
+                min_size: egui::vec2(220.0, 34.0),
+                text_color: ui.visuals().widgets.active.fg_stroke.color,
+                fill: ui.visuals().selection.bg_fill,
+                fill_hovered: ui.visuals().selection.bg_fill.gamma_multiply(1.1),
+                fill_active: ui.visuals().selection.bg_fill.gamma_multiply(0.9),
+                fill_selected: ui.visuals().selection.bg_fill,
+                stroke: ui.visuals().selection.stroke,
+                ..ButtonOptions::default()
+            };
+            let refresh_style = ButtonOptions {
+                min_size: egui::vec2(190.0, 30.0),
+                text_color: ui.visuals().text_color(),
+                fill: ui.visuals().widgets.inactive.bg_fill,
+                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                fill_active: ui.visuals().widgets.active.bg_fill,
+                fill_selected: ui.visuals().selection.bg_fill,
+                stroke: ui.visuals().widgets.inactive.bg_stroke,
+                ..ButtonOptions::default()
+            };
+
+            egui::ScrollArea::vertical()
+                .id_salt(("instance_settings_modal_scroll", instance_id))
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_versions_heading", instance_id),
+                        "Instance Metadata & Versions",
+                        &section_style,
+                    );
+                    ui.add_space(8.0);
+
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        ("instance_name_input", instance_id),
+                        "Name",
+                        Some("Display name shown in the sidebar."),
+                        &mut state.name_input,
+                    );
+                    ui.add_space(6.0);
+
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        ("instance_thumbnail_input", instance_id),
+                        "Thumbnail path (optional)",
+                        Some("Local image path for this instance."),
+                        &mut state.thumbnail_input,
+                    );
+                    ui.add_space(6.0);
+
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_refresh_versions", instance_id),
+                            "Refresh version list",
+                            &refresh_style,
+                        )
+                        .clicked()
+                    {
+                        sync_version_catalog(state, config.include_snapshots_and_betas(), true);
+                    }
+                    if state.version_catalog_in_flight {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            let _ = text_ui.label(
+                                ui,
+                                ("instance_versions_loading", instance_id),
+                                "Fetching version catalog...",
+                                &muted_style,
+                            );
+                        });
+                    }
+
+                    if let Some(catalog_error) = state.version_catalog_error.as_deref() {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_version_catalog_error", instance_id),
+                            catalog_error,
+                            &LabelOptions {
+                                color: ui.visuals().error_fg_color,
+                                wrap: true,
+                                ..LabelOptions::default()
+                            },
+                        );
+                    }
+
+                    let version_labels: Vec<String> = state
+                        .available_game_versions
+                        .iter()
+                        .map(MinecraftVersionEntry::display_label)
+                        .collect();
+                    let version_refs: Vec<&str> =
+                        version_labels.iter().map(String::as_str).collect();
+                    if !version_refs.is_empty() {
+                        let mut selected_index = state
+                            .selected_game_version_index
+                            .min(version_refs.len().saturating_sub(1));
+                        let response = settings_widgets::dropdown_row(
+                            text_ui,
+                            ui,
+                            ("instance_game_version_dropdown", instance_id),
+                            "Minecraft game version",
+                            Some("Pick from available Minecraft versions."),
+                            &mut selected_index,
+                            &version_refs,
+                        );
+                        if response.changed() {
+                            state.selected_game_version_index = selected_index;
+                            if let Some(version) = state.available_game_versions.get(selected_index)
+                            {
+                                state.game_version_input = version.id.clone();
+                            }
+                        }
+                    } else {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_game_version_empty", instance_id),
+                            "No game versions available yet.",
+                            &muted_style,
+                        );
+                    }
+                    ui.add_space(6.0);
+
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_modloader_label", instance_id),
+                        "Modloader",
+                        &body_style,
+                    );
+                    ui.add_space(4.0);
+                    let selected_game_version_for_loader = selected_game_version(state).to_owned();
+                    render_modloader_selector(
+                        ui,
+                        text_ui,
+                        state,
+                        instance_id,
+                        selected_game_version_for_loader.as_str(),
+                    );
+                    if state.selected_modloader == CUSTOM_MODLOADER_INDEX {
+                        ui.add_space(6.0);
+                        let _ = settings_widgets::full_width_text_input_row(
+                            text_ui,
+                            ui,
+                            ("instance_custom_modloader_input", instance_id),
+                            "Custom modloader id",
+                            Some("Use any custom modloader name."),
+                            &mut state.custom_modloader,
+                        );
+                    }
+                    ui.add_space(6.0);
+
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        ("instance_modloader_version_input", instance_id),
+                        "Modloader version",
+                        Some("Version for the selected modloader. Leave blank for latest/default."),
+                        &mut state.modloader_version_input,
+                    );
+                    ui.add_space(8.0);
+
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_save_versions", instance_id),
+                            "Save metadata & versions",
+                            &action_button_style,
+                        )
+                        .clicked()
+                    {
+                        let trimmed_name = state.name_input.trim();
+                        if trimmed_name.is_empty() {
+                            state.status_message = Some("Name cannot be empty.".to_owned());
+                        } else {
+                            let modloader = selected_modloader_value(state);
+                            let game_version = state.game_version_input.trim().to_owned();
+                            if game_version.is_empty() {
+                                state.status_message =
+                                    Some("Minecraft game version cannot be empty.".to_owned());
+                            } else if modloader.trim().is_empty() {
+                                state.status_message =
+                                    Some("Modloader cannot be empty.".to_owned());
+                            } else if support_catalog_ready(state)
+                                && !state
+                                    .loader_support
+                                    .supports_loader(modloader.as_str(), game_version.as_str())
+                                && state.selected_modloader != CUSTOM_MODLOADER_INDEX
+                            {
+                                state.status_message = Some(format!(
+                                    "{modloader} is not available for Minecraft {game_version}.",
+                                ));
+                            } else {
+                                let mut update_failed = None;
+                                let requested_modloader = modloader.clone();
+                                let requested_game_version = game_version.clone();
+                                let requested_modloader_version =
+                                    state.modloader_version_input.trim().to_owned();
+                                tracing::info!(
+                                    target: "vertexlauncher/ui/instance",
+                                    instance_id = %instance_id,
+                                    requested_modloader = %requested_modloader,
+                                    requested_game_version = %requested_game_version,
+                                    requested_modloader_version = %requested_modloader_version,
+                                    "Saving instance metadata and versions from settings modal."
+                                );
+
+                                if let Some(instance) = instances.find_mut(instance_id) {
+                                    instance.name = trimmed_name.to_owned();
+                                    instance.thumbnail_path =
+                                        normalize_optional(state.thumbnail_input.as_str());
+                                } else {
+                                    update_failed =
+                                        Some("Instance was removed before save.".to_owned());
+                                }
+
+                                if update_failed.is_none()
+                                    && let Err(err) = set_instance_versions(
+                                        instances,
+                                        instance_id,
+                                        modloader,
+                                        game_version,
+                                        requested_modloader_version,
+                                    )
+                                {
+                                    update_failed = Some(err.to_string());
+                                }
+
+                                if let Some(err) = update_failed {
+                                    tracing::warn!(
+                                        target: "vertexlauncher/ui/instance",
+                                        instance_id = %instance_id,
+                                        error = %err,
+                                        "Failed to save instance metadata and versions."
+                                    );
+                                    state.status_message = Some(err);
+                                } else {
+                                    instances_changed = true;
+                                    if let Some(saved) = instances.find(instance_id) {
+                                        tracing::info!(
+                                            target: "vertexlauncher/ui/instance",
+                                            instance_id = %instance_id,
+                                            saved_modloader = %saved.modloader,
+                                            saved_game_version = %saved.game_version,
+                                            saved_modloader_version = %saved.modloader_version,
+                                            "Saved instance metadata and versions."
+                                        );
+                                    }
+                                    state.status_message =
+                                        Some("Saved metadata and version settings.".to_owned());
+                                }
+                            }
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.separator();
+                    ui.add_space(10.0);
+
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_settings_heading", instance_id),
+                        "Instance Settings",
+                        &section_style,
+                    );
+                    ui.add_space(8.0);
+
+                    let _ = settings_widgets::toggle_row(
+                        text_ui,
+                        ui,
+                        "Override max memory for this instance",
+                        Some("When disabled, launcher instance default memory is used."),
+                        &mut state.memory_override_enabled,
+                    );
+                    ui.add_space(6.0);
+
+                    let memory_slider_max = memory_slider_max_mib();
+                    if state.memory_override_enabled {
+                        let mut memory_mib = state
+                            .memory_override_mib
+                            .clamp(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, memory_slider_max);
+                        let response = settings_widgets::u128_slider_with_input_row(
+                            text_ui,
+                            ui,
+                            ("instance_memory_override", instance_id),
+                            "Max memory allocation (MiB)",
+                            Some("Per-instance memory limit."),
+                            &mut memory_mib,
+                            INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
+                            memory_slider_max,
+                            INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP,
+                        );
+                        if response.changed() {
+                            state.memory_override_mib = memory_mib;
+                        }
+                        ui.add_space(6.0);
+                    }
+
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        ("instance_cli_args_override", instance_id),
+                        "JVM args override (optional)",
+                        Some("Leave blank to use launcher instance default JVM args."),
+                        &mut state.cli_args_input,
+                    );
+                    ui.add_space(8.0);
+
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_save_settings", instance_id),
+                            "Save instance settings",
+                            &action_button_style,
+                        )
+                        .clicked()
+                    {
+                        let memory_override = if state.memory_override_enabled {
+                            Some(
+                                state
+                                    .memory_override_mib
+                                    .clamp(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, memory_slider_max),
+                            )
+                        } else {
+                            None
+                        };
+                        let cli_override = normalize_optional(state.cli_args_input.as_str());
+                        match set_instance_settings(
+                            instances,
+                            instance_id,
+                            memory_override,
+                            cli_override,
+                        ) {
+                            Ok(()) => {
+                                instances_changed = true;
+                                state.status_message = Some("Saved instance settings.".to_owned());
+                            }
+                            Err(err) => state.status_message = Some(err.to_string()),
+                        }
+                    }
+
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if text_ui
+                            .button(
+                                ui,
+                                ("instance_settings_close", instance_id),
+                                "Done",
+                                &action_button_style,
+                            )
+                            .clicked()
+                        {
+                            close_requested = true;
+                        }
+                    });
+                });
+        });
+
+    if close_requested {
+        open = false;
+    }
+    state.show_settings_modal = open;
+    instances_changed
+}
+
 fn render_install_feedback(
     ui: &mut Ui,
     text_ui: &mut TextUi,
@@ -764,6 +890,14 @@ fn render_install_feedback(
     external_activity: Option<&install_activity::InstallActivitySnapshot>,
     runtime_prepare_in_flight: bool,
 ) {
+    if let Some(progress) = local_progress
+        && matches!(progress.stage, InstallStage::Complete)
+        && !runtime_prepare_in_flight
+        && external_activity.is_none_or(|activity| matches!(activity.stage, InstallStage::Complete))
+    {
+        return;
+    }
+
     if let Some(progress) = local_progress {
         ui.add_space(8.0);
         let fraction = progress_fraction(progress);
@@ -833,6 +967,9 @@ fn render_install_feedback(
     }
 
     if let Some(activity) = external_activity {
+        if matches!(activity.stage, InstallStage::Complete) {
+            return;
+        }
         ui.add_space(8.0);
         let fraction = progress_fraction_from_activity(activity);
         let progress_label = if let Some(eta) = activity.eta_seconds {
@@ -915,7 +1052,10 @@ fn render_runtime_row(
     let mut muted_style = LabelOptions::default();
     muted_style.color = ui.visuals().weak_text_color();
     muted_style.wrap = false;
-    let instance_root_display = instance_root.display().to_string();
+    let instance_root_key = std::fs::canonicalize(instance_root)
+        .unwrap_or_else(|_| instance_root.to_path_buf())
+        .display()
+        .to_string();
     let launch_account = active_launch_auth
         .map(|auth| auth.account_key.clone())
         .or_else(|| {
@@ -942,7 +1082,7 @@ fn render_runtime_row(
     let launch_disabled_for_account = !state.running
         && account_running_root
             .as_deref()
-            .is_some_and(|running_root| running_root != instance_root_display.as_str());
+            .is_some_and(|running_root| running_root != instance_root_key.as_str());
     let launch_disabled_for_missing_ownership = !state.running && !active_account_owns_minecraft;
     let launch_disabled = launch_disabled_for_account || launch_disabled_for_missing_ownership;
 
@@ -1409,6 +1549,7 @@ fn request_runtime_prepare(
     state.runtime_latest_progress = None;
     state.status_message = Some(format!("Preparing Minecraft {game_version}..."));
     let instance_root_display = instance_root.display().to_string();
+    state.runtime_prepare_instance_root = Some(instance_root_display.clone());
     let game_version_for_task = game_version.clone();
     let game_version_for_result = game_version.clone();
     let modloader_for_task = modloader.trim().to_owned();
@@ -1455,6 +1596,7 @@ fn request_runtime_prepare(
         username,
         instance_root_display.as_str(),
     );
+    console::set_instance_tab_loading(instance_root_display.as_str(), true);
     console::push_line_to_tab(
         tab_id.as_str(),
         format!(
@@ -1612,6 +1754,9 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
     }
 
     if should_reset_channel {
+        if let Some(root) = state.runtime_prepare_instance_root.take() {
+            console::set_instance_tab_loading(root.as_str(), false);
+        }
         state.runtime_prepare_results_tx = None;
         state.runtime_prepare_results_rx = None;
         state.runtime_prepare_in_flight = false;
@@ -1620,6 +1765,8 @@ fn poll_runtime_prepare(state: &mut InstanceScreenState, config: &mut Config) {
     }
 
     for (game_version, instance_root_display, result) in updates {
+        state.runtime_prepare_instance_root = None;
+        console::set_instance_tab_loading(instance_root_display.as_str(), false);
         state.runtime_prepare_in_flight = false;
         match result {
             Ok(outcome) => {

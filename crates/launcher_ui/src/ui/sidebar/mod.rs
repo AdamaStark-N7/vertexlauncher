@@ -107,14 +107,20 @@ fn render_segments(
             ui.separator();
             ui.add_space(style::SPACE_MD);
             let profiles_height = ui.available_height().max(1.0);
-            ScrollArea::vertical()
-                .id_salt("profiles_scroll")
-                .auto_shrink([false, false])
-                .max_height(profiles_height)
-                .show(ui, |ui| {
-                    ui.set_min_height(profiles_height);
-                    profiles::render(ui, profile_shortcuts, output, layout.nav_icon_width)
-                });
+            ui.allocate_ui_with_layout(
+                egui::vec2(full_width, profiles_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ScrollArea::vertical()
+                        .id_salt("profiles_scroll")
+                        .auto_shrink([false, false])
+                        .max_height(ui.available_height().max(1.0))
+                        .show(ui, |ui| {
+                            ui.set_min_height(profiles_height);
+                            profiles::render(ui, profile_shortcuts, output, layout.nav_icon_width)
+                        });
+                },
+            );
         },
     );
 }

@@ -202,10 +202,10 @@ pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi) {
 
             for (index, entry) in entries.iter().enumerate() {
                 let frame = Frame::new()
-                    .fill(ui.visuals().widgets.noninteractive.bg_fill)
+                    .fill(ui.visuals().window_fill)
                     .stroke(Stroke::new(
                         1.0,
-                        ui.visuals().widgets.noninteractive.bg_stroke.color,
+                        ui.visuals().window_stroke.color,
                     ))
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(Margin::same(10));
