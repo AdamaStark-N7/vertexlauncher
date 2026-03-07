@@ -83,13 +83,13 @@ fn render_segments(
     layout: SidebarLayout,
 ) {
     let row_height = layout.nav_icon_width.max(1.0);
+    let button_gap = style::SPACE_SM;
     let nav_count = AppScreen::FIXED_NAV.len() as f32;
-    let nav_stack_height =
-        (nav_count * row_height) + ((nav_count - 1.0).max(0.0) * style::SPACE_SM);
+    let nav_stack_height = (nav_count * row_height) + ((nav_count - 1.0).max(0.0) * button_gap);
     let divider_height = 1.0;
     let desired_top_height = style::SPACE_XS
         + nav_stack_height
-        + style::SPACE_MD
+        + button_gap
         + row_height
         + style::SPACE_LG
         + divider_height
@@ -120,7 +120,7 @@ fn render_segments(
             ui.add_space(style::SPACE_XS);
             app_nav::render(ui, active_screen, output, layout.nav_icon_width);
 
-            ui.add_space(style::SPACE_MD);
+            ui.add_space(button_gap);
             let create_response = ui
                 .allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), row_height),
