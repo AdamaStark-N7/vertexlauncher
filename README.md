@@ -53,3 +53,28 @@ Currently we are in a pre-alpha state, and as such there is no way to install th
 cargo build --release
 ``` 
 inside the directory you cloned it into.
+
+## Linux caveat
+
+On Linux, you need native development libraries installed before compilation will work.
+If these are missing, `cargo build` will fail during `pkg-config` checks for `gtk/glib/webkit`.
+
+For Debian/Ubuntu:
+```sh
+sudo apt-get update
+sudo apt-get install -y --no-install-recommends \
+  pkg-config \
+  libglib2.0-dev \
+  libgtk-3-dev \
+  libgdk-pixbuf-2.0-dev \
+  libpango1.0-dev \
+  libatk1.0-dev \
+  libcairo2-dev \
+  libsoup-3.0-dev \
+  libwebkit2gtk-4.1-dev \
+  libjavascriptcoregtk-4.1-dev
+```
+
+If your distro does not provide `4.1` packages, use:
+- `libwebkit2gtk-4.0-dev`
+- `libjavascriptcoregtk-4.0-dev`
