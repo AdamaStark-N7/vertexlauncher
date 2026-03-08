@@ -893,15 +893,20 @@ fn add_elytra_triangles(
     rect: Rect,
     model_offset: Vec3,
     _time_seconds: f32,
-    _walk_phase: f32,
+    walk_phase: f32,
     wing_uvs: ElytraWingUvs,
     light_dir: Vec3,
 ) {
     let neutral_pose = VANILLA_ELYTRA_POSE_STANDING;
     let _ = VANILLA_ELYTRA_POSE_SNEAKING;
     let _ = VANILLA_ELYTRA_POSE_GLIDE_OPEN;
-    let left_flap = neutral_pose.left.rotate_x;
-    let right_flap = neutral_pose.right.rotate_x;
+    // Couple each wing to the leg on the same side, similar to cape walk response.
+    let left_leg_phase = walk_phase;
+    let right_leg_phase = -walk_phase;
+    let left_flap = neutral_pose.left.rotate_x + left_leg_phase * 0.10;
+    let right_flap = neutral_pose.right.rotate_x + right_leg_phase * 0.10;
+    let left_yaw = neutral_pose.left.rotate_y + left_leg_phase * 0.045;
+    let right_yaw = neutral_pose.right.rotate_y + right_leg_phase * 0.045;
     let left_fold_z = neutral_pose.left.rotate_z;
     let right_fold_z = neutral_pose.right.rotate_z;
 
@@ -925,7 +930,7 @@ fn add_elytra_triangles(
         projection,
         rect,
         light_dir,
-        neutral_pose.left.rotate_y,
+        left_yaw,
         Vec3::new(5.0, 0.0, 0.0),
     );
     add_cuboid_triangles_with_y(
@@ -943,7 +948,7 @@ fn add_elytra_triangles(
         projection,
         rect,
         light_dir,
-        neutral_pose.right.rotate_y,
+        right_yaw,
         Vec3::new(-5.0, 0.0, 0.0),
     );
 }
