@@ -20,9 +20,7 @@ const PREVIEW_ORBIT_SECONDS: f64 = 45.0;
 const PREVIEW_TARGET_FPS: f32 = 60.0;
 const PREVIEW_HEIGHT: f32 = 460.0;
 const CAMERA_DRAG_SENSITIVITY_RAD_PER_POINT: f32 = 0.0046;
-const CAMERA_INERTIA_VELOCITY_BLEND: f32 = 0.24;
-const CAMERA_INERTIA_MAX_RAD_PER_SEC: f32 = 2.2;
-const CAMERA_INERTIA_FRICTION_PER_SEC: f32 = 0.85;
+const CAMERA_INERTIA_FRICTION_PER_SEC: f32 = 2.0;
 const CAMERA_INERTIA_STOP_THRESHOLD_RAD_PER_SEC: f32 = 0.015;
 const UV_EDGE_INSET_BASE_TEXELS: f32 = 0.08;
 const UV_EDGE_INSET_OVERLAY_TEXELS: f32 = 0.38;
@@ -221,6 +219,7 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     if response.drag_started() {
         state.begin_manual_camera_control(now);
         state.camera_drag_active = true;
+        state.camera_drag_velocity = 0.0;
         state.camera_inertial_velocity = 0.0;
     }
     if state.camera_drag_active && response.dragged() {
@@ -228,17 +227,12 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
         let yaw_step = drag_step_x * CAMERA_DRAG_SENSITIVITY_RAD_PER_POINT;
         state.camera_yaw_offset += yaw_step;
         if dt > 0.000_1 && yaw_step.abs() > 0.0 {
-            let instant_velocity = (yaw_step / dt).clamp(
-                -CAMERA_INERTIA_MAX_RAD_PER_SEC,
-                CAMERA_INERTIA_MAX_RAD_PER_SEC,
-            );
-            state.camera_inertial_velocity = state.camera_inertial_velocity
-                * (1.0 - CAMERA_INERTIA_VELOCITY_BLEND)
-                + instant_velocity * CAMERA_INERTIA_VELOCITY_BLEND;
+            state.camera_drag_velocity = yaw_step / dt;
         }
     }
     if state.camera_drag_active && response.drag_stopped() {
         state.camera_drag_active = false;
+        state.camera_inertial_velocity = state.camera_drag_velocity;
         if state.camera_inertial_velocity.abs() < CAMERA_INERTIA_STOP_THRESHOLD_RAD_PER_SEC {
             state.camera_inertial_velocity = 0.0;
             state.finish_manual_camera_control(now);
@@ -2505,6 +2499,7 @@ struct SkinManagerState {
     cape_uv: FaceUvs,
     camera_yaw_offset: f32,
     camera_inertial_velocity: f32,
+    camera_drag_velocity: f32,
     camera_drag_active: bool,
     orbit_pause_started_at: Option<f64>,
     orbit_pause_accumulated_secs: f64,
@@ -2544,6 +2539,7 @@ impl Default for SkinManagerState {
             cape_uv: default_cape_uv_layout(),
             camera_yaw_offset: 0.0,
             camera_inertial_velocity: 0.0,
+            camera_drag_velocity: 0.0,
             camera_drag_active: false,
             orbit_pause_started_at: None,
             orbit_pause_accumulated_secs: 0.0,
@@ -2593,6 +2589,7 @@ impl SkinManagerState {
         self.cape_uv = default_cape_uv_layout();
         self.camera_yaw_offset = 0.0;
         self.camera_inertial_velocity = 0.0;
+        self.camera_drag_velocity = 0.0;
         self.camera_drag_active = false;
         self.orbit_pause_started_at = None;
         self.orbit_pause_accumulated_secs = 0.0;
