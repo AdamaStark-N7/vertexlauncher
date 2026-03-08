@@ -2237,8 +2237,7 @@ fn render_cape_grid(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerSt
         max_label_width = max_label_width.max(width);
     }
 
-    let available_rect = ui.available_rect_before_wrap().intersect(ui.clip_rect());
-    let available_width = available_rect.width().max(1.0);
+    let available_width = ui.available_width().max(1.0);
     let tile_width = (max_label_width + 24.0)
         .max(CAPE_TILE_WIDTH_MIN)
         .min(available_width);
