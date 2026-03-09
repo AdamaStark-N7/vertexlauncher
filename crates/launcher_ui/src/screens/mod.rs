@@ -9,6 +9,7 @@ use textui::TextUi;
 use crate::ui::theme::Theme;
 
 mod console;
+mod content_browser;
 mod instance;
 mod legal;
 mod library;
@@ -18,6 +19,7 @@ mod skins;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
     Library,
+    ContentBrowser,
     Skins,
     Settings,
     Legal,
@@ -37,6 +39,7 @@ impl AppScreen {
     pub fn label(self) -> &'static str {
         match self {
             AppScreen::Library => "Library",
+            AppScreen::ContentBrowser => "Content Browser",
             AppScreen::Skins => "Skin Manager",
             AppScreen::Settings => "Settings",
             AppScreen::Legal => "Legal",
@@ -101,6 +104,15 @@ pub fn render(
                 instances_changed: false,
                 requested_screen: output.requested_screen,
                 selected_instance_id: output.selected_instance_id,
+            }
+        }
+        AppScreen::ContentBrowser => {
+            let output =
+                content_browser::render(ui, text_ui, selected_instance_id, instances, config);
+            ScreenOutput {
+                instances_changed: false,
+                requested_screen: output.requested_screen,
+                selected_instance_id: None,
             }
         }
         AppScreen::Skins => {

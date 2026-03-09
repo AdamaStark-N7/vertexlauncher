@@ -2,6 +2,8 @@
 
 pub const BELL_RINGING_SVG: &[u8] = include_bytes!("bell-ringing.svg");
 pub const BELL_SVG: &[u8] = include_bytes!("bell.svg");
+pub const ADJUSTMENTS_SVG: &[u8] = include_bytes!("adjustments.svg");
+pub const CHECK_SVG: &[u8] = include_bytes!("check.svg");
 pub const CHEVRON_DOWN_SVG: &[u8] = include_bytes!("chevron-down.svg");
 pub const CHEVRON_RIGHT_SVG: &[u8] = include_bytes!("chevron-right.svg");
 pub const CHEVRON_UP_SVG: &[u8] = include_bytes!("chevron-up.svg");

@@ -393,7 +393,7 @@ pub fn ensure_openjdk_runtime(runtime_major: u8) -> Result<PathBuf, Installation
         .join("java")
         .join(format!("openjdk-{runtime_major}"));
     if let Some(existing) = find_java_executable_under(install_root.as_path())? {
-        return Ok(existing);
+        return Ok(canonicalize_existing_path(existing));
     }
 
     fs_create_dir_all(install_root.parent().unwrap_or_else(|| Path::new(".")))?;
@@ -416,8 +416,9 @@ pub fn ensure_openjdk_runtime(runtime_major: u8) -> Result<PathBuf, Installation
     download_file_simple(package_url.as_str(), archive_path.as_path())?;
     extract_archive(archive_path.as_path(), install_root.as_path())?;
 
-    find_java_executable_under(install_root.as_path())?
-        .ok_or(InstallationError::OpenJdkMetadataMissing { runtime_major })
+    let installed = find_java_executable_under(install_root.as_path())?
+        .ok_or(InstallationError::OpenJdkMetadataMissing { runtime_major })?;
+    Ok(canonicalize_existing_path(installed))
 }
 
 pub fn purge_cache() -> Result<(), InstallationError> {
@@ -2993,6 +2994,10 @@ fn cache_root_dir() -> PathBuf {
         Ok(dir) => PathBuf::from(dir).join(CACHE_DIR_NAME),
         Err(_) => PathBuf::from(CACHE_DIR_NAME),
     }
+}
+
+fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
+    fs_canonicalize(path.as_path()).unwrap_or(path)
 }
 
 fn platform_for_adoptium() -> Result<(&'static str, &'static str), InstallationError> {

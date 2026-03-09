@@ -23,7 +23,7 @@ use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 use crate::app::tokio_runtime;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
-    components::{icon_button, settings_widgets},
+    components::{icon_button, remote_tiled_image, settings_widgets},
     style,
 };
 use crate::{assets, console, install_activity, notification};
@@ -380,12 +380,12 @@ fn render_installed_content_section(
             .button(
                 ui,
                 ("instance_add_content_label", instance_id),
-                "Add Content",
+                "Open Content Browser",
                 &add_button_style,
             )
             .clicked()
         {
-            output.requested_screen = Some(AppScreen::Library);
+            output.requested_screen = Some(AppScreen::ContentBrowser);
         }
 
         let plus_button_id = format!("instance_add_content_plus_{instance_id}");
@@ -418,25 +418,25 @@ fn render_installed_content_section(
                     .button(
                         ui,
                         ("instance_content_popup_local", instance_id),
-                        "Browse local content",
+                        "Refresh local files",
                         &popup_button_style,
                     )
                     .clicked()
                 {
-                    state.status_message = Some(
-                        "Local content picker will be added with the content browser.".to_owned(),
-                    );
+                    state.content_metadata_cache.clear();
+                    state.status_message =
+                        Some("Refreshed installed content metadata cache.".to_owned());
                 }
                 if text_ui
                     .button(
                         ui,
                         ("instance_content_popup_mods", instance_id),
-                        "Browse mods",
+                        "Open content browser",
                         &popup_button_style,
                     )
                     .clicked()
                 {
-                    output.requested_screen = Some(AppScreen::Library);
+                    output.requested_screen = Some(AppScreen::ContentBrowser);
                 }
             });
     });
@@ -530,11 +530,7 @@ fn render_installed_content_section(
                 if rendered.delete_clicked {
                     pending_delete = Some(entry.file_path.clone());
                 } else if rendered.open_clicked {
-                    output.requested_screen = Some(AppScreen::Library);
-                    state.status_message = Some(format!(
-                        "Content browser routing for {} will be added next.",
-                        rendered.display_name
-                    ));
+                    output.requested_screen = Some(AppScreen::ContentBrowser);
                 }
                 ui.add_space(8.0);
             }
@@ -559,7 +555,6 @@ fn render_installed_content_section(
 
 #[derive(Debug, Clone)]
 struct InstalledEntryRenderResult {
-    display_name: String,
     open_clicked: bool,
     delete_clicked: bool,
 }
@@ -669,7 +664,6 @@ fn render_installed_content_entry(
     );
 
     InstalledEntryRenderResult {
-        display_name,
         open_clicked: entry_response.clicked(),
         delete_clicked: frame.inner,
     }
@@ -681,20 +675,28 @@ fn render_content_thumbnail(
     metadata: Option<&UnifiedContentEntry>,
 ) {
     let size = egui::vec2(48.0, 48.0);
-    let image = if let Some(icon_url) = metadata.and_then(|value| value.icon_url.as_deref()) {
-        egui::Image::from_uri(icon_url)
+    if let Some(icon_url) = metadata.and_then(|value| value.icon_url.as_deref()) {
+        remote_tiled_image::show(
+            ui,
+            icon_url,
+            size,
+            (id_source, "remote-icon"),
+            assets::LIBRARY_SVG,
+        );
     } else {
         let mut hasher = DefaultHasher::new();
         id_source.hash(&mut hasher);
-        egui::Image::from_bytes(
-            format!(
-                "bytes://instance/default-content-icon/{}.svg",
-                hasher.finish()
-            ),
-            assets::LIBRARY_SVG,
-        )
-    };
-    ui.add(image.fit_to_exact_size(size));
+        ui.add(
+            egui::Image::from_bytes(
+                format!(
+                    "bytes://instance/default-content-icon/{}.svg",
+                    hasher.finish()
+                ),
+                assets::LIBRARY_SVG,
+            )
+            .fit_to_exact_size(size),
+        );
+    }
 }
 
 fn list_installed_content_files(

@@ -9,6 +9,7 @@ pub const REPAINT_INTERVAL: Duration = Duration::from_millis(200);
 #[derive(Clone, Debug)]
 pub enum AuthUiStatus {
     Idle,
+    RefreshingCachedSession,
     Starting,
     AwaitingBrowser,
     WaitingForAuthorization,
@@ -19,6 +20,7 @@ impl AuthUiStatus {
     fn status_message(&self) -> Option<&str> {
         match self {
             AuthUiStatus::Idle => None,
+            AuthUiStatus::RefreshingCachedSession => Some("Refreshing cached account session..."),
             AuthUiStatus::Starting => Some("Preparing Microsoft sign-in..."),
             AuthUiStatus::AwaitingBrowser => {
                 Some("Complete sign-in in the Microsoft webview window...")
@@ -58,40 +60,39 @@ pub struct AuthState {
     accounts_state: CachedAccountsState,
     active_avatar_png: Option<Vec<u8>>,
     flow: Option<Receiver<AuthFlowEvent>>,
+    startup_renewal: Option<Receiver<Result<CachedAccountsState, String>>>,
     status: AuthUiStatus,
 }
 
 impl AuthState {
     pub fn load() -> Self {
-        let (accounts_state, status) = match auth::load_cached_accounts() {
-            Ok(state) => {
-                if state.accounts.is_empty() {
-                    (state, AuthUiStatus::Idle)
-                } else {
-                    match microsoft_client_id() {
-                        Ok(client_id) => match auth::renew_cached_accounts_tokens(&client_id) {
-                            Ok(renewed) => (renewed, AuthUiStatus::Idle),
-                            Err(err) => (
-                                state,
-                                AuthUiStatus::Error(format!(
-                                    "Loaded cached accounts, but token renewal failed: {err}"
-                                )),
-                            ),
-                        },
-                        Err(err) => (
-                            state,
-                            AuthUiStatus::Error(format!(
-                                "Loaded cached accounts, but token renewal was skipped: {err}"
-                            )),
-                        ),
-                    }
-                }
-            }
+        let (accounts_state, mut status) = match auth::load_cached_accounts() {
+            Ok(state) => (state, AuthUiStatus::Idle),
             Err(err) => (
                 CachedAccountsState::default(),
                 AuthUiStatus::Error(format!("Failed to load cached account state: {err}")),
             ),
         };
+        let mut startup_renewal = None;
+        if !accounts_state.accounts.is_empty() {
+            match microsoft_client_id() {
+                Ok(client_id) => {
+                    let (tx, rx) = mpsc::channel::<Result<CachedAccountsState, String>>();
+                    std::thread::spawn(move || {
+                        let result = auth::renew_cached_accounts_tokens(&client_id)
+                            .map_err(|err| err.to_string());
+                        let _ = tx.send(result);
+                    });
+                    startup_renewal = Some(rx);
+                    status = AuthUiStatus::RefreshingCachedSession;
+                }
+                Err(err) => {
+                    status = AuthUiStatus::Error(format!(
+                        "Loaded cached accounts, but token renewal was skipped: {err}"
+                    ));
+                }
+            }
+        }
 
         let active_avatar_png = accounts_state
             .active_account()
@@ -101,11 +102,44 @@ impl AuthState {
             accounts_state,
             active_avatar_png,
             flow: None,
+            startup_renewal,
             status,
         }
     }
 
     pub fn poll(&mut self) {
+        if let Some(startup_renewal) = self.startup_renewal.as_mut() {
+            match startup_renewal.try_recv() {
+                Ok(Ok(renewed)) => {
+                    let previous_active = self.accounts_state.active_profile_id.clone();
+                    self.accounts_state = renewed;
+                    if let Some(active_id) = previous_active.as_deref() {
+                        let _ = self.accounts_state.set_active_profile_id(active_id);
+                    }
+                    self.active_avatar_png = self
+                        .accounts_state
+                        .active_account()
+                        .and_then(CachedAccount::avatar_png_bytes);
+                    self.status = AuthUiStatus::Idle;
+                    self.startup_renewal = None;
+                }
+                Ok(Err(err)) => {
+                    self.status = AuthUiStatus::Error(format!(
+                        "Loaded cached accounts, but token renewal failed: {err}"
+                    ));
+                    self.startup_renewal = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.status = AuthUiStatus::Error(
+                        "Loaded cached accounts, but token renewal worker stopped unexpectedly."
+                            .to_owned(),
+                    );
+                    self.startup_renewal = None;
+                }
+            }
+        }
+
         let mut flow_finished = false;
 
         if let Some(flow) = self.flow.as_mut() {
@@ -267,7 +301,7 @@ impl AuthState {
     }
 
     pub fn should_request_repaint(&self) -> bool {
-        self.flow.is_some()
+        self.flow.is_some() || self.startup_renewal.is_some()
     }
 
     pub fn sign_in_in_progress(&self) -> bool {

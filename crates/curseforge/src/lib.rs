@@ -52,6 +52,41 @@ pub struct SearchProject {
     pub primary_category_id: Option<u32>,
     pub website_url: Option<String>,
     pub icon_url: Option<String>,
+    pub download_count: u64,
+    pub date_modified: Option<String>,
+}
+
+/// Detailed CurseForge project metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Project {
+    pub id: u64,
+    pub name: String,
+    pub summary: String,
+    pub slug: Option<String>,
+    pub class_id: u32,
+    pub primary_category_id: Option<u32>,
+    pub website_url: Option<String>,
+    pub icon_url: Option<String>,
+}
+
+/// Downloadable file metadata for a CurseForge project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct File {
+    pub id: u64,
+    pub display_name: String,
+    pub file_name: String,
+    pub file_date: String,
+    pub download_count: u64,
+    pub download_url: Option<String>,
+    pub dependencies: Vec<FileDependency>,
+    pub game_versions: Vec<String>,
+}
+
+/// Dependency relationship declared by a CurseForge file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileDependency {
+    pub mod_id: u64,
+    pub relation_type: u32,
 }
 
 impl Client {
@@ -150,6 +185,20 @@ impl Client {
         index: u32,
         page_size: u32,
     ) -> Result<Vec<SearchProject>, CurseForgeError> {
+        self.search_projects_with_filters(game_id, query, index, page_size, None, None, None)
+    }
+
+    /// Searches CurseForge projects with optional class and compatibility filters.
+    pub fn search_projects_with_filters(
+        &self,
+        game_id: u32,
+        query: &str,
+        index: u32,
+        page_size: u32,
+        class_id: Option<u32>,
+        game_version: Option<&str>,
+        mod_loader_type: Option<u32>,
+    ) -> Result<Vec<SearchProject>, CurseForgeError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             debug!(
@@ -166,31 +215,34 @@ impl Client {
             query = trimmed,
             index,
             page_size,
+            class_id = class_id.unwrap_or_default(),
+            game_version = game_version.unwrap_or(""),
+            mod_loader_type = mod_loader_type.unwrap_or_default(),
             "searching CurseForge projects"
         );
-        let response: DataResponse<Vec<ModRecord>> = self.get_json(
-            "/v1/mods/search",
-            &[
-                ("gameId", game_id.to_string()),
-                ("searchFilter", trimmed.to_owned()),
-                ("index", index.to_string()),
-                ("pageSize", page_size.to_string()),
-            ],
-        )?;
+        let mut query_params = vec![
+            ("gameId", game_id.to_string()),
+            ("searchFilter", trimmed.to_owned()),
+            ("index", index.to_string()),
+            ("pageSize", page_size.to_string()),
+        ];
+        if let Some(class_id) = class_id {
+            query_params.push(("classId", class_id.to_string()));
+        }
+        if let Some(game_version) = non_empty(game_version) {
+            query_params.push(("gameVersion", game_version.to_owned()));
+        }
+        if let Some(mod_loader_type) = mod_loader_type {
+            query_params.push(("modLoaderType", mod_loader_type.to_string()));
+        }
+
+        let response: DataResponse<Vec<ModRecord>> =
+            self.get_json("/v1/mods/search", &query_params)?;
 
         let projects: Vec<SearchProject> = response
             .data
             .into_iter()
-            .map(|record| SearchProject {
-                id: record.id,
-                name: record.name,
-                summary: record.summary.unwrap_or_default(),
-                slug: record.slug,
-                class_id: record.class_id,
-                primary_category_id: record.primary_category_id,
-                website_url: record.links.and_then(|links| links.website_url),
-                icon_url: record.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
-            })
+            .map(ModRecord::into_search_project)
             .collect();
         debug!(
             target: "vertexlauncher/curseforge",
@@ -200,6 +252,57 @@ impl Client {
             "CurseForge search complete"
         );
         Ok(projects)
+    }
+
+    /// Fetches a project by project ID.
+    pub fn get_mod(&self, project_id: u64) -> Result<Project, CurseForgeError> {
+        debug!(
+            target: "vertexlauncher/curseforge",
+            project_id,
+            "fetching CurseForge project"
+        );
+        let path = format!("/v1/mods/{project_id}");
+        let response: DataResponse<ModRecord> = self.get_json(path.as_str(), &[])?;
+        Ok(response.data.into_project())
+    }
+
+    /// Lists files for a project, optionally filtered by compatibility.
+    pub fn list_mod_files(
+        &self,
+        project_id: u64,
+        game_version: Option<&str>,
+        mod_loader_type: Option<u32>,
+        index: u32,
+        page_size: u32,
+    ) -> Result<Vec<File>, CurseForgeError> {
+        let page_size = page_size.clamp(1, 50);
+        let mut query_params = vec![
+            ("index", index.to_string()),
+            ("pageSize", page_size.to_string()),
+        ];
+        if let Some(game_version) = non_empty(game_version) {
+            query_params.push(("gameVersion", game_version.to_owned()));
+        }
+        if let Some(mod_loader_type) = mod_loader_type {
+            query_params.push(("modLoaderType", mod_loader_type.to_string()));
+        }
+
+        debug!(
+            target: "vertexlauncher/curseforge",
+            project_id,
+            page_size,
+            game_version = game_version.unwrap_or(""),
+            mod_loader_type = mod_loader_type.unwrap_or_default(),
+            "listing CurseForge files"
+        );
+        let path = format!("/v1/mods/{project_id}/files");
+        let response: DataResponse<Vec<FileRecord>> =
+            self.get_json(path.as_str(), &query_params)?;
+        Ok(response
+            .data
+            .into_iter()
+            .map(FileRecord::into_file)
+            .collect())
     }
 
     /// Executes a GET request and deserializes the JSON body.
@@ -297,6 +400,38 @@ struct ModRecord {
     primary_category_id: Option<u32>,
     links: Option<ModLinks>,
     logo: Option<ModLogo>,
+    download_count: Option<f64>,
+    date_modified: Option<String>,
+}
+
+impl ModRecord {
+    fn into_search_project(self) -> SearchProject {
+        SearchProject {
+            id: self.id,
+            name: self.name,
+            summary: self.summary.clone().unwrap_or_default(),
+            slug: self.slug,
+            class_id: self.class_id,
+            primary_category_id: self.primary_category_id,
+            website_url: self.links.and_then(|links| links.website_url),
+            icon_url: self.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
+            download_count: self.download_count.unwrap_or(0.0).max(0.0).round() as u64,
+            date_modified: self.date_modified,
+        }
+    }
+
+    fn into_project(self) -> Project {
+        Project {
+            id: self.id,
+            name: self.name,
+            summary: self.summary.unwrap_or_default(),
+            slug: self.slug,
+            class_id: self.class_id,
+            primary_category_id: self.primary_category_id,
+            website_url: self.links.and_then(|links| links.website_url),
+            icon_url: self.logo.and_then(|logo| logo.thumbnail_url.or(logo.url)),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -310,4 +445,55 @@ struct ModLinks {
 struct ModLogo {
     thumbnail_url: Option<String>,
     url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileRecord {
+    id: u64,
+    #[serde(default)]
+    display_name: String,
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    file_date: String,
+    download_count: Option<f64>,
+    download_url: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<FileDependencyRecord>,
+    #[serde(default)]
+    game_versions: Vec<String>,
+}
+
+impl FileRecord {
+    fn into_file(self) -> File {
+        File {
+            id: self.id,
+            display_name: self.display_name,
+            file_name: self.file_name,
+            file_date: self.file_date,
+            download_count: self.download_count.unwrap_or(0.0).max(0.0).round() as u64,
+            download_url: self.download_url,
+            dependencies: self
+                .dependencies
+                .into_iter()
+                .map(|dependency| FileDependency {
+                    mod_id: dependency.mod_id,
+                    relation_type: dependency.relation_type,
+                })
+                .collect(),
+            game_versions: self.game_versions,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileDependencyRecord {
+    mod_id: u64,
+    relation_type: u32,
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }

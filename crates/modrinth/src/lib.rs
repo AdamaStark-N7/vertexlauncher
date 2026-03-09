@@ -51,6 +51,51 @@ pub struct SearchProject {
     pub icon_url: Option<String>,
     pub author: Option<String>,
     pub project_url: String,
+    pub downloads: u64,
+    pub date_modified: Option<String>,
+}
+
+/// Detailed project metadata.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Project {
+    pub project_id: String,
+    pub slug: Option<String>,
+    pub title: String,
+    pub description: String,
+    pub project_type: String,
+    pub icon_url: Option<String>,
+    pub project_url: String,
+}
+
+/// A compatible Modrinth version entry for a project.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectVersion {
+    pub id: String,
+    pub project_id: String,
+    pub version_number: String,
+    pub date_published: String,
+    pub downloads: u64,
+    pub loaders: Vec<String>,
+    pub game_versions: Vec<String>,
+    pub dependencies: Vec<ProjectDependency>,
+    pub files: Vec<ProjectVersionFile>,
+}
+
+/// Dependency edge declared by a Modrinth project version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectDependency {
+    pub project_id: Option<String>,
+    pub version_id: Option<String>,
+    pub dependency_type: String,
+    pub file_name: Option<String>,
+}
+
+/// A downloadable file on a Modrinth project version.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectVersionFile {
+    pub url: String,
+    pub filename: String,
+    pub primary: bool,
 }
 
 impl Client {
@@ -101,6 +146,25 @@ impl Client {
         limit: u32,
         offset: u32,
     ) -> Result<Vec<SearchProject>, ModrinthError> {
+        self.search_projects_with_filters(query, limit, offset, None, None, None)
+    }
+
+    /// Searches Modrinth projects with optional compatibility filters.
+    ///
+    /// - `project_type`: values such as `mod`, `resourcepack`, `shader`, `datapack`.
+    /// - `game_version`: Minecraft version string (for example `1.20.1`).
+    /// - `loader`: mod loader slug (for example `fabric`, `forge`, `neoforge`, `quilt`).
+    ///
+    /// `loader` is only meaningful for mod projects.
+    pub fn search_projects_with_filters(
+        &self,
+        query: &str,
+        limit: u32,
+        offset: u32,
+        project_type: Option<&str>,
+        game_version: Option<&str>,
+        loader: Option<&str>,
+    ) -> Result<Vec<SearchProject>, ModrinthError> {
         let trimmed = query.trim();
         if trimmed.is_empty() {
             debug!(
@@ -116,16 +180,32 @@ impl Client {
             query = trimmed,
             limit,
             offset,
+            project_type = project_type.unwrap_or(""),
+            game_version = game_version.unwrap_or(""),
+            loader = loader.unwrap_or(""),
             "searching Modrinth projects"
         );
-        let response: SearchResponse = self.get_json(
-            "/search",
-            &[
-                ("query", trimmed.to_owned()),
-                ("limit", limit.to_string()),
-                ("offset", offset.to_string()),
-            ],
-        )?;
+        let mut search_query = vec![
+            ("query", trimmed.to_owned()),
+            ("limit", limit.to_string()),
+            ("offset", offset.to_string()),
+        ];
+        let mut facets: Vec<Vec<String>> = Vec::new();
+        if let Some(project_type) = non_empty(project_type) {
+            facets.push(vec![format!("project_type:{project_type}")]);
+        }
+        if let Some(game_version) = non_empty(game_version) {
+            facets.push(vec![format!("versions:{game_version}")]);
+        }
+        if let Some(loader) = non_empty(loader) {
+            facets.push(vec![format!("categories:{}", loader.to_ascii_lowercase())]);
+        }
+        if !facets.is_empty() {
+            let facets_json = serde_json::to_string(&facets).map_err(ModrinthError::Json)?;
+            search_query.push(("facets", facets_json));
+        }
+
+        let response: SearchResponse = self.get_json("/search", &search_query)?;
 
         let projects: Vec<SearchProject> = response
             .hits
@@ -139,6 +219,85 @@ impl Client {
             "Modrinth search complete"
         );
         Ok(projects)
+    }
+
+    /// Fetches detailed project metadata.
+    pub fn get_project(&self, project_id_or_slug: &str) -> Result<Project, ModrinthError> {
+        let project_key = project_id_or_slug.trim();
+        if project_key.is_empty() {
+            return Err(ModrinthError::Transport(
+                "project id or slug cannot be empty".to_owned(),
+            ));
+        }
+
+        debug!(
+            target: "vertexlauncher/modrinth",
+            project = project_key,
+            "fetching Modrinth project"
+        );
+        let path = format!("/project/{project_key}");
+        let project: ProjectRecord = self.get_json(path.as_str(), &[])?;
+        Ok(project.into_project())
+    }
+
+    /// Lists compatible versions for a project.
+    ///
+    /// - `project_id_or_slug`: Modrinth project ID or slug.
+    /// - `loaders`: optional loader slugs used to narrow compatibility.
+    /// - `game_versions`: optional Minecraft versions used to narrow compatibility.
+    pub fn list_project_versions(
+        &self,
+        project_id_or_slug: &str,
+        loaders: &[String],
+        game_versions: &[String],
+    ) -> Result<Vec<ProjectVersion>, ModrinthError> {
+        let project_key = project_id_or_slug.trim();
+        if project_key.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        debug!(
+            target: "vertexlauncher/modrinth",
+            project = project_key,
+            loaders = loaders.len(),
+            game_versions = game_versions.len(),
+            "listing Modrinth project versions"
+        );
+        let mut query = Vec::new();
+        if !loaders.is_empty() {
+            let json = serde_json::to_string(loaders).map_err(ModrinthError::Json)?;
+            query.push(("loaders", json));
+        }
+        if !game_versions.is_empty() {
+            let json = serde_json::to_string(game_versions).map_err(ModrinthError::Json)?;
+            query.push(("game_versions", json));
+        }
+
+        let path = format!("/project/{project_key}/version");
+        let versions: Vec<ProjectVersionRecord> = self.get_json(path.as_str(), &query)?;
+        Ok(versions
+            .into_iter()
+            .map(ProjectVersionRecord::into_project_version)
+            .collect())
+    }
+
+    /// Fetches a specific version by version ID.
+    pub fn get_version(&self, version_id: &str) -> Result<ProjectVersion, ModrinthError> {
+        let version_id = version_id.trim();
+        if version_id.is_empty() {
+            return Err(ModrinthError::Transport(
+                "version id cannot be empty".to_owned(),
+            ));
+        }
+
+        debug!(
+            target: "vertexlauncher/modrinth",
+            version_id,
+            "fetching Modrinth version"
+        );
+        let path = format!("/version/{version_id}");
+        let version: ProjectVersionRecord = self.get_json(path.as_str(), &[])?;
+        Ok(version.into_project_version())
     }
 
     /// Executes a GET request and deserializes the JSON body.
@@ -227,17 +386,18 @@ struct SearchHit {
     project_type: String,
     icon_url: Option<String>,
     author: Option<String>,
+    #[serde(default)]
+    downloads: u64,
+    date_modified: Option<String>,
 }
 
 impl SearchHit {
     fn into_search_project(self) -> SearchProject {
-        let canonical_slug = self
-            .slug
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or(self.project_id.as_str());
-        let canonical_type = self.project_type.trim();
-        let project_url = format!("https://modrinth.com/{canonical_type}/{canonical_slug}");
+        let project_url = build_project_url(
+            self.project_type.as_str(),
+            self.slug.as_deref(),
+            self.project_id.as_str(),
+        );
 
         SearchProject {
             project_id: self.project_id,
@@ -248,6 +408,129 @@ impl SearchHit {
             icon_url: self.icon_url,
             author: self.author,
             project_url,
+            downloads: self.downloads,
+            date_modified: self.date_modified,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectRecord {
+    id: String,
+    slug: Option<String>,
+    title: String,
+    #[serde(default)]
+    description: String,
+    project_type: String,
+    icon_url: Option<String>,
+}
+
+impl ProjectRecord {
+    fn into_project(self) -> Project {
+        let project_url = build_project_url(
+            self.project_type.as_str(),
+            self.slug.as_deref(),
+            self.id.as_str(),
+        );
+
+        Project {
+            project_id: self.id,
+            slug: self.slug,
+            title: self.title,
+            description: self.description,
+            project_type: self.project_type,
+            icon_url: self.icon_url,
+            project_url,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVersionRecord {
+    id: String,
+    #[serde(default)]
+    project_id: String,
+    #[serde(default)]
+    version_number: String,
+    #[serde(default)]
+    date_published: String,
+    #[serde(default)]
+    downloads: u64,
+    #[serde(default)]
+    loaders: Vec<String>,
+    #[serde(default)]
+    game_versions: Vec<String>,
+    #[serde(default)]
+    dependencies: Vec<ProjectDependencyRecord>,
+    #[serde(default)]
+    files: Vec<ProjectVersionFileRecord>,
+}
+
+impl ProjectVersionRecord {
+    fn into_project_version(self) -> ProjectVersion {
+        ProjectVersion {
+            id: self.id,
+            project_id: self.project_id,
+            version_number: self.version_number,
+            date_published: self.date_published,
+            downloads: self.downloads,
+            loaders: self.loaders,
+            game_versions: self.game_versions,
+            dependencies: self
+                .dependencies
+                .into_iter()
+                .map(ProjectDependencyRecord::into_project_dependency)
+                .collect(),
+            files: self
+                .files
+                .into_iter()
+                .map(|file| ProjectVersionFile {
+                    url: file.url,
+                    filename: file.filename,
+                    primary: file.primary,
+                })
+                .collect(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectDependencyRecord {
+    project_id: Option<String>,
+    version_id: Option<String>,
+    #[serde(default)]
+    dependency_type: String,
+    file_name: Option<String>,
+}
+
+impl ProjectDependencyRecord {
+    fn into_project_dependency(self) -> ProjectDependency {
+        ProjectDependency {
+            project_id: self.project_id,
+            version_id: self.version_id,
+            dependency_type: self.dependency_type,
+            file_name: self.file_name,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct ProjectVersionFileRecord {
+    url: String,
+    filename: String,
+    #[serde(default)]
+    primary: bool,
+}
+
+fn build_project_url(project_type: &str, slug: Option<&str>, fallback_id: &str) -> String {
+    let canonical_slug = slug
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_id);
+    let canonical_type = project_type.trim();
+    format!("https://modrinth.com/{canonical_type}/{canonical_slug}")
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
 }

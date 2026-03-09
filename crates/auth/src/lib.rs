@@ -121,7 +121,7 @@ pub fn renew_cached_accounts_tokens(client_id: &str) -> Result<CachedAccountsSta
         else {
             tracing::info!(
                 target: "vertexlauncher/auth/renew",
-                profile = %account.minecraft_profile.id,
+                display_name = %account.minecraft_profile.name,
                 "Skipping token renewal: no Microsoft refresh token cached."
             );
             continue;
@@ -139,7 +139,7 @@ pub fn renew_cached_accounts_tokens(client_id: &str) -> Result<CachedAccountsSta
             Ok(renewed) => {
                 tracing::info!(
                     target: "vertexlauncher/auth/renew",
-                    profile = %renewed.minecraft_profile.id,
+                    display_name = %renewed.minecraft_profile.name,
                     "Renewed cached account session."
                 );
                 *account = renewed;
@@ -148,7 +148,7 @@ pub fn renew_cached_accounts_tokens(client_id: &str) -> Result<CachedAccountsSta
             Err(err) => {
                 tracing::warn!(
                     target: "vertexlauncher/auth/renew",
-                    profile = %account.minecraft_profile.id,
+                    display_name = %account.minecraft_profile.name,
                     error = %err,
                     "Failed to renew cached account session; keeping existing cached token."
                 );
