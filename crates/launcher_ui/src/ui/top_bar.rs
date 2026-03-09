@@ -1,10 +1,12 @@
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
+use std::sync::{Mutex, OnceLock};
 
 use egui::{
-    self, Align, Button, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
+    self, Align, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
     ViewportCommand,
 };
+use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
 use crate::{
@@ -23,6 +25,7 @@ const ACTIVE_USER_TO_PROFILE_GAP: f32 = style::SPACE_SM;
 const ACTIVE_USER_BUTTON_MIN_WIDTH: f32 = 148.0;
 const PROFILE_POPUP_MIN_WIDTH: f32 = 310.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
+const PROFILE_BUTTON_CORNER_RADIUS: u8 = 10;
 
 #[derive(Debug, Clone, Default)]
 pub struct TopBarOutput {
@@ -293,24 +296,38 @@ fn render_profile_button(
     if let Some(avatar_png) = profile_ui.avatar_png {
         let mut hasher = DefaultHasher::new();
         avatar_png.hash(&mut hasher);
-        let uri = format!("bytes://vertex-profile/avatar-{:016x}.png", hasher.finish());
-        let icon_size = (button_size - 8.0).clamp(10.0, button_size);
-        let icon = egui::Image::from_bytes(uri, avatar_png.to_vec())
-            .fit_to_exact_size(egui::vec2(icon_size, icon_size));
+        let avatar_hash = hasher.finish();
+        let uri = format!("bytes://vertex-profile/avatar-rounded-{avatar_hash:016x}.png");
+        let icon = egui::Image::from_bytes(
+            uri,
+            rounded_profile_avatar_png(avatar_hash, avatar_png, PROFILE_BUTTON_CORNER_RADIUS),
+        )
+        .fit_to_exact_size(egui::vec2(button_size.max(1.0), button_size.max(1.0)));
 
-        let button = Button::image(icon)
-            .frame(true)
-            .stroke(egui::Stroke::new(
-                1.0,
-                ui.visuals().widgets.inactive.bg_stroke.color,
-            ))
-            .fill(if profile_ui.sign_in_in_progress {
-                ui.visuals().widgets.active.weak_bg_fill
-            } else {
-                ui.visuals().widgets.inactive.weak_bg_fill
-            });
-
-        ui.add_sized([button_size, button_size], button)
+        let (rect, response) =
+            ui.allocate_exact_size(egui::vec2(button_size, button_size), egui::Sense::click());
+        let fill = if profile_ui.sign_in_in_progress {
+            ui.visuals().widgets.active.weak_bg_fill
+        } else if response.is_pointer_button_down_on() {
+            ui.visuals().widgets.active.weak_bg_fill
+        } else if response.hovered() {
+            ui.visuals().widgets.hovered.weak_bg_fill
+        } else {
+            ui.visuals().widgets.inactive.weak_bg_fill
+        };
+        ui.painter().rect_filled(
+            rect,
+            egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS),
+            fill,
+        );
+        ui.painter().rect_stroke(
+            rect,
+            egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS),
+            egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+            egui::StrokeKind::Inside,
+        );
+        let _ = ui.put(rect, icon);
+        response
     } else if profile_ui.display_name.is_none() && !profile_ui.sign_in_in_progress {
         let sign_in_style = ButtonOptions {
             min_size: egui::vec2((button_size * 3.2).clamp(68.0, 110.0), button_size),
@@ -340,6 +357,68 @@ fn render_profile_button(
         )
         .inner
     }
+}
+
+fn rounded_profile_avatar_png(cache_key: u64, avatar_png: &[u8], radius: u8) -> Vec<u8> {
+    static CACHE: OnceLock<Mutex<HashMap<u64, Vec<u8>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(cache) = cache.lock()
+        && let Some(bytes) = cache.get(&cache_key)
+    {
+        return bytes.clone();
+    }
+
+    let rounded = round_avatar_png_bytes(avatar_png, radius).unwrap_or_else(|| avatar_png.to_vec());
+
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(cache_key, rounded.clone());
+    }
+
+    rounded
+}
+
+fn round_avatar_png_bytes(avatar_png: &[u8], radius: u8) -> Option<Vec<u8>> {
+    let mut image = image::load_from_memory(avatar_png).ok()?.to_rgba8();
+    let width = image.width();
+    let height = image.height();
+    let radius = radius as i32;
+    let width_i32 = i32::try_from(width).ok()?;
+    let height_i32 = i32::try_from(height).ok()?;
+
+    for y in 0..height {
+        for x in 0..width {
+            let x_i32 = i32::try_from(x).ok()?;
+            let y_i32 = i32::try_from(y).ok()?;
+            let dx = if x_i32 < radius {
+                radius - 1 - x_i32
+            } else if x_i32 >= width_i32 - radius {
+                x_i32 - (width_i32 - radius)
+            } else {
+                0
+            };
+            let dy = if y_i32 < radius {
+                radius - 1 - y_i32
+            } else if y_i32 >= height_i32 - radius {
+                y_i32 - (height_i32 - radius)
+            } else {
+                0
+            };
+
+            if dx > 0 || dy > 0 {
+                let distance_sq = dx * dx + dy * dy;
+                if distance_sq >= radius * radius {
+                    image.get_pixel_mut(x, y).0[3] = 0;
+                }
+            }
+        }
+    }
+
+    let mut bytes = Vec::new();
+    PngEncoder::new(&mut bytes)
+        .write_image(image.as_raw(), width, height, ColorType::Rgba8.into())
+        .ok()?;
+    Some(bytes)
 }
 
 fn render_active_user_terminal_button(

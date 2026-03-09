@@ -1075,7 +1075,7 @@ fn java_runtime_from_major(major: u8) -> Option<JavaRuntimeVersion> {
 }
 
 fn render_instance_thumbnail(ui: &mut Ui, instance: &InstanceRecord) {
-    let thumbnail_width = (TILE_WIDTH - 20.0).max(120.0);
+    let thumbnail_width = ui.available_width().max(120.0);
     let thumbnail_size = egui::vec2(thumbnail_width, TILE_THUMBNAIL_HEIGHT);
 
     let frame = egui::Frame::new()
