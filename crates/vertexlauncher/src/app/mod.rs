@@ -32,6 +32,7 @@ mod cli;
 mod config_format_modal;
 mod create_instance_modal;
 mod fonts;
+mod import_instance_modal;
 mod native_options;
 mod taskbar_progress;
 mod tracing_setup;
@@ -52,6 +53,8 @@ struct VertexApp {
     instance_store: InstanceStore,
     show_create_instance_modal: bool,
     create_instance_state: create_instance_modal::CreateInstanceState,
+    show_import_instance_modal: bool,
+    import_instance_state: import_instance_modal::ImportInstanceState,
     auth: AuthState,
     text_ui: TextUi,
     last_frame_end: Option<Instant>,
@@ -131,6 +134,8 @@ impl VertexApp {
             instance_store,
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
+            show_import_instance_modal: false,
+            import_instance_state: import_instance_modal::ImportInstanceState::default(),
             auth: AuthState::load(streamer_mode_enabled),
             text_ui,
             last_frame_end: None,
@@ -356,6 +361,10 @@ impl eframe::App for VertexApp {
             self.show_create_instance_modal = true;
             self.create_instance_state.error = None;
         }
+        if sidebar_output.import_instance_clicked {
+            self.show_import_instance_modal = true;
+            self.import_instance_state.error = None;
+        }
 
         let mut screen_output = screens::ScreenOutput::default();
         let wgpu_target_format = frame.wgpu_render_state().map(|state| state.target_format);
@@ -467,6 +476,46 @@ impl eframe::App for VertexApp {
                         Err(err) => {
                             self.create_instance_state.error =
                                 Some(format!("Failed to create instance: {err}"));
+                        }
+                    }
+                }
+            }
+        }
+
+        if self.show_import_instance_modal {
+            match import_instance_modal::render(
+                ctx,
+                &mut self.text_ui,
+                &mut self.import_instance_state,
+            ) {
+                import_instance_modal::ModalAction::None => {}
+                import_instance_modal::ModalAction::Cancel => {
+                    self.show_import_instance_modal = false;
+                    self.import_instance_state.reset();
+                }
+                import_instance_modal::ModalAction::Import(request) => {
+                    let installations_root =
+                        PathBuf::from(self.config.minecraft_installations_root());
+                    match import_instance_modal::import_package(
+                        &mut self.instance_store,
+                        installations_root.as_path(),
+                        request,
+                    ) {
+                        Ok(instance) => {
+                            start_initial_instance_install(
+                                &instance,
+                                installations_root.as_path(),
+                                &self.config,
+                            );
+                            self.selected_instance_id = Some(instance.id);
+                            self.active_screen = screens::AppScreen::Instance;
+                            self.show_import_instance_modal = false;
+                            self.import_instance_state.reset();
+                            self.refresh_instance_shortcuts();
+                        }
+                        Err(err) => {
+                            self.import_instance_state.error =
+                                Some(format!("Failed to import profile: {err}"));
                         }
                     }
                 }

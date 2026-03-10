@@ -24,6 +24,7 @@ pub struct SidebarOutput {
     pub selected_screen: Option<AppScreen>,
     pub selected_profile_id: Option<String>,
     pub create_instance_clicked: bool,
+    pub import_instance_clicked: bool,
 }
 
 pub fn render(
@@ -130,16 +131,37 @@ fn render_segments(
                             ui,
                             "create_instance",
                             assets::PLUS_SVG,
-                            "Create instance",
+                            "Profile actions",
                             false,
                             layout.nav_icon_width,
                         )
                     },
                 )
                 .inner;
-            if create_response.clicked() {
-                output.create_instance_clicked = true;
-            }
+            let _ = egui::Popup::menu(&create_response)
+                .id(ui.id().with("sidebar_create_instance_popup"))
+                .width(220.0)
+                .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+                .show(|ui| {
+                    if ui
+                        .add_sized(
+                            [ui.available_width().max(120.0), style::CONTROL_HEIGHT],
+                            egui::Button::new("Create from scratch"),
+                        )
+                        .clicked()
+                    {
+                        output.create_instance_clicked = true;
+                    }
+                    if ui
+                        .add_sized(
+                            [ui.available_width().max(120.0), style::CONTROL_HEIGHT],
+                            egui::Button::new("Import profile"),
+                        )
+                        .clicked()
+                    {
+                        output.import_instance_clicked = true;
+                    }
+                });
 
             ui.add_space(style::SPACE_LG);
             let (divider_rect, _) = ui.allocate_exact_size(

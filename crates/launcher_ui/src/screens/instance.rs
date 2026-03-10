@@ -98,6 +98,8 @@ struct InstalledContentFile {
     file_path: PathBuf,
     lookup_query: String,
     lookup_key: String,
+    fallback_lookup_query: Option<String>,
+    fallback_lookup_key: Option<String>,
     managed_identity: Option<InstalledContentIdentity>,
 }
 
@@ -158,6 +160,8 @@ struct InstanceScreenState {
     runtime_prepare_instance_root: Option<String>,
     runtime_prepare_user_key: Option<String>,
     show_settings_modal: bool,
+    show_export_vtmpack_modal: bool,
+    export_vtmpack_options: VtmpackExportOptions,
     launch_username: Option<String>,
     launch_user_key: Option<String>,
 }
@@ -229,6 +233,8 @@ impl InstanceScreenState {
             runtime_prepare_instance_root: None,
             runtime_prepare_user_key: None,
             show_settings_modal: false,
+            show_export_vtmpack_modal: false,
+            export_vtmpack_options: VtmpackExportOptions::default(),
             launch_username: None,
             launch_user_key: None,
         }
@@ -358,6 +364,14 @@ pub fn render(
     );
     ui.add_space(10.0);
     output.instances_changed |= render_instance_settings_modal(
+        ui.ctx(),
+        text_ui,
+        instance_id,
+        &mut state,
+        instances,
+        config,
+    );
+    render_export_vtmpack_modal(
         ui.ctx(),
         text_ui,
         instance_id,
@@ -542,6 +556,8 @@ fn render_installed_content_section(
                         state,
                         entry.lookup_key.as_str(),
                         entry.lookup_query.as_str(),
+                        entry.fallback_lookup_key.as_deref(),
+                        entry.fallback_lookup_query.as_deref(),
                         entry.managed_identity.as_ref(),
                         state.selected_content_tab,
                     );
@@ -948,6 +964,22 @@ fn list_installed_content_files(
             .as_ref()
             .map(|identity| identity.name.clone())
             .unwrap_or_else(|| derive_installed_lookup_query(path.as_path(), file_name.as_str()));
+        let (fallback_lookup_query, fallback_lookup_key) = if managed_identity.is_some() {
+            (None, None)
+        } else {
+            let fallback_query = derive_raw_lookup_query(path.as_path(), file_name.as_str());
+            let fallback_key_suffix = normalize_lookup_key(fallback_query.as_str());
+            if fallback_key_suffix.is_empty()
+                || fallback_key_suffix == normalize_lookup_key(lookup_query.as_str())
+            {
+                (None, None)
+            } else {
+                (
+                    Some(fallback_query),
+                    Some(format!("{}::{fallback_key_suffix}", tab.folder_name())),
+                )
+            }
+        };
         let lookup_key = format!(
             "{}::{}",
             tab.folder_name(),
@@ -958,6 +990,8 @@ fn list_installed_content_files(
             file_path: path,
             lookup_query,
             lookup_key,
+            fallback_lookup_query,
+            fallback_lookup_key,
             managed_identity,
         });
     }
@@ -1025,6 +1059,15 @@ fn derive_installed_lookup_query(path: &Path, fallback_file_name: &str) -> Strin
     } else {
         kept.join(" ")
     }
+}
+
+fn derive_raw_lookup_query(path: &Path, fallback_file_name: &str) -> String {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(fallback_file_name)
+        .to_owned()
 }
 
 fn looks_like_version_segment(value: &str) -> bool {
@@ -1854,50 +1897,12 @@ fn render_instance_settings_modal(
                         .button(
                             ui,
                             ("instance_export_vtmpack", instance_id),
-                            "Export .vtmpack",
+                            "Export .vtmpack...",
                             &refresh_style,
                         )
                         .clicked()
                     {
-                        if let Some(instance) = instances.find(instance_id) {
-                            let installations_root =
-                                PathBuf::from(config.minecraft_installations_root());
-                            let instance_root =
-                                instances::instance_root_path(&installations_root, instance);
-                            let default_file_name =
-                                default_vtmpack_file_name(instance.name.as_str());
-                            let selected_output = rfd::FileDialog::new()
-                                .set_title("Export Modpack")
-                                .set_file_name(default_file_name.as_str())
-                                .add_filter("Vertex Modpack", &[VTMPACK_EXTENSION])
-                                .save_file();
-
-                            if let Some(selected_path) = selected_output {
-                                let output_path = enforce_vtmpack_extension(selected_path);
-                                match export_instance_as_vtmpack(
-                                    instance,
-                                    instance_root.as_path(),
-                                    output_path.as_path(),
-                                ) {
-                                    Ok(stats) => {
-                                        state.status_message = Some(format!(
-                                            "Exported {} ({} bundled mods, {} config files) to {}",
-                                            instance.name,
-                                            stats.bundled_mod_files,
-                                            stats.config_files,
-                                            output_path.display()
-                                        ));
-                                    }
-                                    Err(err) => {
-                                        state.status_message =
-                                            Some(format!("Failed to export .vtmpack: {err}"));
-                                    }
-                                }
-                            }
-                        } else {
-                            state.status_message =
-                                Some("Instance was removed before export.".to_owned());
-                        }
+                        state.show_export_vtmpack_modal = true;
                     }
                     ui.add_space(8.0);
 
@@ -2083,6 +2088,178 @@ fn render_install_feedback(
             },
         );
     }
+}
+
+fn render_export_vtmpack_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &mut InstanceScreenState,
+    instances: &InstanceStore,
+    config: &Config,
+) {
+    if !state.show_export_vtmpack_modal {
+        return;
+    }
+
+    let mut open = state.show_export_vtmpack_modal;
+    let mut close_requested = false;
+    let viewport_rect = ctx.input(|i| i.content_rect());
+    let modal_width = viewport_rect.width().min(560.0).max(320.0);
+    let modal_height = viewport_rect.height().min(340.0).max(220.0);
+    let modal_pos = egui::pos2(
+        (viewport_rect.center().x - modal_width * 0.5)
+            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
+        (viewport_rect.center().y - modal_height * 0.5)
+            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
+    );
+    modal::show_scrim(
+        ctx,
+        ("instance_export_vtmpack_modal_scrim", instance_id),
+        viewport_rect,
+    );
+
+    let mut export_requested = false;
+    egui::Window::new("Export .vtmpack")
+        .id(egui::Id::new(("instance_export_vtmpack_modal", instance_id)))
+        .order(egui::Order::Foreground)
+        .open(&mut open)
+        .fixed_pos(modal_pos)
+        .fixed_size(egui::vec2(modal_width, modal_height))
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .title_bar(false)
+        .hscroll(false)
+        .vscroll(false)
+        .constrain(true)
+        .constrain_to(viewport_rect)
+        .frame(modal::window_frame(ctx))
+        .show(ctx, |ui| {
+            let title_style = LabelOptions {
+                font_size: 26.0,
+                line_height: 30.0,
+                weight: 700,
+                color: ui.visuals().text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let body_style = LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: true,
+                ..LabelOptions::default()
+            };
+            let _ = text_ui.label(
+                ui,
+                ("instance_export_vtmpack_title", instance_id),
+                "Export .vtmpack",
+                &title_style,
+            );
+            let _ = text_ui.label(
+                ui,
+                ("instance_export_vtmpack_body", instance_id),
+                "Choose whether the exported pack may reference CurseForge metadata directly, or whether CurseForge-managed files should be bundled instead.",
+                &body_style,
+            );
+            ui.add_space(12.0);
+
+            for provider_mode in [
+                VtmpackProviderMode::IncludeCurseForge,
+                VtmpackProviderMode::ExcludeCurseForge,
+            ] {
+                let selected = state.export_vtmpack_options.provider_mode == provider_mode;
+                if ui.radio(selected, provider_mode.label()).clicked() {
+                    state.export_vtmpack_options.provider_mode = provider_mode;
+                }
+            }
+
+            ui.add_space(12.0);
+            let explanation = match state.export_vtmpack_options.provider_mode {
+                VtmpackProviderMode::IncludeCurseForge => {
+                    "Managed CurseForge entries stay downloadable in the pack manifest."
+                }
+                VtmpackProviderMode::ExcludeCurseForge => {
+                    "CurseForge metadata is removed from the export. CurseForge-managed files are bundled into the pack unless they already use Modrinth as the selected source."
+                }
+            };
+            let _ = text_ui.label(
+                ui,
+                ("instance_export_vtmpack_explanation", instance_id),
+                explanation,
+                &body_style,
+            );
+
+            ui.add_space(16.0);
+            ui.horizontal(|ui| {
+                if text_ui
+                    .button(
+                        ui,
+                        ("instance_export_vtmpack_cancel", instance_id),
+                        "Cancel",
+                        &ButtonOptions::default(),
+                    )
+                    .clicked()
+                {
+                    close_requested = true;
+                }
+                if text_ui
+                    .button(
+                        ui,
+                        ("instance_export_vtmpack_confirm", instance_id),
+                        "Choose file",
+                        &ButtonOptions::default(),
+                    )
+                    .clicked()
+                {
+                    export_requested = true;
+                }
+            });
+        });
+
+    if close_requested {
+        open = false;
+    }
+
+    if export_requested {
+        open = false;
+        if let Some(instance) = instances.find(instance_id) {
+            let installations_root = PathBuf::from(config.minecraft_installations_root());
+            let instance_root = instances::instance_root_path(&installations_root, instance);
+            let default_file_name = default_vtmpack_file_name(instance.name.as_str());
+            let selected_output = rfd::FileDialog::new()
+                .set_title("Export Modpack")
+                .set_file_name(default_file_name.as_str())
+                .add_filter("Vertex Modpack", &[VTMPACK_EXTENSION])
+                .save_file();
+
+            if let Some(selected_path) = selected_output {
+                let output_path = enforce_vtmpack_extension(selected_path);
+                match export_instance_as_vtmpack(
+                    instance,
+                    instance_root.as_path(),
+                    output_path.as_path(),
+                    state.export_vtmpack_options,
+                ) {
+                    Ok(stats) => {
+                        state.status_message = Some(format!(
+                            "Exported {} ({} bundled mods, {} config files) to {}",
+                            instance.name,
+                            stats.bundled_mod_files,
+                            stats.config_files,
+                            output_path.display()
+                        ));
+                    }
+                    Err(err) => {
+                        state.status_message = Some(format!("Failed to export .vtmpack: {err}"));
+                    }
+                }
+            }
+        } else {
+            state.status_message = Some("Instance was removed before export.".to_owned());
+        }
+    }
+
+    state.show_export_vtmpack_modal = open;
 }
 
 fn render_runtime_row(
@@ -2923,6 +3100,8 @@ fn request_content_metadata_lookup(
     state: &mut InstanceScreenState,
     lookup_key: &str,
     lookup_query: &str,
+    fallback_lookup_key: Option<&str>,
+    fallback_lookup_query: Option<&str>,
     managed_identity: Option<&InstalledContentIdentity>,
     tab: InstalledContentTab,
 ) {
@@ -2946,6 +3125,14 @@ fn request_content_metadata_lookup(
     state.content_lookup_in_flight.insert(key_for_state.clone());
     let key_for_result = key_for_state.clone();
     let query_for_search = query.to_owned();
+    let fallback_key_for_search = fallback_lookup_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let fallback_query_for_search = fallback_lookup_query
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
     let managed_identity = managed_identity.cloned();
 
     let _ = tokio_runtime::spawn(async move {
@@ -2955,10 +3142,25 @@ fn request_content_metadata_lookup(
             {
                 return Some(entry);
             }
-            search_minecraft_content(query_for_search.as_str(), 25)
+            let primary = search_minecraft_content(query_for_search.as_str(), 25)
                 .ok()
                 .and_then(|search| {
                     choose_preferred_content_entry(search.entries, key_for_result.as_str(), tab)
+                });
+            if primary.is_some() {
+                return primary;
+            }
+
+            let Some(fallback_query) = fallback_query_for_search.as_deref() else {
+                return None;
+            };
+            let fallback_lookup_key = fallback_key_for_search
+                .as_deref()
+                .unwrap_or(key_for_result.as_str());
+            search_minecraft_content(fallback_query, 25)
+                .ok()
+                .and_then(|search| {
+                    choose_preferred_content_entry(search.entries, fallback_lookup_key, tab)
                 })
         })
         .await
@@ -3047,7 +3249,8 @@ fn choose_preferred_content_entry(
         return None;
     }
 
-    let lookup_tokens: Vec<&str> = target_key.split_whitespace().collect();
+    let lookup_tokens = split_lookup_tokens(target_key);
+    let canonical_lookup_tokens = trim_ignorable_lookup_suffix(lookup_tokens.as_slice());
     let mut best: Option<(i32, UnifiedContentEntry)> = None;
 
     for entry in entries {
@@ -3059,9 +3262,9 @@ fn choose_preferred_content_entry(
         }
 
         let normalized_name = normalize_lookup_key(entry.name.as_str());
-        let entry_tokens: Vec<&str> = normalized_name.split_whitespace().collect();
+        let entry_tokens = split_lookup_tokens(normalized_name.as_str());
         let mut overlap = 0i32;
-        for token in &lookup_tokens {
+        for token in canonical_lookup_tokens {
             if token.len() < 2 {
                 continue;
             }
@@ -3069,22 +3272,36 @@ fn choose_preferred_content_entry(
                 overlap += 1;
             }
         }
-        let strong_name_match = normalized_name == target_key
-            || normalized_name.contains(target_key)
-            || target_key.contains(normalized_name.as_str())
-            || overlap >= lookup_tokens.len().min(2) as i32;
-        if !strong_name_match {
+        let candidate_covers_lookup = !canonical_lookup_tokens.is_empty()
+            && canonical_lookup_tokens
+                .iter()
+                .all(|token| entry_tokens.iter().any(|entry_token| entry_token == token));
+        let lookup_covers_candidate = query_has_only_ignorable_suffix_tokens(
+            lookup_tokens.as_slice(),
+            entry_tokens.as_slice(),
+        );
+        if normalized_name != target_key
+            && entry_tokens.as_slice() != canonical_lookup_tokens
+            && !candidate_covers_lookup
+            && !lookup_covers_candidate
+        {
             continue;
         }
 
-        if normalized_name == target_key {
+        if normalized_name == target_key || entry_tokens.as_slice() == canonical_lookup_tokens {
             score += 600;
         } else {
-            if normalized_name.contains(target_key) || target_key.contains(normalized_name.as_str())
-            {
-                score += 220;
+            if candidate_covers_lookup {
+                score += 300;
+                if normalized_name.contains(target_key) {
+                    score += 40;
+                }
             }
             score += overlap * 60;
+            if lookup_covers_candidate {
+                score += 140;
+            }
+            score -= (entry_tokens.len() as i32 - canonical_lookup_tokens.len() as i32).abs() * 8;
         }
 
         if !entry.summary.trim().is_empty() {
@@ -3110,6 +3327,51 @@ fn choose_preferred_content_entry(
     }
 
     best.map(|(_, entry)| entry)
+}
+
+fn split_lookup_tokens(value: &str) -> Vec<&str> {
+    value
+        .split_whitespace()
+        .filter(|token| !token.is_empty())
+        .collect()
+}
+
+fn trim_ignorable_lookup_suffix<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
+    let trimmed_len = tokens
+        .iter()
+        .rposition(|token| !is_ignorable_lookup_suffix_token(token))
+        .map(|index| index + 1)
+        .unwrap_or(tokens.len());
+    &tokens[..trimmed_len]
+}
+
+fn is_ignorable_lookup_suffix_token(token: &str) -> bool {
+    matches!(
+        token,
+        "fabric"
+            | "forge"
+            | "neoforge"
+            | "quilt"
+            | "rift"
+            | "liteloader"
+            | "loader"
+            | "mod"
+            | "mods"
+            | "minecraft"
+            | "mc"
+            | "client"
+            | "server"
+    )
+}
+
+fn query_has_only_ignorable_suffix_tokens(
+    query_tokens: &[&str],
+    candidate_tokens: &[&str],
+) -> bool {
+    query_tokens.starts_with(candidate_tokens)
+        && query_tokens[candidate_tokens.len()..]
+            .iter()
+            .all(|token| is_ignorable_lookup_suffix_token(token))
 }
 
 fn content_source_priority(source: ContentSource) -> i32 {
@@ -3765,6 +4027,34 @@ struct VtmpackExportStats {
     config_files: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VtmpackProviderMode {
+    IncludeCurseForge,
+    ExcludeCurseForge,
+}
+
+impl VtmpackProviderMode {
+    fn label(self) -> &'static str {
+        match self {
+            VtmpackProviderMode::IncludeCurseForge => "Allow CurseForge project IDs",
+            VtmpackProviderMode::ExcludeCurseForge => "Exclude CurseForge as a provider",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VtmpackExportOptions {
+    provider_mode: VtmpackProviderMode,
+}
+
+impl Default for VtmpackExportOptions {
+    fn default() -> Self {
+        Self {
+            provider_mode: VtmpackProviderMode::IncludeCurseForge,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct VtmpackManifest {
     format: String,
@@ -3797,13 +4087,13 @@ struct VtmpackDownloadableEntry {
     selected_version_name: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ManagedContentManifest {
     #[serde(default)]
     projects: HashMap<String, ManagedContentManifestProject>,
 }
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct ManagedContentManifestProject {
     #[serde(default)]
     project_key: String,
@@ -3852,34 +4142,70 @@ fn enforce_vtmpack_extension(mut path: PathBuf) -> PathBuf {
     path
 }
 
+fn sanitize_managed_manifest_for_export(
+    manifest: &ManagedContentManifest,
+    options: VtmpackExportOptions,
+) -> ManagedContentManifest {
+    match options.provider_mode {
+        VtmpackProviderMode::IncludeCurseForge => manifest.clone(),
+        VtmpackProviderMode::ExcludeCurseForge => {
+            let mut sanitized = ManagedContentManifest::default();
+            for (key, project) in &manifest.projects {
+                let selected_source = project
+                    .selected_source
+                    .as_deref()
+                    .map(str::trim)
+                    .map(str::to_ascii_lowercase);
+                if selected_source.as_deref() == Some("curseforge") {
+                    continue;
+                }
+
+                let mut project = project.clone();
+                project.curseforge_project_id = None;
+                sanitized.projects.insert(key.clone(), project);
+            }
+            sanitized
+        }
+    }
+}
+
 fn export_instance_as_vtmpack(
     instance: &InstanceRecord,
     instance_root: &Path,
     output_path: &Path,
+    options: VtmpackExportOptions,
 ) -> Result<VtmpackExportStats, String> {
     let managed_manifest_path = instance_root.join(VERTEX_CONTENT_MANIFEST_FILE_NAME);
-    let managed_manifest_raw = fs::read_to_string(managed_manifest_path.as_path()).ok();
-    let managed_manifest = managed_manifest_raw
+    let managed_manifest = fs::read_to_string(managed_manifest_path.as_path())
+        .ok()
         .as_deref()
         .and_then(|raw| toml::from_str::<ManagedContentManifest>(raw).ok())
         .unwrap_or_default();
+    let sanitized_managed_manifest =
+        sanitize_managed_manifest_for_export(&managed_manifest, options);
 
-    let downloadable_entries = managed_manifest
+    let downloadable_entries = sanitized_managed_manifest
         .projects
         .iter()
-        .map(|(project_key, project)| VtmpackDownloadableEntry {
-            project_key: if project.project_key.trim().is_empty() {
-                project_key.clone()
-            } else {
-                project.project_key.clone()
-            },
-            name: project.name.clone(),
-            file_path: normalize_pack_path(project.file_path.as_str()),
-            modrinth_project_id: project.modrinth_project_id.clone(),
-            curseforge_project_id: project.curseforge_project_id,
-            selected_source: project.selected_source.clone(),
-            selected_version_id: project.selected_version_id.clone(),
-            selected_version_name: project.selected_version_name.clone(),
+        .filter_map(|(project_key, project)| {
+            let normalized_path = normalize_pack_path(project.file_path.as_str());
+            if normalized_path.is_empty() {
+                return None;
+            }
+            Some(VtmpackDownloadableEntry {
+                project_key: if project.project_key.trim().is_empty() {
+                    project_key.clone()
+                } else {
+                    project.project_key.clone()
+                },
+                name: project.name.clone(),
+                file_path: normalized_path,
+                modrinth_project_id: project.modrinth_project_id.clone(),
+                curseforge_project_id: project.curseforge_project_id,
+                selected_source: project.selected_source.clone(),
+                selected_version_id: project.selected_version_id.clone(),
+                selected_version_name: project.selected_version_name.clone(),
+            })
         })
         .collect::<Vec<_>>();
 
@@ -3997,7 +4323,9 @@ fn export_instance_as_vtmpack(
         .into_bytes();
     append_bytes_to_archive(&mut archive, "manifest.toml", manifest_bytes.as_slice())?;
 
-    if let Some(raw) = managed_manifest_raw {
+    if !sanitized_managed_manifest.projects.is_empty() {
+        let raw = toml::to_string_pretty(&sanitized_managed_manifest)
+            .map_err(|err| format!("failed to serialize export content manifest: {err}"))?;
         append_bytes_to_archive(
             &mut archive,
             "metadata/vertex-content-manifest.toml",
@@ -4173,4 +4501,123 @@ fn detect_total_memory_mib() -> Option<u128> {
 #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
 fn detect_total_memory_mib() -> Option<u128> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(name: &str, source: ContentSource) -> UnifiedContentEntry {
+        UnifiedContentEntry {
+            id: format!("{}:{name}", source.label().to_ascii_lowercase()),
+            name: name.to_owned(),
+            summary: String::new(),
+            content_type: "mod".to_owned(),
+            source,
+            project_url: None,
+            icon_url: None,
+        }
+    }
+
+    #[test]
+    fn autodetect_prefers_exact_multi_token_name_over_short_prefix() {
+        let selected = choose_preferred_content_entry(
+            vec![
+                entry("Voxy", ContentSource::Modrinth),
+                entry("Voxy Worldgen", ContentSource::CurseForge),
+            ],
+            "mods::voxy worldgen",
+            InstalledContentTab::Mods,
+        )
+        .expect("expected a matching entry");
+
+        assert_eq!(selected.name, "Voxy Worldgen");
+    }
+
+    #[test]
+    fn autodetect_allows_trailing_loader_noise_in_filename_queries() {
+        let selected = choose_preferred_content_entry(
+            vec![entry("Sodium", ContentSource::Modrinth)],
+            "mods::sodium fabric",
+            InstalledContentTab::Mods,
+        )
+        .expect("expected a matching entry");
+
+        assert_eq!(selected.name, "Sodium");
+    }
+
+    #[test]
+    fn autodetect_keeps_short_name_when_lookup_is_short_name() {
+        let selected = choose_preferred_content_entry(
+            vec![
+                entry("Voxy", ContentSource::Modrinth),
+                entry("Voxy Worldgen", ContentSource::CurseForge),
+            ],
+            "mods::voxy",
+            InstalledContentTab::Mods,
+        )
+        .expect("expected a matching entry");
+
+        assert_eq!(selected.name, "Voxy");
+    }
+
+    #[test]
+    fn raw_lookup_query_preserves_full_jar_stem_for_fallback_search() {
+        let path = Path::new("mods/foomod-neoforge-mc1.21.1-v1.3.0.jar");
+
+        assert_eq!(
+            derive_installed_lookup_query(path, "foomod-neoforge-mc1.21.1-v1.3.0.jar"),
+            "foomod neoforge"
+        );
+        assert_eq!(
+            derive_raw_lookup_query(path, "foomod-neoforge-mc1.21.1-v1.3.0.jar"),
+            "foomod-neoforge-mc1.21.1-v1.3.0"
+        );
+    }
+
+    #[test]
+    fn export_can_strip_curseforge_metadata() {
+        let manifest = ManagedContentManifest {
+            projects: HashMap::from([
+                (
+                    "mod::sodium".to_owned(),
+                    ManagedContentManifestProject {
+                        name: "Sodium".to_owned(),
+                        file_path: "mods/sodium.jar".to_owned(),
+                        modrinth_project_id: Some("AANobbMI".to_owned()),
+                        curseforge_project_id: Some(394468),
+                        selected_source: Some("Modrinth".to_owned()),
+                        ..ManagedContentManifestProject::default()
+                    },
+                ),
+                (
+                    "mod::embeddium".to_owned(),
+                    ManagedContentManifestProject {
+                        name: "Embeddium".to_owned(),
+                        file_path: "mods/embeddium.jar".to_owned(),
+                        curseforge_project_id: Some(908741),
+                        selected_source: Some("CurseForge".to_owned()),
+                        ..ManagedContentManifestProject::default()
+                    },
+                ),
+            ]),
+        };
+
+        let sanitized = sanitize_managed_manifest_for_export(
+            &manifest,
+            VtmpackExportOptions {
+                provider_mode: VtmpackProviderMode::ExcludeCurseForge,
+            },
+        );
+
+        assert!(sanitized.projects.contains_key("mod::sodium"));
+        assert_eq!(
+            sanitized
+                .projects
+                .get("mod::sodium")
+                .and_then(|project| project.curseforge_project_id),
+            None
+        );
+        assert!(!sanitized.projects.contains_key("mod::embeddium"));
+    }
 }
