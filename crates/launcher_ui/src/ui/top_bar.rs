@@ -32,6 +32,7 @@ pub struct TopBarOutput {
     pub start_sign_in: bool,
     pub select_account_id: Option<String>,
     pub remove_account_id: Option<String>,
+    pub refresh_account_id: Option<String>,
     pub open_active_user_terminal: bool,
 }
 
@@ -40,6 +41,7 @@ pub struct ProfileAccountOption {
     pub profile_id: String,
     pub display_name: String,
     pub is_active: bool,
+    pub is_failed: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -609,11 +611,22 @@ fn render_profile_popup(
                 let mut remove_button_style = button_style.clone();
                 remove_button_style.min_size = egui::vec2(72.0, style::CONTROL_HEIGHT);
 
+                let mut refresh_button_style = button_style.clone();
+                refresh_button_style.min_size = egui::vec2(78.0, style::CONTROL_HEIGHT);
+
                 for account in profile_ui.accounts {
                     ui.horizontal(|ui| {
-                        let label = if account.is_active {
+                        let label = if account.is_active && account.is_failed {
                             format!(
-                                "{} (active)",
+                                "{} (Failed)",
+                                privacy::redact_account_label(
+                                    profile_ui.streamer_mode,
+                                    account.display_name.as_str()
+                                )
+                            )
+                        } else if account.is_active {
+                            format!(
+                                "{} (Active)",
                                 privacy::redact_account_label(
                                     profile_ui.streamer_mode,
                                     account.display_name.as_str()
@@ -650,6 +663,22 @@ fn render_profile_popup(
                             .clicked()
                         {
                             output.remove_account_id = Some(account.profile_id.clone());
+                        }
+
+                        if account.is_failed
+                            && ui
+                                .add_enabled_ui(!profile_ui.auth_busy, |ui| {
+                                    text_ui.button(
+                                        ui,
+                                        ("profile_popup_account_refresh", &account.profile_id),
+                                        "Refresh",
+                                        &refresh_button_style,
+                                    )
+                                })
+                                .inner
+                                .clicked()
+                        {
+                            output.refresh_account_id = Some(account.profile_id.clone());
                         }
                     });
                 }

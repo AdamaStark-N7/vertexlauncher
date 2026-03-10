@@ -55,6 +55,7 @@ pub struct AccountUiEntry {
     pub profile_id: String,
     pub display_name: String,
     pub is_active: bool,
+    pub is_failed: bool,
     pub avatar_png: Option<Vec<u8>>,
 }
 
@@ -63,7 +64,7 @@ pub struct LaunchAuthContext {
     pub account_key: String,
     pub player_name: String,
     pub player_uuid: String,
-    pub access_token: String,
+    pub access_token: Option<String>,
     pub xuid: Option<String>,
     pub user_type: String,
 }
@@ -141,10 +142,11 @@ impl AuthState {
                         .map(str::trim)
                         .is_some_and(|token| !token.is_empty());
                     self.status = if active_refresh && !refreshed_has_token {
-                        AuthUiStatus::Error(
-                            "Active account does not have a renewable session. Sign in again."
-                                .to_owned(),
-                        )
+                        notification::warn!(
+                            "auth",
+                            "Active account token could not be renewed. Continuing in offline mode."
+                        );
+                        AuthUiStatus::Idle
                     } else {
                         AuthUiStatus::Idle
                     };
@@ -157,8 +159,16 @@ impl AuthState {
                     } else {
                         "Loaded cached accounts, but token renewal failed"
                     };
-                    notification::error!("auth", "{prefix}: {err}");
-                    self.status = AuthUiStatus::Error(format!("{prefix}: {err}"));
+                    if is_http_auth_error(err.as_str()) {
+                        notification::warn!(
+                            "auth",
+                            "{prefix}: {err}. Continuing with cached account in offline mode."
+                        );
+                        self.status = AuthUiStatus::Idle;
+                    } else {
+                        notification::error!("auth", "{prefix}: {err}");
+                        self.status = AuthUiStatus::Error(format!("{prefix}: {err}"));
+                    }
                     self.renewal = None;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
@@ -307,6 +317,44 @@ impl AuthState {
         }
     }
 
+    pub fn refresh_account_token(&mut self, profile_id: &str) {
+        if self.auth_busy() {
+            return;
+        }
+
+        let Some(account) = self
+            .accounts_state
+            .accounts
+            .iter()
+            .find(|account| account.minecraft_profile.id == profile_id)
+        else {
+            return;
+        };
+
+        let has_refresh_token = account
+            .microsoft_refresh_token
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|token| !token.is_empty());
+        if !has_refresh_token {
+            self.status = AuthUiStatus::Error(format!(
+                "Account '{}' has no renewable Microsoft refresh token.",
+                account.minecraft_profile.name
+            ));
+            return;
+        }
+
+        let client_id = match microsoft_client_id() {
+            Ok(client_id) => client_id,
+            Err(err) => {
+                self.status = AuthUiStatus::Error(err);
+                return;
+            }
+        };
+
+        self.spawn_single_account_renewal_worker(client_id, profile_id.to_owned());
+    }
+
     fn ensure_active_account_token_ready(&mut self) {
         let has_active_minecraft_token = self
             .accounts_state
@@ -318,16 +366,29 @@ impl AuthState {
             return;
         }
 
+        let has_refresh_token = self
+            .accounts_state
+            .active_account()
+            .and_then(|account| account.microsoft_refresh_token.as_deref())
+            .map(str::trim)
+            .is_some_and(|token| !token.is_empty());
+        if !has_refresh_token {
+            notification::warn!(
+                "auth",
+                "Active account has no renewable token; launching in offline mode."
+            );
+            self.status = AuthUiStatus::Idle;
+            return;
+        }
+
         let client_id = match microsoft_client_id() {
             Ok(client_id) => client_id,
             Err(err) => {
-                notification::error!(
+                notification::warn!(
                     "auth",
-                    "Active account token is missing and renewal is unavailable: {err}"
+                    "Active account token is missing and renewal is unavailable: {err}. Launching in offline mode."
                 );
-                self.status = AuthUiStatus::Error(format!(
-                    "Active account token is missing and renewal is unavailable: {err}",
-                ));
+                self.status = AuthUiStatus::Idle;
                 return;
             }
         };
@@ -356,34 +417,31 @@ impl AuthState {
     }
 
     pub fn display_name(&self) -> Option<&str> {
-        if !self.has_active_authenticated_session() {
-            return None;
-        }
         self.accounts_state
             .active_account()
             .map(|account| account.minecraft_profile.name.as_str())
     }
 
     pub fn active_account_owns_minecraft(&self) -> bool {
-        self.active_launch_context().is_some()
+        self.accounts_state.active_account().is_some_and(|account| {
+            !account.minecraft_profile.id.trim().is_empty()
+                && !account.minecraft_profile.name.trim().is_empty()
+        })
     }
 
     pub fn active_launch_context(&self) -> Option<LaunchAuthContext> {
-        if !self.has_active_authenticated_session() {
-            return None;
-        }
         let account = self.accounts_state.active_account()?;
-        let access_token = account
-            .minecraft_access_token
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())?
-            .to_owned();
         let player_name = account.minecraft_profile.name.trim();
         let player_uuid = account.minecraft_profile.id.trim();
         if player_name.is_empty() || player_uuid.is_empty() {
             return None;
         }
+        let access_token = account
+            .minecraft_access_token
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
         let user_type = account
             .user_type
             .as_deref()
@@ -408,9 +466,6 @@ impl AuthState {
     }
 
     pub fn avatar_png(&self) -> Option<&[u8]> {
-        if !self.has_active_authenticated_session() {
-            return None;
-        }
         self.active_avatar_png.as_deref()
     }
 
@@ -431,6 +486,11 @@ impl AuthState {
                 is_active: active_id
                     .map(|id| id == account.minecraft_profile.id)
                     .unwrap_or(false),
+                is_failed: account
+                    .minecraft_access_token
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(|token| token.is_empty()),
                 avatar_png: self
                     .account_avatars
                     .get(&account.minecraft_profile.id)
@@ -464,6 +524,27 @@ impl AuthState {
         });
         self.renewal = Some(rx);
         self.status = status;
+    }
+
+    fn spawn_single_account_renewal_worker(&mut self, client_id: String, profile_id: String) {
+        if self.renewal.is_some() {
+            return;
+        }
+
+        let is_active_target =
+            self.accounts_state.active_profile_id.as_deref() == Some(profile_id.as_str());
+        let (tx, rx) = mpsc::channel::<Result<CachedAccountsState, String>>();
+        std::thread::spawn(move || {
+            let result = auth::renew_cached_account_token(&client_id, profile_id.as_str())
+                .map_err(|err| err.to_string());
+            let _ = tx.send(result);
+        });
+        self.renewal = Some(rx);
+        self.status = if is_active_target {
+            AuthUiStatus::RefreshingActiveSession
+        } else {
+            AuthUiStatus::RefreshingCachedSession
+        };
     }
 
     fn apply_accounts_state(&mut self, state: CachedAccountsState, preserve_active: bool) {
@@ -589,19 +670,6 @@ impl AuthState {
                 Err(mpsc::TryRecvError::Disconnected) => break,
             }
         }
-    }
-}
-
-impl AuthState {
-    fn has_active_authenticated_session(&self) -> bool {
-        if matches!(self.status, AuthUiStatus::Error(_)) {
-            return false;
-        }
-        self.accounts_state
-            .active_account()
-            .and_then(|account| account.minecraft_access_token.as_deref())
-            .map(str::trim)
-            .is_some_and(|token| !token.is_empty())
     }
 }
 
@@ -780,6 +848,14 @@ fn is_nonfatal_account_cache_error(error_text: &str) -> bool {
         || lowered.contains("no such object path")
         || lowered.contains("no such interface");
     mentions_secure_storage && likely_session_bus_issue
+}
+
+fn is_http_auth_error(error_text: &str) -> bool {
+    let lowered = error_text.to_ascii_lowercase();
+    lowered.contains("http status")
+        || lowered.contains("http request failed")
+        || lowered.contains("transport")
+        || lowered.contains("connection")
 }
 
 #[cfg(test)]

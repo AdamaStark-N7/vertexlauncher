@@ -218,8 +218,11 @@ where
                 tracing::warn!(
                     target: "vertexlauncher/auth/renew",
                     error = %err,
-                    "Failed to renew cached account session; keeping existing cached token."
+                    "Failed to renew cached account session; falling back to offline token state."
                 );
+                if account.minecraft_access_token.take().is_some() {
+                    any_updated = true;
+                }
             }
         }
     }

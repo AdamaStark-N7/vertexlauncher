@@ -735,7 +735,7 @@ fn server_meta_line(
         .to_owned();
     format!(
         "{} | {} | {} | {} | {} | last used {}",
-        server.instance_name,
+        format!("instance {}", server.instance_name),
         address,
         motd,
         players_text,

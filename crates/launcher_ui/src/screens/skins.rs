@@ -2804,7 +2804,7 @@ impl SkinManagerState {
         let normalized_profile_id = auth.player_uuid.to_ascii_lowercase();
         let profile_changed =
             self.active_profile_id.as_deref() != Some(normalized_profile_id.as_str());
-        let token_changed = self.access_token.as_deref() != Some(auth.access_token.as_str());
+        let token_changed = self.access_token.as_deref() != auth.access_token.as_deref();
         let name_changed = self.active_player_name.as_deref() != Some(auth.player_name.as_str());
 
         if !profile_changed && !token_changed && !name_changed {
@@ -2813,7 +2813,7 @@ impl SkinManagerState {
 
         if !profile_changed {
             // Same profile can still receive a fresh token after re-auth. Keep current edits intact.
-            self.access_token = Some(auth.access_token.clone());
+            self.access_token = auth.access_token.clone();
             self.active_player_name = Some(auth.player_name.clone());
             tracing::info!(
                 target: "vertexlauncher/skins",
@@ -2832,7 +2832,7 @@ impl SkinManagerState {
         self.show_elytra = false;
         self.active_profile_id = Some(normalized_profile_id.clone());
         self.active_player_name = Some(auth.player_name.clone());
-        self.access_token = Some(auth.access_token.clone());
+        self.access_token = auth.access_token.clone();
         self.base_skin_png = None;
         self.pending_skin_png = None;
         self.pending_skin_path = None;

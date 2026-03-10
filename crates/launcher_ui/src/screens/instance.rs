@@ -2134,7 +2134,7 @@ fn render_runtime_row(
                 .map(str::to_owned)
         });
     let launch_player_uuid = active_launch_auth.map(|auth| auth.player_uuid.clone());
-    let launch_access_token = active_launch_auth.map(|auth| auth.access_token.clone());
+    let launch_access_token = active_launch_auth.and_then(|auth| auth.access_token.clone());
     let launch_xuid = active_launch_auth.and_then(|auth| auth.xuid.clone());
     let launch_user_type = active_launch_auth.map(|auth| auth.user_type.clone());
     let runtime_running_for_active_account = launch_account

@@ -204,7 +204,7 @@ fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
 fn resolve_and_refresh_account(selector: &str) -> Result<CachedAccount, String> {
     let state = auth::load_cached_accounts().map_err(|err| err.to_string())?;
     let selected_profile_id = select_profile_id(&state, selector)?;
-    let selected = state
+    let mut selected = state
         .accounts
         .iter()
         .find(|account| account.minecraft_profile.id == selected_profile_id)
@@ -218,13 +218,25 @@ fn resolve_and_refresh_account(selector: &str) -> Result<CachedAccount, String> 
         .is_some_and(|token| !token.is_empty())
     {
         let client_id = microsoft_client_id()?;
-        auth::renew_cached_account_token(client_id.as_str(), selected_profile_id.as_str())
-            .map_err(|err| err.to_string())?
+        match auth::renew_cached_account_token(client_id.as_str(), selected_profile_id.as_str()) {
+            Ok(state) => state,
+            Err(err) => {
+                let err_text = err.to_string();
+                if is_http_auth_error(err_text.as_str()) {
+                    eprintln!(
+                        "warning: failed to renew account over HTTP ({err_text}); continuing in offline mode with cached account."
+                    );
+                    selected.minecraft_access_token = None;
+                    return Ok(selected);
+                }
+                return Err(err_text);
+            }
+        }
     } else {
         state
     };
 
-    let refreshed = refreshed_state
+    let mut refreshed = refreshed_state
         .accounts
         .into_iter()
         .find(|account| account.minecraft_profile.id == selected_profile_id)
@@ -235,12 +247,21 @@ fn resolve_and_refresh_account(selector: &str) -> Result<CachedAccount, String> 
         .map(str::trim)
         .is_none_or(|value| value.is_empty())
     {
-        return Err(format!(
-            "account '{}' does not have a usable Minecraft access token.",
+        refreshed.minecraft_access_token = None;
+        eprintln!(
+            "warning: account '{}' has no online token; continuing in offline mode.",
             refreshed.minecraft_profile.name
-        ));
+        );
     }
     Ok(refreshed)
+}
+
+fn is_http_auth_error(error_text: &str) -> bool {
+    let lowered = error_text.to_ascii_lowercase();
+    lowered.contains("http status")
+        || lowered.contains("http request failed")
+        || lowered.contains("transport")
+        || lowered.contains("connection")
 }
 
 fn select_profile_id(state: &CachedAccountsState, selector: &str) -> Result<String, String> {

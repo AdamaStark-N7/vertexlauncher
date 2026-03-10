@@ -251,6 +251,7 @@ impl eframe::App for VertexApp {
                 profile_id: entry.profile_id.clone(),
                 display_name: entry.display_name.clone(),
                 is_active: entry.is_active,
+                is_failed: entry.is_failed,
             })
             .collect::<Vec<_>>();
         let account_avatars_by_key = account_entries
@@ -317,6 +318,9 @@ impl eframe::App for VertexApp {
         }
         if let Some(profile_id) = top_bar_output.remove_account_id.as_deref() {
             self.auth.remove_account(profile_id);
+        }
+        if let Some(profile_id) = top_bar_output.refresh_account_id.as_deref() {
+            self.auth.refresh_account_token(profile_id);
         }
         if top_bar_output.open_active_user_terminal {
             self.active_screen = screens::AppScreen::Console;
