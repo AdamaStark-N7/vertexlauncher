@@ -10,8 +10,10 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     io::{Read, Write},
+    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc},
+    thread,
 };
 use textui::{LabelOptions, TextUi};
 
@@ -114,9 +116,18 @@ impl BrowserContentType {
             BrowserContentType::DataPack => "datapack",
         }
     }
+
+    fn index(self) -> usize {
+        match self {
+            BrowserContentType::Mod => 0,
+            BrowserContentType::ResourcePack => 1,
+            BrowserContentType::Shader => 2,
+            BrowserContentType::DataPack => 3,
+        }
+    }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ContentScope {
     All,
     Mods,
@@ -204,7 +215,7 @@ impl BrowserLoader {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum ModSortMode {
     Relevance,
     LastUpdated,
@@ -249,13 +260,21 @@ struct BrowserSearchSnapshot {
 }
 
 #[derive(Clone, Debug)]
-struct BrowserSearchResult {
-    entries: Vec<BrowserProjectEntry>,
-    warnings: Vec<String>,
-    query: String,
+enum SearchUpdate {
+    Snapshot {
+        request: BrowserSearchRequest,
+        snapshot: BrowserSearchSnapshot,
+        completed_tasks: usize,
+        total_tasks: usize,
+        finished: bool,
+    },
+    Failed {
+        request: BrowserSearchRequest,
+        error: String,
+    },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct BrowserSearchRequest {
     query: Option<String>,
     game_version: Option<String>,
@@ -418,6 +437,7 @@ struct ContentBrowserState {
     detail_entry: Option<BrowserProjectEntry>,
     detail_tab: ContentDetailTab,
     detail_versions: Vec<BrowserVersionEntry>,
+    detail_versions_cache: HashMap<String, Result<Vec<BrowserVersionEntry>, String>>,
     detail_versions_project_key: Option<String>,
     detail_versions_error: Option<String>,
     detail_versions_in_flight: bool,
@@ -432,9 +452,13 @@ struct ContentBrowserState {
     version_catalog_rx:
         Option<Arc<Mutex<mpsc::Receiver<Result<Vec<MinecraftVersionEntry>, String>>>>>,
     results: BrowserSearchSnapshot,
+    active_search_request: Option<BrowserSearchRequest>,
+    search_cache: HashMap<BrowserSearchRequest, BrowserSearchSnapshot>,
+    search_completed_tasks: usize,
+    search_total_tasks: usize,
     search_in_flight: bool,
-    search_tx: Option<mpsc::Sender<Result<BrowserSearchResult, String>>>,
-    search_rx: Option<Arc<Mutex<mpsc::Receiver<Result<BrowserSearchResult, String>>>>>,
+    search_tx: Option<mpsc::Sender<SearchUpdate>>,
+    search_rx: Option<Arc<Mutex<mpsc::Receiver<SearchUpdate>>>>,
     download_queue: VecDeque<QueuedContentDownload>,
     download_in_flight: bool,
     download_tx: Option<mpsc::Sender<Result<ContentDownloadOutcome, String>>>,
@@ -459,6 +483,7 @@ impl Default for ContentBrowserState {
             detail_entry: None,
             detail_tab: ContentDetailTab::Overview,
             detail_versions: Vec::new(),
+            detail_versions_cache: HashMap::new(),
             detail_versions_project_key: None,
             detail_versions_error: None,
             detail_versions_in_flight: false,
@@ -472,6 +497,10 @@ impl Default for ContentBrowserState {
             version_catalog_tx: None,
             version_catalog_rx: None,
             results: BrowserSearchSnapshot::default(),
+            active_search_request: None,
+            search_cache: HashMap::new(),
+            search_completed_tasks: 0,
+            search_total_tasks: 0,
             search_in_flight: false,
             search_tx: None,
             search_rx: None,
@@ -563,6 +592,11 @@ pub fn render(
         state.detail_loader_filter = state.loader;
         state.detail_minecraft_version_filter = instance.game_version.clone();
         state.results = BrowserSearchSnapshot::default();
+        state.active_search_request = None;
+        state.search_completed_tasks = 0;
+        state.search_total_tasks = 0;
+        state.search_in_flight = false;
+        state.search_notification_active = false;
         state.auto_populated_instance_id = None;
     }
 
@@ -831,15 +865,41 @@ fn render_results(
         .inner_margin(egui::Margin::same(8));
     frame.show(ui, |ui| {
         ui.set_min_height(max_height);
+        if state.search_in_flight {
+            let progress_label = if state.search_total_tasks > 0 {
+                format!(
+                    "Searching content... {}/{} result groups loaded.",
+                    state.search_completed_tasks, state.search_total_tasks
+                )
+            } else {
+                "Searching content...".to_owned()
+            };
+            let _ = text_ui.label(
+                ui,
+                ("content_browser_search_progress", instance_id),
+                progress_label.as_str(),
+                &LabelOptions {
+                    color: ui.visuals().weak_text_color(),
+                    wrap: true,
+                    ..LabelOptions::default()
+                },
+            );
+            ui.add_space(8.0);
+        }
         egui::ScrollArea::vertical()
             .id_salt(("content_browser_results_scroll", instance_id))
             .max_height(max_height)
             .show(ui, |ui| {
                 if state.results.entries.is_empty() {
+                    let empty_message = if state.search_in_flight {
+                        "Searching content..."
+                    } else {
+                        "No results yet. Search to browse installable content."
+                    };
                     let _ = text_ui.label(
                         ui,
                         ("content_browser_empty", instance_id),
-                        "No results yet. Search to browse installable content.",
+                        empty_message,
                         &LabelOptions {
                             color: ui.visuals().weak_text_color(),
                             wrap: true,
@@ -849,74 +909,53 @@ fn render_results(
                     return;
                 }
 
-                for content_type in BrowserContentType::ORDERED {
-                    let mut grouped: Vec<BrowserProjectEntry> = state
-                        .results
-                        .entries
-                        .iter()
-                        .filter(|entry| entry.content_type == content_type)
-                        .cloned()
-                        .collect();
-                    if grouped.is_empty() {
-                        continue;
-                    }
-                    if content_type == BrowserContentType::Mod {
-                        grouped.sort_by(|left, right| {
-                            compare_mod_entries(left, right, state.mod_sort_mode)
-                        });
-                    } else {
-                        grouped.sort_by(|left, right| {
-                            left.name
-                                .to_ascii_lowercase()
-                                .cmp(&right.name.to_ascii_lowercase())
-                        });
-                    }
-
-                    let _ = text_ui.label(
-                        ui,
-                        (
-                            "content_browser_group_heading",
-                            instance_id,
-                            content_type.label(),
-                        ),
-                        &format!("{} ({})", content_type.label(), grouped.len()),
-                        &LabelOptions {
-                            font_size: 17.0,
-                            line_height: 22.0,
-                            weight: 700,
-                            color: ui.visuals().text_color(),
-                            wrap: false,
-                            ..LabelOptions::default()
-                        },
-                    );
-                    ui.add_space(6.0);
-
-                    for entry in grouped {
-                        let tile_outcome = render_result_tile(
+                let grouped_counts =
+                    count_entries_by_content_type(state.results.entries.as_slice());
+                let mut current_group = None;
+                for entry in &state.results.entries {
+                    if current_group != Some(entry.content_type) {
+                        current_group = Some(entry.content_type);
+                        let group_count = grouped_counts[entry.content_type.index()];
+                        let _ = text_ui.label(
                             ui,
-                            text_ui,
-                            (instance_id, &entry.dedupe_key),
-                            &entry,
+                            (
+                                "content_browser_group_heading",
+                                instance_id,
+                                entry.content_type.label(),
+                            ),
+                            &format!("{} ({group_count})", entry.content_type.label()),
+                            &LabelOptions {
+                                font_size: 17.0,
+                                line_height: 22.0,
+                                weight: 700,
+                                color: ui.visuals().text_color(),
+                                wrap: false,
+                                ..LabelOptions::default()
+                            },
                         );
-                        if tile_outcome.download_clicked {
-                            state.download_queue.push_back(QueuedContentDownload {
-                                request: ContentInstallRequest::Latest {
-                                    entry: entry.clone(),
-                                    game_version: state.minecraft_version_filter.clone(),
-                                    loader: state.loader,
-                                },
-                            });
-                            state.status_message = Some(format!(
-                                "Queued {} for download ({} in queue).",
-                                entry.name,
-                                state.download_queue.len()
-                            ));
-                        }
-                        if tile_outcome.open_clicked && outcome.open_entry.is_none() {
-                            outcome.open_entry = Some(entry.clone());
-                        }
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                     }
+
+                    let tile_outcome =
+                        render_result_tile(ui, text_ui, (instance_id, &entry.dedupe_key), entry);
+                    if tile_outcome.download_clicked {
+                        state.download_queue.push_back(QueuedContentDownload {
+                            request: ContentInstallRequest::Latest {
+                                entry: entry.clone(),
+                                game_version: state.minecraft_version_filter.clone(),
+                                loader: state.loader,
+                            },
+                        });
+                        state.status_message = Some(format!(
+                            "Queued {} for download ({} in queue).",
+                            entry.name,
+                            state.download_queue.len()
+                        ));
+                    }
+                    if tile_outcome.open_clicked && outcome.open_entry.is_none() {
+                        outcome.open_entry = Some(entry.clone());
+                    }
+                    ui.add_space(8.0);
                 }
             });
 
@@ -1883,7 +1922,7 @@ fn ensure_search_channel(state: &mut ContentBrowserState) {
     if state.search_tx.is_some() && state.search_rx.is_some() {
         return;
     }
-    let (tx, rx) = mpsc::channel::<Result<BrowserSearchResult, String>>();
+    let (tx, rx) = mpsc::channel::<SearchUpdate>();
     state.search_tx = Some(tx);
     state.search_rx = Some(Arc::new(Mutex::new(rx)));
 }
@@ -1901,6 +1940,25 @@ fn request_detail_versions(state: &mut ContentBrowserState) {
     let Some(entry) = state.detail_entry.clone() else {
         return;
     };
+    if let Some(cached) = state
+        .detail_versions_cache
+        .get(entry.dedupe_key.as_str())
+        .cloned()
+    {
+        state.detail_versions_in_flight = false;
+        state.detail_versions_project_key = Some(entry.dedupe_key.clone());
+        match cached {
+            Ok(versions) => {
+                state.detail_versions = versions;
+                state.detail_versions_error = None;
+            }
+            Err(error) => {
+                state.detail_versions.clear();
+                state.detail_versions_error = Some(error);
+            }
+        }
+        return;
+    }
     if state.detail_versions_in_flight {
         return;
     }
@@ -2076,8 +2134,23 @@ struct ProviderSearchEntry {
     relevance_rank: u32,
 }
 
+#[derive(Default)]
+struct SearchTaskOutcome {
+    entries: Vec<ProviderSearchEntry>,
+    warnings: Vec<String>,
+}
+
 fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest) {
     if state.search_in_flight {
+        return;
+    }
+    let total_tasks = content_scope_task_count(request.content_scope);
+    if let Some(cached) = state.search_cache.get(&request).cloned() {
+        state.query_input = request.query.clone().unwrap_or_default();
+        state.active_search_request = Some(request);
+        state.search_completed_tasks = total_tasks;
+        state.search_total_tasks = total_tasks;
+        state.results = cached;
         return;
     }
 
@@ -2086,6 +2159,10 @@ fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest
         return;
     };
 
+    state.active_search_request = Some(request.clone());
+    state.search_completed_tasks = 0;
+    state.search_total_tasks = total_tasks;
+    state.results = BrowserSearchSnapshot::default();
     state.search_in_flight = true;
     state.search_notification_active = true;
     notification::progress!(
@@ -2094,12 +2171,26 @@ fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest
         0.1f32,
         "Searching content..."
     );
+    let request_for_failure = request.clone();
     let _ = tokio_runtime::spawn(async move {
-        let result = tokio_runtime::spawn_blocking(move || run_search_request(request))
-            .await
-            .map_err(|err| format!("content browser search join error: {err}"))
-            .and_then(|inner| inner);
-        let _ = tx.send(result);
+        let worker_tx = tx.clone();
+        let result =
+            tokio_runtime::spawn_blocking(move || run_search_request(request, worker_tx)).await;
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => {
+                let _ = tx.send(SearchUpdate::Failed {
+                    request: request_for_failure,
+                    error: err,
+                });
+            }
+            Err(err) => {
+                let _ = tx.send(SearchUpdate::Failed {
+                    request: request_for_failure,
+                    error: format!("content browser search join error: {err}"),
+                });
+            }
+        }
     });
 }
 
@@ -2232,7 +2323,10 @@ fn split_curseforge_game_versions(values: Vec<String>) -> (Vec<String>, Vec<Stri
     (loaders, game_versions)
 }
 
-fn run_search_request(request: BrowserSearchRequest) -> Result<BrowserSearchResult, String> {
+fn run_search_request(
+    request: BrowserSearchRequest,
+    tx: mpsc::Sender<SearchUpdate>,
+) -> Result<(), String> {
     let query = request
         .query
         .as_deref()
@@ -2250,7 +2344,7 @@ fn run_search_request(request: BrowserSearchRequest) -> Result<BrowserSearchResu
 
     let mut warnings = Vec::new();
     let curseforge_class_ids = if let Some(client) = curseforge.as_ref() {
-        resolve_curseforge_class_ids(client, &mut warnings)
+        resolve_curseforge_class_ids_cached(client, &mut warnings)
     } else {
         warnings.push(
             "CurseForge API key missing (set VERTEX_CURSEFORGE_API_KEY or CURSEFORGE_API_KEY). Showing Modrinth results only."
@@ -2259,139 +2353,208 @@ fn run_search_request(request: BrowserSearchRequest) -> Result<BrowserSearchResu
         HashMap::new()
     };
 
-    let mut provider_entries = Vec::new();
     let page = request.page.max(1);
     let provider_offset = page
         .saturating_sub(1)
         .saturating_mul(CONTENT_SEARCH_PER_PROVIDER_LIMIT);
-    for content_type in BrowserContentType::ORDERED {
-        if !request.content_scope.includes(content_type) {
-            continue;
-        }
-        let query_for_type = query
-            .clone()
-            .unwrap_or_else(|| content_type.default_discovery_query().to_owned());
-        let mod_loader = if content_type == BrowserContentType::Mod {
-            request.loader.modrinth_slug()
-        } else {
-            None
-        };
-        match modrinth.search_projects_with_filters(
-            query_for_type.as_str(),
-            CONTENT_SEARCH_PER_PROVIDER_LIMIT,
-            provider_offset,
-            Some(content_type.modrinth_project_type()),
-            game_version.as_deref(),
-            mod_loader,
-        ) {
-            Ok(entries) => {
-                let mut scored_entries: Vec<ProviderSearchEntry> = entries
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, entry)| ProviderSearchEntry {
-                        name: entry.title,
-                        summary: entry.description,
-                        content_type,
-                        source: ContentSource::Modrinth,
-                        modrinth_project_id: Some(entry.project_id),
-                        curseforge_project_id: None,
-                        icon_url: entry.icon_url,
-                        popularity_score: Some(entry.downloads),
-                        updated_at: entry.date_modified,
-                        relevance_rank: idx as u32,
-                    })
-                    .collect();
-                if content_type == BrowserContentType::Mod
-                    && request.mod_sort_mode == ModSortMode::Popularity
-                {
-                    rescore_modrinth_entries_by_version_popularity(
-                        &mut scored_entries,
-                        game_version.as_deref(),
-                        request.loader,
-                        &modrinth,
-                    );
-                }
-                provider_entries.extend(scored_entries);
-            }
-            Err(err) => warnings.push(format!(
-                "Modrinth search failed for {}: {err}",
-                content_type.label()
-            )),
-        }
-
-        let Some(curseforge) = curseforge.as_ref() else {
-            continue;
-        };
-        let Some(class_id) = curseforge_class_ids.get(&content_type).copied() else {
-            continue;
-        };
-        let mod_loader_type = if content_type == BrowserContentType::Mod {
-            request.loader.curseforge_mod_loader_type()
-        } else {
-            None
-        };
-        match curseforge.search_projects_with_filters(
-            MINECRAFT_GAME_ID,
-            query_for_type.as_str(),
-            provider_offset,
-            CONTENT_SEARCH_PER_PROVIDER_LIMIT,
-            Some(class_id),
-            game_version.as_deref(),
-            mod_loader_type,
-        ) {
-            Ok(entries) => {
-                let mut scored_entries: Vec<ProviderSearchEntry> = entries
-                    .into_iter()
-                    .enumerate()
-                    .map(|(idx, entry)| ProviderSearchEntry {
-                        name: entry.name,
-                        summary: entry.summary,
-                        content_type,
-                        source: ContentSource::CurseForge,
-                        modrinth_project_id: None,
-                        curseforge_project_id: Some(entry.id),
-                        icon_url: entry.icon_url,
-                        popularity_score: Some(entry.download_count),
-                        updated_at: entry.date_modified,
-                        relevance_rank: idx as u32,
-                    })
-                    .collect();
-                if content_type == BrowserContentType::Mod
-                    && request.mod_sort_mode == ModSortMode::Popularity
-                {
-                    rescore_curseforge_entries_by_version_popularity(
-                        &mut scored_entries,
-                        game_version.as_deref(),
-                        request.loader,
-                        curseforge,
-                    );
-                }
-                provider_entries.extend(scored_entries);
-            }
-            Err(err) => warnings.push(format!(
-                "CurseForge search failed for {}: {err}",
-                content_type.label()
-            )),
-        }
+    let total_tasks = content_scope_task_count(request.content_scope);
+    if total_tasks == 0 {
+        let _ = tx.send(SearchUpdate::Snapshot {
+            request,
+            snapshot: BrowserSearchSnapshot {
+                entries: Vec::new(),
+                warnings,
+            },
+            completed_tasks: 0,
+            total_tasks: 0,
+            finished: true,
+        });
+        return Ok(());
     }
 
-    let mut deduped = dedupe_browser_entries(provider_entries);
-    deduped.sort_by(|left, right| {
-        left.content_type.cmp(&right.content_type).then_with(|| {
-            if left.content_type == BrowserContentType::Mod {
-                compare_mod_entries(left, right, request.mod_sort_mode)
-            } else {
-                left.name
-                    .to_ascii_lowercase()
-                    .cmp(&right.name.to_ascii_lowercase())
+    let mut provider_entries = Vec::new();
+    thread::scope(|scope| {
+        let (task_tx, task_rx) = mpsc::channel::<SearchTaskOutcome>();
+        for content_type in BrowserContentType::ORDERED {
+            if !request.content_scope.includes(content_type) {
+                continue;
             }
-        })
+            let query_for_type = query
+                .clone()
+                .unwrap_or_else(|| content_type.default_discovery_query().to_owned());
+            let game_version = game_version.clone();
+            let modrinth = modrinth.clone();
+            let curseforge = curseforge.clone();
+            let curseforge_class_id = curseforge_class_ids.get(&content_type).copied();
+            let loader = request.loader;
+            let task_tx = task_tx.clone();
+            scope.spawn(move || {
+                let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                    search_content_type_providers(
+                        content_type,
+                        query_for_type,
+                        game_version,
+                        provider_offset,
+                        loader,
+                        modrinth,
+                        curseforge,
+                        curseforge_class_id,
+                    )
+                }))
+                .unwrap_or_else(|_| SearchTaskOutcome {
+                    warnings: vec![format!(
+                        "{} search worker panicked unexpectedly.",
+                        content_type.label()
+                    )],
+                    ..SearchTaskOutcome::default()
+                });
+                let _ = task_tx.send(outcome);
+            });
+        }
+        drop(task_tx);
+
+        let mut completed_tasks = 0usize;
+        for outcome in task_rx {
+            completed_tasks = completed_tasks.saturating_add(1);
+            provider_entries.extend(outcome.entries);
+            warnings.extend(outcome.warnings);
+            let _ = tx.send(SearchUpdate::Snapshot {
+                request: request.clone(),
+                snapshot: build_search_snapshot(
+                    provider_entries.as_slice(),
+                    warnings.as_slice(),
+                    request.mod_sort_mode,
+                ),
+                completed_tasks,
+                total_tasks,
+                finished: completed_tasks >= total_tasks,
+            });
+        }
     });
-    Ok(BrowserSearchResult {
-        entries: deduped,
-        warnings,
-        query: query.unwrap_or_default(),
-    })
+
+    Ok(())
+}
+
+fn search_content_type_providers(
+    content_type: BrowserContentType,
+    query_for_type: String,
+    game_version: Option<String>,
+    provider_offset: u32,
+    loader: BrowserLoader,
+    modrinth: ModrinthClient,
+    curseforge: Option<CurseForgeClient>,
+    curseforge_class_id: Option<u32>,
+) -> SearchTaskOutcome {
+    let mut outcome = SearchTaskOutcome::default();
+    let mod_loader = if content_type == BrowserContentType::Mod {
+        loader.modrinth_slug()
+    } else {
+        None
+    };
+
+    match modrinth.search_projects_with_filters(
+        query_for_type.as_str(),
+        CONTENT_SEARCH_PER_PROVIDER_LIMIT,
+        provider_offset,
+        Some(content_type.modrinth_project_type()),
+        game_version.as_deref(),
+        mod_loader,
+    ) {
+        Ok(entries) => {
+            outcome
+                .entries
+                .extend(
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, entry)| ProviderSearchEntry {
+                            name: entry.title,
+                            summary: entry.description,
+                            content_type,
+                            source: ContentSource::Modrinth,
+                            modrinth_project_id: Some(entry.project_id),
+                            curseforge_project_id: None,
+                            icon_url: entry.icon_url,
+                            popularity_score: Some(entry.downloads),
+                            updated_at: entry.date_modified,
+                            relevance_rank: idx as u32,
+                        }),
+                );
+        }
+        Err(err) => outcome.warnings.push(format!(
+            "Modrinth search failed for {}: {err}",
+            content_type.label()
+        )),
+    }
+
+    let Some(curseforge) = curseforge.as_ref() else {
+        return outcome;
+    };
+    let Some(class_id) = curseforge_class_id else {
+        return outcome;
+    };
+    let mod_loader_type = if content_type == BrowserContentType::Mod {
+        loader.curseforge_mod_loader_type()
+    } else {
+        None
+    };
+
+    match curseforge.search_projects_with_filters(
+        MINECRAFT_GAME_ID,
+        query_for_type.as_str(),
+        provider_offset,
+        CONTENT_SEARCH_PER_PROVIDER_LIMIT,
+        Some(class_id),
+        game_version.as_deref(),
+        mod_loader_type,
+    ) {
+        Ok(entries) => {
+            outcome
+                .entries
+                .extend(
+                    entries
+                        .into_iter()
+                        .enumerate()
+                        .map(|(idx, entry)| ProviderSearchEntry {
+                            name: entry.name,
+                            summary: entry.summary,
+                            content_type,
+                            source: ContentSource::CurseForge,
+                            modrinth_project_id: None,
+                            curseforge_project_id: Some(entry.id),
+                            icon_url: entry.icon_url,
+                            popularity_score: Some(entry.download_count),
+                            updated_at: entry.date_modified,
+                            relevance_rank: idx as u32,
+                        }),
+                );
+        }
+        Err(err) => outcome.warnings.push(format!(
+            "CurseForge search failed for {}: {err}",
+            content_type.label()
+        )),
+    }
+
+    outcome
+}
+
+fn resolve_curseforge_class_ids_cached(
+    client: &CurseForgeClient,
+    warnings: &mut Vec<String>,
+) -> HashMap<BrowserContentType, u32> {
+    static CACHE: OnceLock<Mutex<Option<HashMap<BrowserContentType, u32>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+    if let Ok(cache) = cache.lock()
+        && let Some(class_ids) = cache.as_ref()
+    {
+        return class_ids.clone();
+    }
+
+    let class_ids = resolve_curseforge_class_ids(client, warnings);
+    if let Ok(mut cache) = cache.lock() {
+        *cache = Some(class_ids.clone());
+    }
+    class_ids
 }
 
 fn resolve_curseforge_class_ids(
@@ -2423,71 +2586,6 @@ fn resolve_curseforge_class_ids(
     by_type
 }
 
-fn rescore_modrinth_entries_by_version_popularity(
-    entries: &mut [ProviderSearchEntry],
-    game_version: Option<&str>,
-    loader: BrowserLoader,
-    modrinth: &ModrinthClient,
-) {
-    let mut loaders = Vec::new();
-    if let Some(loader_slug) = loader.modrinth_slug() {
-        loaders.push(loader_slug.to_owned());
-    }
-    let game_versions = game_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| vec![value.to_owned()])
-        .unwrap_or_default();
-
-    for entry in entries {
-        let Some(project_id) = entry.modrinth_project_id.as_deref() else {
-            continue;
-        };
-        let Ok(versions) = modrinth.list_project_versions(project_id, &loaders, &game_versions)
-        else {
-            continue;
-        };
-        let latest_version_downloads = versions
-            .into_iter()
-            .filter(|version| !version.files.is_empty())
-            .max_by(|left, right| left.date_published.cmp(&right.date_published))
-            .map(|version| version.downloads);
-        if let Some(downloads) = latest_version_downloads {
-            entry.popularity_score = Some(downloads);
-        }
-    }
-}
-
-fn rescore_curseforge_entries_by_version_popularity(
-    entries: &mut [ProviderSearchEntry],
-    game_version: Option<&str>,
-    loader: BrowserLoader,
-    curseforge: &CurseForgeClient,
-) {
-    let game_version = game_version
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
-    let mod_loader_type = loader.curseforge_mod_loader_type();
-
-    for entry in entries {
-        let Some(project_id) = entry.curseforge_project_id else {
-            continue;
-        };
-        let Ok(files) = curseforge.list_mod_files(project_id, game_version, mod_loader_type, 0, 50)
-        else {
-            continue;
-        };
-        let latest_file_downloads = files
-            .into_iter()
-            .filter(|file| file.download_url.is_some())
-            .max_by(|left, right| left.file_date.cmp(&right.file_date))
-            .map(|file| file.download_count);
-        if let Some(downloads) = latest_file_downloads {
-            entry.popularity_score = Some(downloads);
-        }
-    }
-}
-
 fn poll_search(state: &mut ContentBrowserState) {
     let mut updates = Vec::new();
     let mut should_reset_channel = false;
@@ -2511,29 +2609,65 @@ fn poll_search(state: &mut ContentBrowserState) {
         state.search_tx = None;
         state.search_rx = None;
         state.search_in_flight = false;
+        state.search_completed_tasks = 0;
+        state.search_total_tasks = 0;
     }
 
     for update in updates {
-        state.search_in_flight = false;
-        if state.search_notification_active {
-            state.search_notification_active = false;
-        }
         match update {
-            Ok(search) => {
-                state.query_input = search.query;
-                state.results.entries = search.entries;
-                state.results.warnings = search.warnings;
-                notification::progress!(
-                    notification::Severity::Info,
-                    "content-browser/search",
-                    1.0f32,
-                    "Content search complete."
-                );
+            SearchUpdate::Snapshot {
+                request,
+                snapshot,
+                completed_tasks,
+                total_tasks,
+                finished,
+            } => {
+                if state.active_search_request.as_ref() != Some(&request) {
+                    continue;
+                }
+                state.results = snapshot.clone();
+                state.search_completed_tasks = completed_tasks;
+                state.search_total_tasks = total_tasks;
+                if finished {
+                    state.search_in_flight = false;
+                    if state.search_notification_active {
+                        state.search_notification_active = false;
+                    }
+                    state.search_cache.insert(request, snapshot);
+                    notification::progress!(
+                        notification::Severity::Info,
+                        "content-browser/search",
+                        1.0f32,
+                        "Content search complete."
+                    );
+                } else {
+                    let progress = if total_tasks == 0 {
+                        0.5
+                    } else {
+                        0.1f32 + (0.8f32 * (completed_tasks as f32 / total_tasks as f32))
+                    };
+                    notification::progress!(
+                        notification::Severity::Info,
+                        "content-browser/search",
+                        progress.min(0.95),
+                        "Searching content... ({}/{})",
+                        completed_tasks,
+                        total_tasks
+                    );
+                }
             }
-            Err(err) => {
-                state.results.entries.clear();
-                state.results.warnings = vec![err];
-                notification::warn!("content-browser/search", "Content search failed.");
+            SearchUpdate::Failed { request, error } => {
+                if state.active_search_request.as_ref() != Some(&request) {
+                    continue;
+                }
+                state.search_in_flight = false;
+                state.search_completed_tasks = 0;
+                state.search_total_tasks = 0;
+                if state.search_notification_active {
+                    state.search_notification_active = false;
+                }
+                state.results.warnings.push(error.clone());
+                notification::warn!("content-browser/search", "Content search failed: {}", error);
             }
         }
     }
@@ -2566,6 +2700,9 @@ fn poll_detail_versions(state: &mut ContentBrowserState) {
 
     for update in updates {
         state.detail_versions_in_flight = false;
+        state
+            .detail_versions_cache
+            .insert(update.project_key.clone(), update.versions.clone());
         if state
             .detail_entry
             .as_ref()
@@ -2657,6 +2794,44 @@ fn dedupe_browser_entries(entries: Vec<ProviderSearchEntry>) -> Vec<BrowserProje
         }
     }
     by_key.into_values().collect()
+}
+
+fn build_search_snapshot(
+    provider_entries: &[ProviderSearchEntry],
+    warnings: &[String],
+    mod_sort_mode: ModSortMode,
+) -> BrowserSearchSnapshot {
+    let mut entries = dedupe_browser_entries(provider_entries.to_vec());
+    entries.sort_by(|left, right| {
+        left.content_type.cmp(&right.content_type).then_with(|| {
+            if left.content_type == BrowserContentType::Mod {
+                compare_mod_entries(left, right, mod_sort_mode)
+            } else {
+                left.name
+                    .to_ascii_lowercase()
+                    .cmp(&right.name.to_ascii_lowercase())
+            }
+        })
+    });
+    BrowserSearchSnapshot {
+        entries,
+        warnings: warnings.to_vec(),
+    }
+}
+
+fn count_entries_by_content_type(entries: &[BrowserProjectEntry]) -> [usize; 4] {
+    let mut counts = [0usize; 4];
+    for entry in entries {
+        counts[entry.content_type.index()] = counts[entry.content_type.index()].saturating_add(1);
+    }
+    counts
+}
+
+fn content_scope_task_count(scope: ContentScope) -> usize {
+    BrowserContentType::ORDERED
+        .iter()
+        .filter(|content_type| scope.includes(**content_type))
+        .count()
 }
 
 fn compare_mod_entries(

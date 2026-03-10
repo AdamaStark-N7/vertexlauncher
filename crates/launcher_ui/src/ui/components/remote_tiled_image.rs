@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::time::Duration;
 
 use egui::Ui;
 use image::ImageFormat;
@@ -52,7 +53,7 @@ fn ensure_channel(cache: &mut RemoteImageCache) {
     cache.rx = Some(Arc::new(Mutex::new(rx)));
 }
 
-fn poll_updates(cache: &mut RemoteImageCache) {
+fn poll_updates(cache: &mut RemoteImageCache) -> bool {
     let mut updates = Vec::new();
     let mut should_reset = false;
     if let Some(rx) = cache.rx.as_ref() {
@@ -76,6 +77,7 @@ fn poll_updates(cache: &mut RemoteImageCache) {
         cache.rx = None;
     }
 
+    let mut did_update = false;
     for (url, result) in updates {
         match result {
             Ok(image) => {
@@ -85,7 +87,9 @@ fn poll_updates(cache: &mut RemoteImageCache) {
                 cache.states.insert(url, RemoteImageState::Failed);
             }
         }
+        did_update = true;
     }
+    did_update
 }
 
 pub fn show(
@@ -107,13 +111,15 @@ pub fn show(
             show_placeholder(ui, desired_size, id_source, placeholder_svg);
             return;
         };
-        poll_updates(&mut cache);
+        let mut request_follow_up_repaint = poll_updates(&mut cache);
 
         match cache.states.get(normalized_url) {
             Some(RemoteImageState::Ready(image)) => {
                 render_ready = Some(image.clone_for_render());
             }
-            Some(RemoteImageState::Loading) => {}
+            Some(RemoteImageState::Loading) => {
+                request_follow_up_repaint = true;
+            }
             Some(RemoteImageState::Failed) => {
                 show_placeholder(ui, desired_size, id_source, placeholder_svg);
                 return;
@@ -127,6 +133,7 @@ pub fn show(
                 cache
                     .states
                     .insert(normalized_url.to_owned(), RemoteImageState::Loading);
+                request_follow_up_repaint = true;
                 let url_owned = normalized_url.to_owned();
                 let _ = tokio_runtime::spawn(async move {
                     let url_for_worker = url_owned.clone();
@@ -139,6 +146,10 @@ pub fn show(
                     let _ = tx.send((url_owned, result));
                 });
             }
+        }
+
+        if request_follow_up_repaint {
+            ui.ctx().request_repaint_after(Duration::from_millis(100));
         }
     }
 
