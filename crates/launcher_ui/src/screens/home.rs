@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Read;
+use std::hash::Hasher;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use config::Config;
 use egui::{Color32, Layout, Ui};
 use flate2::read::GzDecoder;
@@ -49,6 +51,7 @@ struct WorldEntry {
     cheats_enabled: Option<bool>,
     difficulty: Option<String>,
     version_name: Option<String>,
+    thumbnail_png: Option<Vec<u8>>,
     last_used_at_ms: Option<u64>,
     favorite: bool,
 }
@@ -61,6 +64,7 @@ struct ServerEntry {
     address: String,
     host: String,
     port: u16,
+    icon_png: Option<Vec<u8>>,
     last_used_at_ms: Option<u64>,
 }
 
@@ -74,6 +78,9 @@ enum ServerPingStatus {
 #[derive(Debug, Clone)]
 struct ServerPingSnapshot {
     status: ServerPingStatus,
+    motd: Option<String>,
+    players_online: Option<u32>,
+    players_max: Option<u32>,
     checked_at: Instant,
 }
 
@@ -81,6 +88,7 @@ struct ServerPingSnapshot {
 struct ServerDatEntry {
     name: String,
     ip: String,
+    icon: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -217,6 +225,7 @@ fn render_instance_usage(
                         render_entry_thumbnail(
                             ui,
                             ("home_instance_thumb", index),
+                            None,
                             assets::LIBRARY_SVG,
                             40.0,
                             18.0,
@@ -275,7 +284,7 @@ fn render_activity_feed(
     text_ui: &mut TextUi,
     instances: &mut InstanceStore,
     state: &HomeState,
-    _streamer_mode: bool,
+    streamer_mode: bool,
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
 ) {
@@ -408,6 +417,7 @@ fn render_activity_feed(
                                 .server_pings
                                 .get(&normalize_server_address(&server.address)),
                             now_ms,
+                            streamer_mode,
                             ("home_recent_server", index),
                             output,
                         );
@@ -445,7 +455,14 @@ fn render_world_row(
         }
         let row_response =
             render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
-                render_entry_thumbnail(ui, (id_source, "thumb"), assets::HOME_SVG, 34.0, 34.0);
+                render_entry_thumbnail(
+                    ui,
+                    (id_source, "thumb"),
+                    world.thumbnail_png.as_deref(),
+                    assets::HOME_SVG,
+                    34.0,
+                    34.0,
+                );
                 ui.add_space(8.0);
                 ui.vertical(|ui| {
                     let _ = text_ui.label(
@@ -528,14 +545,35 @@ fn render_server_row(
     server: &ServerEntry,
     ping: Option<&ServerPingSnapshot>,
     now_ms: u64,
+    streamer_mode: bool,
     id_source: impl std::hash::Hash + Copy,
     output: &mut HomeOutput,
 ) {
-    let server_meta = server_meta_line(server, ping, now_ms);
+    let server_meta_full = server_meta_line(server, ping, now_ms, streamer_mode);
     let row_response =
         render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
-            render_entry_thumbnail(ui, (id_source, "thumb"), assets::TERMINAL_SVG, 34.0, 34.0);
+            render_entry_thumbnail(
+                ui,
+                (id_source, "thumb"),
+                server.icon_png.as_deref(),
+                assets::TERMINAL_SVG,
+                34.0,
+                34.0,
+            );
             ui.add_space(8.0);
+            let meta_label_options = LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let meta_max_width = (ui.available_width() - 24.0).max(80.0);
+            let server_meta = truncate_for_width(
+                ui,
+                text_ui,
+                server_meta_full.as_str(),
+                &meta_label_options,
+                meta_max_width,
+            );
             ui.vertical(|ui| {
                 let _ = text_ui.label(
                     ui,
@@ -552,11 +590,7 @@ fn render_server_row(
                     ui,
                     (id_source, "meta"),
                     server_meta.as_str(),
-                    &LabelOptions {
-                        color: ui.visuals().weak_text_color(),
-                        wrap: false,
-                        ..LabelOptions::default()
-                    },
+                    &meta_label_options,
                 );
             });
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
@@ -582,8 +616,11 @@ fn server_meta_line(
     server: &ServerEntry,
     ping: Option<&ServerPingSnapshot>,
     now_ms: u64,
+    streamer_mode: bool,
 ) -> String {
-    let address = if server.port == 25565 {
+    let address = if streamer_mode {
+        "IP hidden".to_owned()
+    } else if server.port == 25565 {
         server.host.clone()
     } else {
         format!("{}:{}", server.host, server.port)
@@ -593,10 +630,26 @@ fn server_meta_line(
         Some(ServerPingStatus::Offline) => "offline".to_owned(),
         _ => "status unknown".to_owned(),
     };
+    let players_text = match ping {
+        Some(ServerPingSnapshot {
+            players_online: Some(online),
+            players_max: Some(max),
+            ..
+        }) => format!("players {online}/{max}"),
+        _ => "players n/a".to_owned(),
+    };
+    let motd = ping
+        .and_then(|snapshot| snapshot.motd.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("motd unavailable")
+        .to_owned();
     format!(
-        "{} | {} | {} | last used {}",
+        "{} | {} | {} | {} | {} | last used {}",
         server.instance_name,
         address,
+        motd,
+        players_text,
         ping_text,
         format_time_ago(server.last_used_at_ms, now_ms)
     )
@@ -644,6 +697,7 @@ fn render_clickable_entry_row(
 fn render_entry_thumbnail(
     ui: &mut Ui,
     id_source: impl std::hash::Hash,
+    image_png: Option<&[u8]>,
     icon_svg: &'static [u8],
     width: f32,
     height: f32,
@@ -658,15 +712,22 @@ fn render_entry_thumbnail(
         egui::StrokeKind::Inside,
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
-            ui.add_space(((height - ENTRY_ICON_SIZE) * 0.5).max(0.0));
-            let themed_svg = apply_color_to_svg(icon_svg, ui.visuals().text_color());
-            let uri = format!("bytes://home/entry-thumb/{:?}.svg", ui.id().with(id_source));
-            ui.add(
-                egui::Image::from_bytes(uri, themed_svg)
-                    .fit_to_exact_size(egui::vec2(ENTRY_ICON_SIZE, ENTRY_ICON_SIZE)),
-            );
-        });
+        if let Some(png) = image_png {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id_source.hash(&mut hasher);
+            let uri = format!("bytes://home/entry-thumb/{}.png", hasher.finish());
+            ui.add(egui::Image::from_bytes(uri, png.to_vec()).fit_to_exact_size(rect.size()));
+        } else {
+            ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
+                ui.add_space(((height - ENTRY_ICON_SIZE) * 0.5).max(0.0));
+                let themed_svg = apply_color_to_svg(icon_svg, ui.visuals().text_color());
+                let uri = format!("bytes://home/entry-thumb/{:?}.svg", ui.id().with(id_source));
+                ui.add(
+                    egui::Image::from_bytes(uri, themed_svg)
+                        .fit_to_exact_size(egui::vec2(ENTRY_ICON_SIZE, ENTRY_ICON_SIZE)),
+                );
+            });
+        }
     });
 }
 
@@ -771,6 +832,7 @@ fn collect_worlds(instances: &InstanceStore, installations_root: &Path) -> Vec<W
                 cheats_enabled: metadata.cheats_enabled,
                 difficulty: metadata.difficulty,
                 version_name: metadata.version_name,
+                thumbnail_png: read_world_thumbnail(path.join("icon.png").as_path()),
                 last_used_at_ms,
                 favorite: instance.favorite_world_ids.iter().any(|id| id == &world_id),
             });
@@ -801,6 +863,7 @@ fn collect_servers(instances: &InstanceStore, installations_root: &Path) -> Vec<
                 address: server.ip,
                 host,
                 port,
+                icon_png: decode_server_icon(server.icon.as_deref()),
                 last_used_at_ms,
             });
         }
@@ -837,14 +900,9 @@ fn refresh_server_pings(state: &mut HomeState) {
     }
 
     for address in stale_addresses.into_iter().take(SERVER_PINGS_PER_SCAN) {
-        let status = probe_server_status(address.as_str());
-        state.server_pings.insert(
-            address,
-            ServerPingSnapshot {
-                status,
-                checked_at: Instant::now(),
-            },
-        );
+        let mut snapshot = query_server_snapshot(address.as_str());
+        snapshot.checked_at = Instant::now();
+        state.server_pings.insert(address, snapshot);
     }
 }
 
@@ -878,40 +936,275 @@ fn split_server_address(address: &str) -> (String, u16) {
     (trimmed.to_owned(), 25565)
 }
 
-fn probe_server_status(address: &str) -> ServerPingStatus {
+fn query_server_snapshot(address: &str) -> ServerPingSnapshot {
+    let unknown = || ServerPingSnapshot {
+        status: ServerPingStatus::Unknown,
+        motd: None,
+        players_online: None,
+        players_max: None,
+        checked_at: Instant::now(),
+    };
     let (host, port) = split_server_address(address);
     if host.is_empty() {
-        return ServerPingStatus::Unknown;
+        return unknown();
     }
+    let mut stream = match connect_to_server(host.as_str(), port) {
+        Some(stream) => stream,
+        None => {
+            return ServerPingSnapshot {
+                status: ServerPingStatus::Offline,
+                motd: None,
+                players_online: None,
+                players_max: None,
+                checked_at: Instant::now(),
+            };
+        }
+    };
+    let _ = stream.set_read_timeout(Some(SERVER_PING_CONNECT_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(SERVER_PING_CONNECT_TIMEOUT));
+
     let start = Instant::now();
+    match request_server_status(&mut stream, host.as_str(), port) {
+        Ok((motd, players_online, players_max)) => ServerPingSnapshot {
+            status: ServerPingStatus::Online {
+                latency_ms: start.elapsed().as_millis() as u64,
+            },
+            motd,
+            players_online,
+            players_max,
+            checked_at: Instant::now(),
+        },
+        Err(_) => ServerPingSnapshot {
+            status: ServerPingStatus::Online {
+                latency_ms: start.elapsed().as_millis() as u64,
+            },
+            motd: None,
+            players_online: None,
+            players_max: None,
+            checked_at: Instant::now(),
+        },
+    }
+}
+
+fn connect_to_server(host: &str, port: u16) -> Option<TcpStream> {
     let mut saw_target = false;
     if let Ok(ip) = host.parse::<IpAddr>() {
         saw_target = true;
-        if TcpStream::connect_timeout(&SocketAddr::new(ip, port), SERVER_PING_CONNECT_TIMEOUT)
-            .is_ok()
+        if let Ok(stream) =
+            TcpStream::connect_timeout(&SocketAddr::new(ip, port), SERVER_PING_CONNECT_TIMEOUT)
         {
-            return ServerPingStatus::Online {
-                latency_ms: start.elapsed().as_millis() as u64,
-            };
+            return Some(stream);
         }
-    } else if let Ok(candidates) = (host.as_str(), port).to_socket_addrs() {
+    } else if let Ok(candidates) = (host, port).to_socket_addrs() {
         for candidate in candidates {
             saw_target = true;
-            if TcpStream::connect_timeout(&candidate, SERVER_PING_CONNECT_TIMEOUT).is_ok() {
-                return ServerPingStatus::Online {
-                    latency_ms: start.elapsed().as_millis() as u64,
-                };
+            if let Ok(stream) = TcpStream::connect_timeout(&candidate, SERVER_PING_CONNECT_TIMEOUT)
+            {
+                return Some(stream);
             }
         }
+    }
+    if !saw_target {
+        return None;
+    }
+    None
+}
+
+fn request_server_status(
+    stream: &mut TcpStream,
+    host: &str,
+    port: u16,
+) -> Result<(Option<String>, Option<u32>, Option<u32>), ()> {
+    send_handshake_packet(stream, host, port)?;
+    send_status_request_packet(stream)?;
+    let json = read_status_response_packet(stream)?;
+    parse_status_json(json.as_str())
+}
+
+fn send_handshake_packet(stream: &mut TcpStream, host: &str, port: u16) -> Result<(), ()> {
+    let mut payload = Vec::new();
+    write_varint(&mut payload, 0); // Handshake packet ID.
+    write_varint_i32(&mut payload, -1); // Status query protocol version sentinel.
+    write_mc_string(&mut payload, host)?;
+    payload.extend_from_slice(&port.to_be_bytes());
+    write_varint(&mut payload, 1); // Next state: status.
+    write_framed_packet(stream, &payload)
+}
+
+fn send_status_request_packet(stream: &mut TcpStream) -> Result<(), ()> {
+    write_framed_packet(stream, &[0]) // Status request packet ID.
+}
+
+fn read_status_response_packet(stream: &mut TcpStream) -> Result<String, ()> {
+    let _packet_len = read_varint_from_stream(stream)?;
+    let packet_id = read_varint_from_stream(stream)?;
+    if packet_id != 0 {
+        return Err(());
+    }
+    read_mc_string_from_stream(stream)
+}
+
+fn write_framed_packet(stream: &mut TcpStream, payload: &[u8]) -> Result<(), ()> {
+    let mut frame = Vec::new();
+    write_varint(&mut frame, payload.len() as u32);
+    frame.extend_from_slice(payload);
+    stream.write_all(frame.as_slice()).map_err(|_| ())
+}
+
+fn write_varint(buf: &mut Vec<u8>, mut value: u32) {
+    loop {
+        if (value & !0x7F) == 0 {
+            buf.push(value as u8);
+            return;
+        }
+        buf.push(((value & 0x7F) as u8) | 0x80);
+        value >>= 7;
+    }
+}
+
+fn write_varint_i32(buf: &mut Vec<u8>, value: i32) {
+    write_varint(buf, value as u32);
+}
+
+fn read_varint_from_stream(stream: &mut TcpStream) -> Result<u32, ()> {
+    let mut num_read = 0u32;
+    let mut result = 0u32;
+    loop {
+        let mut byte = [0u8; 1];
+        stream.read_exact(&mut byte).map_err(|_| ())?;
+        let value = (byte[0] & 0x7F) as u32;
+        result |= value << (7 * num_read);
+        num_read += 1;
+        if num_read > 5 {
+            return Err(());
+        }
+        if (byte[0] & 0x80) == 0 {
+            break;
+        }
+    }
+    Ok(result)
+}
+
+fn write_mc_string(buf: &mut Vec<u8>, value: &str) -> Result<(), ()> {
+    let bytes = value.as_bytes();
+    let len = u32::try_from(bytes.len()).map_err(|_| ())?;
+    write_varint(buf, len);
+    buf.extend_from_slice(bytes);
+    Ok(())
+}
+
+fn read_mc_string_from_stream(stream: &mut TcpStream) -> Result<String, ()> {
+    let len = read_varint_from_stream(stream)? as usize;
+    let mut bytes = vec![0u8; len];
+    stream.read_exact(bytes.as_mut_slice()).map_err(|_| ())?;
+    Ok(String::from_utf8_lossy(bytes.as_slice()).to_string())
+}
+
+fn parse_status_json(raw: &str) -> Result<(Option<String>, Option<u32>, Option<u32>), ()> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| ())?;
+    let motd = value
+        .get("description")
+        .and_then(motd_from_json)
+        .map(|text| strip_minecraft_format_codes(text.as_str()))
+        .map(|text| text.trim().to_owned())
+        .filter(|text| !text.is_empty());
+    let players_online = value
+        .get("players")
+        .and_then(|players| players.get("online"))
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok());
+    let players_max = value
+        .get("players")
+        .and_then(|players| players.get("max"))
+        .and_then(|value| value.as_u64())
+        .and_then(|value| u32::try_from(value).ok());
+    Ok((motd, players_online, players_max))
+}
+
+fn motd_from_json(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return Some(text.to_owned());
+    }
+    let mut out = String::new();
+    append_motd_text(value, &mut out);
+    if out.trim().is_empty() {
+        None
     } else {
-        return ServerPingStatus::Unknown;
+        Some(out)
+    }
+}
+
+fn append_motd_text(value: &serde_json::Value, out: &mut String) {
+    if let Some(text) = value.get("text").and_then(|text| text.as_str()) {
+        out.push_str(text);
+    }
+    if let Some(extra) = value.get("extra").and_then(|extra| extra.as_array()) {
+        for part in extra {
+            append_motd_text(part, out);
+        }
+    }
+}
+
+fn strip_minecraft_format_codes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '§' {
+            let _ = chars.next();
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn truncate_for_width(
+    ui: &Ui,
+    text_ui: &mut TextUi,
+    value: &str,
+    options: &LabelOptions,
+    max_width: f32,
+) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if text_ui.measure_text_size(ui, trimmed, options).x <= max_width {
+        return trimmed.to_owned();
+    }
+    let ellipsis = "...";
+    if text_ui.measure_text_size(ui, ellipsis, options).x > max_width {
+        return ellipsis.to_owned();
+    }
+    let chars: Vec<char> = trimmed.chars().collect();
+    let mut low = 0usize;
+    let mut high = chars.len();
+    let mut best = 0usize;
+
+    while low <= high {
+        let mid = low + (high - low) / 2;
+        let mut candidate = String::with_capacity(mid + ellipsis.len());
+        for ch in chars.iter().take(mid) {
+            candidate.push(*ch);
+        }
+        candidate.push_str(ellipsis);
+        let width = text_ui.measure_text_size(ui, candidate.as_str(), options).x;
+        if width <= max_width {
+            best = mid;
+            low = mid.saturating_add(1);
+        } else if mid == 0 {
+            break;
+        } else {
+            high = mid - 1;
+        }
     }
 
-    if saw_target {
-        ServerPingStatus::Offline
-    } else {
-        ServerPingStatus::Unknown
+    let mut out = String::with_capacity(best + ellipsis.len());
+    for ch in chars.iter().take(best) {
+        out.push(*ch);
     }
+    out.push_str(ellipsis);
+    out
 }
 
 fn parse_world_metadata(path: &Path) -> Option<WorldMetadata> {
@@ -1021,6 +1314,41 @@ fn read_nbt_file(path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+fn read_world_thumbnail(path: &Path) -> Option<Vec<u8>> {
+    let bytes = fs::read(path).ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    // Guard against unexpectedly large files in world folders.
+    if bytes.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn decode_server_icon(raw: Option<&str>) -> Option<Vec<u8>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let encoded = raw
+        .strip_prefix("data:image/png;base64,")
+        .or_else(|| raw.strip_prefix("data:image/png;base64"))
+        .unwrap_or(raw)
+        .trim_start_matches(',')
+        .trim();
+    if encoded.is_empty() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()?;
+    if decoded.is_empty() || decoded.len() > 4 * 1024 * 1024 {
+        return None;
+    }
+    Some(decoded)
+}
+
 fn parse_servers_dat(path: &Path) -> Option<Vec<ServerDatEntry>> {
     let data = read_nbt_file(path)?;
     parse_servers_from_nbt(data.as_slice()).ok()
@@ -1078,6 +1406,7 @@ fn parse_servers_list(cursor: &mut NbtCursor<'_>, out: &mut Vec<ServerDatEntry>)
 fn parse_server_compound(cursor: &mut NbtCursor<'_>) -> Result<Option<ServerDatEntry>, ()> {
     let mut name = String::new();
     let mut ip = String::new();
+    let mut icon = None;
     loop {
         let tag = cursor.read_u8()?;
         if tag == 0 {
@@ -1087,6 +1416,7 @@ fn parse_server_compound(cursor: &mut NbtCursor<'_>) -> Result<Option<ServerDatE
         match (tag, key.as_str()) {
             (8, "name") => name = cursor.read_string()?,
             (8, "ip") => ip = cursor.read_string()?,
+            (8, "icon") => icon = Some(cursor.read_string()?),
             _ => skip_nbt_payload(cursor, tag)?,
         }
     }
@@ -1096,7 +1426,7 @@ fn parse_server_compound(cursor: &mut NbtCursor<'_>) -> Result<Option<ServerDatE
     if name.trim().is_empty() {
         name = ip.clone();
     }
-    Ok(Some(ServerDatEntry { name, ip }))
+    Ok(Some(ServerDatEntry { name, ip, icon }))
 }
 
 fn skip_nbt_payload(cursor: &mut NbtCursor<'_>, tag: u8) -> Result<(), ()> {

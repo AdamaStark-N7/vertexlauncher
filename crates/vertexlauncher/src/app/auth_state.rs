@@ -198,13 +198,15 @@ impl AuthState {
                         self.status = AuthUiStatus::Idle;
 
                         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-                            notification::error!(
-                                "auth",
+                            let message = format!(
                                 "Sign-in succeeded, but failed to cache account state: {err}"
                             );
-                            self.status = AuthUiStatus::Error(format!(
-                                "Sign-in succeeded, but failed to cache account state: {err}",
-                            ));
+                            if is_nonfatal_account_cache_error(message.as_str()) {
+                                notification::warn!("auth", "{message}");
+                            } else {
+                                notification::error!("auth", "{message}");
+                                self.status = AuthUiStatus::Error(message);
+                            }
                         }
 
                         flow_finished = true;
@@ -273,13 +275,14 @@ impl AuthState {
         }
 
         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-            notification::error!(
-                "auth",
-                "Switched account in memory, but failed to cache account state: {err}"
-            );
-            self.status = AuthUiStatus::Error(format!(
-                "Switched account in memory, but failed to cache account state: {err}",
-            ));
+            let message =
+                format!("Switched account in memory, but failed to cache account state: {err}");
+            if is_nonfatal_account_cache_error(message.as_str()) {
+                notification::warn!("auth", "{message}");
+            } else {
+                notification::error!("auth", "{message}");
+                self.status = AuthUiStatus::Error(message);
+            }
         }
     }
 
@@ -293,13 +296,14 @@ impl AuthState {
         self.status = AuthUiStatus::Idle;
 
         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-            notification::error!(
-                "auth",
-                "Removed account in memory, but failed to cache account state: {err}"
-            );
-            self.status = AuthUiStatus::Error(format!(
-                "Removed account in memory, but failed to cache account state: {err}",
-            ));
+            let message =
+                format!("Removed account in memory, but failed to cache account state: {err}");
+            if is_nonfatal_account_cache_error(message.as_str()) {
+                notification::warn!("auth", "{message}");
+            } else {
+                notification::error!("auth", "{message}");
+                self.status = AuthUiStatus::Error(message);
+            }
         }
     }
 
@@ -763,4 +767,43 @@ fn is_guid_client_id(value: &str) -> bool {
     }
 
     true
+}
+
+fn is_nonfatal_account_cache_error(error_text: &str) -> bool {
+    let lowered = error_text.to_ascii_lowercase();
+    let mentions_secure_storage = lowered.contains("secure storage")
+        || lowered.contains("platform secure storage")
+        || lowered.contains("secret service")
+        || lowered.contains("org/freedesktop/secrets");
+    let likely_session_bus_issue = lowered.contains("can't find session")
+        || lowered.contains("dbus error")
+        || lowered.contains("no such object path")
+        || lowered.contains("no such interface");
+    mentions_secure_storage && likely_session_bus_issue
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_nonfatal_account_cache_error;
+
+    #[test]
+    fn marks_secure_storage_dbus_session_failures_as_nonfatal() {
+        let message = "Sign-in succeeded, but failed to cache account state: Secure storage error: \
+Failed to store cached accounts state in secure storage: Platform secure storage failure: DBus \
+error: Can't find session /org/freedesktop/secrets/session/654";
+        assert!(is_nonfatal_account_cache_error(message));
+    }
+
+    #[test]
+    fn marks_secret_service_object_path_failures_as_nonfatal() {
+        let message = "Failed to cache account state: Platform secure storage failure: Secret \
+Service response error: No such object path '/org/freedesktop/secrets/collection/login'";
+        assert!(is_nonfatal_account_cache_error(message));
+    }
+
+    #[test]
+    fn keeps_non_secure_storage_cache_errors_fatal() {
+        let message = "Sign-in succeeded, but failed to cache account state: Permission denied";
+        assert!(!is_nonfatal_account_cache_error(message));
+    }
 }

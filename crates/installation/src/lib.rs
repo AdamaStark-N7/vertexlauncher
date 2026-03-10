@@ -1662,12 +1662,36 @@ fn collect_game_arguments(chain: &[serde_json::Value], context: &LaunchContext) 
         .into_iter()
         .map(|entry| substitute_tokens(entry.as_str(), context))
         .collect();
-    normalize_quick_play_arguments(resolved)
+    normalize_quick_play_arguments(resolved, context)
 }
 
-fn normalize_quick_play_arguments(args: Vec<String>) -> Vec<String> {
+fn normalize_quick_play_arguments(args: Vec<String>, context: &LaunchContext) -> Vec<String> {
+    let quick_play_path = context
+        .substitutions
+        .get("quickPlayPath")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let quick_play_singleplayer = context
+        .substitutions
+        .get("quickPlaySingleplayer")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let quick_play_multiplayer = context
+        .substitutions
+        .get("quickPlayMultiplayer")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let requested_quick_play_mode = quick_play_singleplayer
+        .map(|world| ("--quickPlaySingleplayer", world))
+        .or_else(|| quick_play_multiplayer.map(|server| ("--quickPlayMultiplayer", server)));
+
     let mut out = Vec::new();
     let mut cursor = 0usize;
+    let mut has_quick_play_path = false;
     let mut quick_play_mode_selected = false;
 
     while cursor < args.len() {
@@ -1688,7 +1712,24 @@ fn normalize_quick_play_arguments(args: Vec<String>) -> Vec<String> {
         let value = args.get(cursor + 1).map(String::as_str).unwrap_or_default();
         let unresolved_placeholder =
             value.starts_with("${quickPlay") && value.ends_with('}') && value.len() > 2;
-        if value.trim().is_empty() || unresolved_placeholder || quick_play_mode_selected {
+        if value.trim().is_empty() || unresolved_placeholder {
+            cursor = cursor.saturating_add(2);
+            continue;
+        }
+
+        if current == "--quickPlayPath" {
+            if has_quick_play_path {
+                cursor = cursor.saturating_add(2);
+                continue;
+            }
+            has_quick_play_path = true;
+            out.push(args[cursor].clone());
+            out.push(args[cursor + 1].clone());
+            cursor += 2;
+            continue;
+        }
+
+        if quick_play_mode_selected {
             cursor = cursor.saturating_add(2);
             continue;
         }
@@ -1697,6 +1738,17 @@ fn normalize_quick_play_arguments(args: Vec<String>) -> Vec<String> {
         out.push(args[cursor + 1].clone());
         quick_play_mode_selected = true;
         cursor += 2;
+    }
+
+    if let Some((flag, value)) = requested_quick_play_mode
+        && !quick_play_mode_selected
+    {
+        if !has_quick_play_path && let Some(path) = quick_play_path {
+            out.push("--quickPlayPath".to_owned());
+            out.push(path.to_owned());
+        }
+        out.push(flag.to_owned());
+        out.push(value.to_owned());
     }
 
     out
@@ -4204,6 +4256,58 @@ mod tests {
                 at_millis: 3_500,
             }),
             Some(7)
+        );
+    }
+
+    #[test]
+    fn quick_play_requested_singleplayer_is_appended_when_profile_has_no_flags() {
+        let mut substitutions = HashMap::new();
+        substitutions.insert("quickPlayPath".to_owned(), "/tmp/qp".to_owned());
+        substitutions.insert("quickPlaySingleplayer".to_owned(), "MyWorld".to_owned());
+        let context = LaunchContext {
+            substitutions,
+            features: HashMap::new(),
+        };
+        let args = vec!["--demo".to_owned()];
+        let normalized = normalize_quick_play_arguments(args, &context);
+        assert_eq!(
+            normalized,
+            vec![
+                "--demo".to_owned(),
+                "--quickPlayPath".to_owned(),
+                "/tmp/qp".to_owned(),
+                "--quickPlaySingleplayer".to_owned(),
+                "MyWorld".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn quick_play_keeps_single_mode_and_filters_duplicates() {
+        let mut substitutions = HashMap::new();
+        substitutions.insert("quickPlayPath".to_owned(), "/tmp/qp".to_owned());
+        substitutions.insert("quickPlayMultiplayer".to_owned(), "example.org".to_owned());
+        let context = LaunchContext {
+            substitutions,
+            features: HashMap::new(),
+        };
+        let args = vec![
+            "--quickPlayPath".to_owned(),
+            "/tmp/qp".to_owned(),
+            "--quickPlaySingleplayer".to_owned(),
+            "WorldA".to_owned(),
+            "--quickPlayMultiplayer".to_owned(),
+            "example.org".to_owned(),
+        ];
+        let normalized = normalize_quick_play_arguments(args, &context);
+        assert_eq!(
+            normalized,
+            vec![
+                "--quickPlayPath".to_owned(),
+                "/tmp/qp".to_owned(),
+                "--quickPlaySingleplayer".to_owned(),
+                "WorldA".to_owned(),
+            ]
         );
     }
 }
