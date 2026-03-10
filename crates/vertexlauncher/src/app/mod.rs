@@ -264,11 +264,6 @@ impl eframe::App for VertexApp {
             })
             .collect::<HashMap<_, _>>();
         let streamer_mode = self.config.streamer_mode_enabled();
-        let account_avatars_by_key = if streamer_mode {
-            HashMap::new()
-        } else {
-            account_avatars_by_key
-        };
         let active_launch_auth =
             self.auth
                 .active_launch_context()
@@ -300,11 +295,7 @@ impl eframe::App for VertexApp {
             &mut self.text_ui,
             ui::top_bar::ProfileUiModel {
                 display_name: self.auth.display_name(),
-                avatar_png: if streamer_mode {
-                    None
-                } else {
-                    self.auth.avatar_png()
-                },
+                avatar_png: self.auth.avatar_png(),
                 sign_in_in_progress: self.auth.sign_in_in_progress(),
                 auth_busy: self.auth.auth_busy(),
                 token_refresh_in_progress: self.auth.token_refresh_in_progress(),

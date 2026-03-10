@@ -2102,7 +2102,6 @@ fn render_runtime_row(
     };
     let running_avatar_png = running_account_key
         .as_deref()
-        .filter(|_| !streamer_mode)
         .and_then(|key| account_avatars_by_key.get(key))
         .map(Vec::as_slice);
     let runtime_running = runtime_running_for_active_account;
