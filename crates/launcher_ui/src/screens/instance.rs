@@ -47,6 +47,8 @@ const INSTALLED_CONTENT_SCROLLBAR_RESERVE: f32 = 18.0;
 const VTMPACK_EXTENSION: &str = "vtmpack";
 const VTMPACK_MANIFEST_VERSION: u32 = 1;
 const VERTEX_CONTENT_MANIFEST_FILE_NAME: &str = ".vertex-content-manifest.toml";
+const CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE: u32 = 50;
+const CURSEFORGE_VERSION_LOOKUP_MAX_PAGES: u32 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InstalledContentTab {
@@ -555,6 +557,7 @@ fn render_installed_content_section(
                     request_content_metadata_lookup(
                         state,
                         entry.lookup_key.as_str(),
+                        entry.file_name.as_str(),
                         entry.lookup_query.as_str(),
                         entry.fallback_lookup_key.as_deref(),
                         entry.fallback_lookup_query.as_deref(),
@@ -562,14 +565,10 @@ fn render_installed_content_section(
                         state.selected_content_tab,
                     );
                 }
-                let placeholder_metadata = entry.managed_identity.as_ref().map(|identity| {
-                    identity.placeholder_entry(state.selected_content_tab.content_type_key())
-                });
                 let metadata = state
                     .content_metadata_cache
                     .get(&entry.lookup_key)
-                    .and_then(|meta| meta.as_ref())
-                    .or(placeholder_metadata.as_ref());
+                    .and_then(|meta| meta.as_ref());
 
                 let rendered = ui
                     .scope_builder(
@@ -3157,6 +3156,7 @@ fn ensure_content_lookup_channel(state: &mut InstanceScreenState) {
 fn request_content_metadata_lookup(
     state: &mut InstanceScreenState,
     lookup_key: &str,
+    file_name: &str,
     lookup_query: &str,
     fallback_lookup_key: Option<&str>,
     fallback_lookup_query: Option<&str>,
@@ -3182,6 +3182,7 @@ fn request_content_metadata_lookup(
     let key_for_state = normalized_key.to_owned();
     state.content_lookup_in_flight.insert(key_for_state.clone());
     let key_for_result = key_for_state.clone();
+    let file_name_for_lookup = file_name.trim().to_owned();
     let query_for_search = query.to_owned();
     let fallback_key_for_search = fallback_lookup_key
         .map(str::trim)
@@ -3196,7 +3197,11 @@ fn request_content_metadata_lookup(
     let _ = tokio_runtime::spawn(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             if let Some(identity) = managed_identity.as_ref()
-                && let Some(entry) = fetch_exact_managed_content_metadata(identity, tab)
+                && let Some(entry) = fetch_exact_managed_content_metadata(
+                    identity,
+                    file_name_for_lookup.as_str(),
+                    tab,
+                )
             {
                 return Some(entry);
             }
@@ -3261,11 +3266,26 @@ fn poll_content_lookup_results(state: &mut InstanceScreenState) {
 
 fn fetch_exact_managed_content_metadata(
     identity: &InstalledContentIdentity,
+    disk_file_name: &str,
     tab: InstalledContentTab,
 ) -> Option<UnifiedContentEntry> {
+    if !managed_identity_matches_file_name(identity, disk_file_name) {
+        return None;
+    }
+
     match identity.source {
         ContentSource::Modrinth => {
             let project_id = identity.modrinth_project_id.as_deref()?;
+            let version_id = identity.selected_version_id.trim();
+            if version_id.is_empty() {
+                return None;
+            }
+            let version = ModrinthClient::default().get_version(version_id).ok()?;
+            if version.project_id != project_id
+                || !version_contains_file_name(version.files.as_slice(), disk_file_name)
+            {
+                return None;
+            }
             let project = ModrinthClient::default().get_project(project_id).ok()?;
             Some(UnifiedContentEntry {
                 id: format!("modrinth:{}", project.project_id),
@@ -3279,7 +3299,12 @@ fn fetch_exact_managed_content_metadata(
         }
         ContentSource::CurseForge => {
             let project_id = identity.curseforge_project_id?;
+            let version_id = identity.selected_version_id.trim().parse::<u64>().ok()?;
             let curseforge = CurseForgeClient::from_env()?;
+            let file = find_curseforge_project_file(&curseforge, project_id, version_id)?;
+            if file.file_name != disk_file_name {
+                return None;
+            }
             let project = curseforge.get_mod(project_id).ok()?;
             Some(UnifiedContentEntry {
                 id: format!("curseforge:{}", project.id),
@@ -3292,6 +3317,52 @@ fn fetch_exact_managed_content_metadata(
             })
         }
     }
+}
+
+fn managed_identity_matches_file_name(
+    identity: &InstalledContentIdentity,
+    disk_file_name: &str,
+) -> bool {
+    let expected = Path::new(identity.file_path.as_str())
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    !expected.is_empty() && expected == disk_file_name
+}
+
+fn version_contains_file_name(
+    files: &[modrinth::ProjectVersionFile],
+    disk_file_name: &str,
+) -> bool {
+    files.iter().any(|file| file.filename == disk_file_name)
+}
+
+fn find_curseforge_project_file(
+    client: &CurseForgeClient,
+    project_id: u64,
+    version_id: u64,
+) -> Option<curseforge::File> {
+    let mut index = 0u32;
+    for _ in 0..CURSEFORGE_VERSION_LOOKUP_MAX_PAGES {
+        let batch = client
+            .list_mod_files(
+                project_id,
+                None,
+                None,
+                index,
+                CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE,
+            )
+            .ok()?;
+        let batch_len = batch.len() as u32;
+        if let Some(file) = batch.into_iter().find(|file| file.id == version_id) {
+            return Some(file);
+        }
+        if batch_len < CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE {
+            break;
+        }
+        index = index.saturating_add(CURSEFORGE_VERSION_LOOKUP_PAGE_SIZE);
+    }
+    None
 }
 
 fn choose_preferred_content_entry(

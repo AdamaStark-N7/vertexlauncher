@@ -354,34 +354,11 @@ struct InstalledContentProject {
 #[derive(Clone, Debug)]
 pub(crate) struct InstalledContentIdentity {
     pub name: String,
+    pub file_path: String,
     pub source: ContentSource,
     pub modrinth_project_id: Option<String>,
     pub curseforge_project_id: Option<u64>,
-}
-
-impl InstalledContentIdentity {
-    pub(crate) fn placeholder_entry(&self, content_type: &str) -> UnifiedContentEntry {
-        let id = match self.source {
-            ContentSource::Modrinth => self
-                .modrinth_project_id
-                .as_deref()
-                .map(|value| format!("modrinth:{value}"))
-                .unwrap_or_default(),
-            ContentSource::CurseForge => self
-                .curseforge_project_id
-                .map(|value| format!("curseforge:{value}"))
-                .unwrap_or_default(),
-        };
-        UnifiedContentEntry {
-            id,
-            name: self.name.clone(),
-            summary: String::new(),
-            content_type: content_type.to_owned(),
-            source: self.source,
-            project_url: None,
-            icon_url: None,
-        }
-    }
+    pub selected_version_id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3569,9 +3546,11 @@ pub(crate) fn load_managed_content_identities(
                 normalize_content_path_key(project.file_path.as_str()),
                 InstalledContentIdentity {
                     name: project.name,
+                    file_path: project.file_path,
                     source: project.selected_source.into(),
                     modrinth_project_id: project.modrinth_project_id,
                     curseforge_project_id: project.curseforge_project_id,
+                    selected_version_id: project.selected_version_id,
                 },
             )
         })

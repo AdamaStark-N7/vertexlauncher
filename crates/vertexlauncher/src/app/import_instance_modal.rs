@@ -1634,23 +1634,16 @@ fn maybe_add_project_from_json(
             .map(|value| value.to_string()),
     ])
     .unwrap_or_default();
-    let version_name = json_object_string(
-        map,
-        &[
-            "version_name",
-            "versionName",
-            "fileName",
-            "filename",
-            "file_name",
-        ],
-    )
-    .or_else(|| {
-        map.get("installedFile")
-            .and_then(|value| value.get("fileName"))
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-    })
-    .unwrap_or_default();
+    let metadata_file_name = json_object_string(map, &["fileName", "filename", "file_name"])
+        .or_else(|| {
+            map.get("installedFile")
+                .and_then(|value| value.get("fileName"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        });
+    let version_name = json_object_string(map, &["version_name", "versionName"])
+        .or_else(|| metadata_file_name.clone())
+        .unwrap_or_default();
     let name = json_object_string(map, &["name", "title"])
         .or_else(|| {
             map.get("installedFile")
@@ -1660,14 +1653,17 @@ fn maybe_add_project_from_json(
         })
         .unwrap_or_else(|| version_name.clone());
 
+    let Some(metadata_file_name) = metadata_file_name.as_deref() else {
+        return;
+    };
+
     let file_path = first_non_empty([
-        json_object_string(map, &["path", "file_path", "filePath"]),
-        json_object_string(map, &["filename", "fileName", "file_name"])
-            .map(|value| guess_relative_mod_path(source_root, value.as_str())),
-        map.get("installedFile")
-            .and_then(|value| value.get("fileName"))
-            .and_then(Value::as_str)
-            .map(|value| guess_relative_mod_path(source_root, value)),
+        json_object_string(map, &["path", "file_path", "filePath"]).and_then(|value| {
+            resolve_existing_relative_file_path(source_root, value.as_str(), metadata_file_name)
+        }),
+        Some(metadata_file_name.to_owned()).and_then(|value| {
+            resolve_existing_relative_file_path(source_root, value.as_str(), metadata_file_name)
+        }),
     ]);
     let Some(file_path) = file_path else {
         return;
@@ -1715,12 +1711,36 @@ fn json_object_u64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Optio
     })
 }
 
-fn guess_relative_mod_path(source_root: &Path, file_name: &str) -> String {
-    let mods_candidate = source_root.join("mods").join(file_name);
-    if mods_candidate.exists() {
-        return format!("mods/{file_name}");
+fn resolve_existing_relative_file_path(
+    source_root: &Path,
+    raw: &str,
+    expected_file_name: &str,
+) -> Option<String> {
+    let normalized = normalize_project_key(raw);
+    if normalized.is_empty() {
+        return None;
     }
-    file_name.to_owned()
+
+    let direct = source_root.join(normalized.as_str());
+    if direct.is_file() && file_name_matches(direct.as_path(), expected_file_name) {
+        return Some(normalized);
+    }
+
+    let known_dirs = ["mods", "resourcepacks", "shaderpacks", "datapacks"];
+    for dir in known_dirs {
+        let candidate = source_root.join(dir).join(raw);
+        if candidate.is_file() && file_name_matches(candidate.as_path(), expected_file_name) {
+            return Some(format!("{dir}/{}", raw.trim()));
+        }
+    }
+
+    None
+}
+
+fn file_name_matches(path: &Path, expected_file_name: &str) -> bool {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value == expected_file_name.trim())
 }
 
 fn normalize_project_key(value: &str) -> String {
