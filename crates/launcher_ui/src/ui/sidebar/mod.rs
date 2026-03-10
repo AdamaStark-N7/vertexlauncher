@@ -138,15 +138,17 @@ fn render_segments(
                     },
                 )
                 .inner;
+            let create_menu_labels = ["Create from scratch", "Import profile"];
+            let create_menu_width = popup_menu_width(ui, &create_menu_labels);
             let _ = egui::Popup::menu(&create_response)
                 .id(ui.id().with("sidebar_create_instance_popup"))
-                .width(220.0)
+                .width(create_menu_width)
                 .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
                 .show(|ui| {
                     if ui
                         .add_sized(
                             [ui.available_width().max(120.0), style::CONTROL_HEIGHT],
-                            egui::Button::new("Create from scratch"),
+                            egui::Button::new(create_menu_labels[0]),
                         )
                         .clicked()
                     {
@@ -155,7 +157,7 @@ fn render_segments(
                     if ui
                         .add_sized(
                             [ui.available_width().max(120.0), style::CONTROL_HEIGHT],
-                            egui::Button::new("Import profile"),
+                            egui::Button::new(create_menu_labels[1]),
                         )
                         .clicked()
                     {
@@ -195,4 +197,28 @@ fn render_segments(
             },
         );
     }
+}
+
+fn popup_menu_width(ui: &Ui, labels: &[&str]) -> f32 {
+    let button_padding = ui.spacing().button_padding.x * 2.0;
+    let item_spacing = ui.spacing().item_spacing.x * 2.0;
+    let window_margin =
+        f32::from(ui.spacing().window_margin.left + ui.spacing().window_margin.right);
+    let button_font = egui::TextStyle::Button.resolve(ui.style());
+
+    let widest_label = labels
+        .iter()
+        .map(|label| {
+            ui.painter()
+                .layout_no_wrap(
+                    (*label).to_owned(),
+                    button_font.clone(),
+                    ui.visuals().text_color(),
+                )
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+
+    (widest_label + button_padding + item_spacing + window_margin).ceil()
 }

@@ -2105,8 +2105,15 @@ fn render_export_vtmpack_modal(
     let mut open = state.show_export_vtmpack_modal;
     let mut close_requested = false;
     let viewport_rect = ctx.input(|i| i.content_rect());
+    let installations_root = PathBuf::from(config.minecraft_installations_root());
+    let instance_root = instances
+        .find(instance_id)
+        .map(|instance| instances::instance_root_path(&installations_root, instance));
+    if let Some(instance_root) = instance_root.as_deref() {
+        sync_vtmpack_export_options(instance_root, &mut state.export_vtmpack_options);
+    }
     let modal_width = viewport_rect.width().min(560.0).max(320.0);
-    let modal_height = viewport_rect.height().min(340.0).max(220.0);
+    let modal_height = viewport_rect.height().min(520.0).max(300.0);
     let modal_pos = egui::pos2(
         (viewport_rect.center().x - modal_width * 0.5)
             .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
@@ -2131,7 +2138,7 @@ fn render_export_vtmpack_modal(
         .movable(false)
         .title_bar(false)
         .hscroll(false)
-        .vscroll(false)
+        .vscroll(true)
         .constrain(true)
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
@@ -2158,7 +2165,7 @@ fn render_export_vtmpack_modal(
             let _ = text_ui.label(
                 ui,
                 ("instance_export_vtmpack_body", instance_id),
-                "Choose whether the exported pack may reference CurseForge metadata directly, or whether CurseForge-managed files should be bundled instead.",
+                "Choose whether the exported pack may reference CurseForge metadata directly, then select which top-level files and folders from the Minecraft root should be bundled into the pack.",
                 &body_style,
             );
             ui.add_space(12.0);
@@ -2188,6 +2195,57 @@ fn render_export_vtmpack_modal(
                 explanation,
                 &body_style,
             );
+
+            ui.add_space(16.0);
+            let _ = text_ui.label(
+                ui,
+                ("instance_export_vtmpack_include_label", instance_id),
+                "Include top-level entries from the Minecraft root",
+                &LabelOptions {
+                    font_size: 18.0,
+                    line_height: 22.0,
+                    weight: 600,
+                    color: ui.visuals().text_color(),
+                    wrap: false,
+                    ..LabelOptions::default()
+                },
+            );
+            let _ = text_ui.label(
+                ui,
+                ("instance_export_vtmpack_include_help", instance_id),
+                "Defaults to mods, resourcepacks, shaderpacks, and config. You can also include any other top-level files or folders found in the instance root.",
+                &body_style,
+            );
+            ui.add_space(8.0);
+
+            if let Some(instance_root) = instance_root.as_deref() {
+                let entries = list_exportable_root_entries(instance_root);
+                egui::ScrollArea::vertical()
+                    .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for entry in entries {
+                            let checked = state
+                                .export_vtmpack_options
+                                .included_root_entries
+                                .entry(entry.clone())
+                                .or_insert_with(|| default_vtmpack_root_entry_selected(&entry));
+                            let label = if instance_root.join(entry.as_str()).is_dir() {
+                                format!("{entry}/")
+                            } else {
+                                entry.clone()
+                            };
+                            ui.checkbox(checked, label);
+                        }
+                    });
+            } else {
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_missing_instance", instance_id),
+                    "Instance root is unavailable, so folder selection cannot be shown.",
+                    &body_style,
+                );
+            }
 
             ui.add_space(16.0);
             ui.horizontal(|ui| {
@@ -2223,7 +2281,6 @@ fn render_export_vtmpack_modal(
     if export_requested {
         open = false;
         if let Some(instance) = instances.find(instance_id) {
-            let installations_root = PathBuf::from(config.minecraft_installations_root());
             let instance_root = instances::instance_root_path(&installations_root, instance);
             let default_file_name = default_vtmpack_file_name(instance.name.as_str());
             let selected_output = rfd::FileDialog::new()
@@ -2238,14 +2295,15 @@ fn render_export_vtmpack_modal(
                     instance,
                     instance_root.as_path(),
                     output_path.as_path(),
-                    state.export_vtmpack_options,
+                    &state.export_vtmpack_options,
                 ) {
                     Ok(stats) => {
                         state.status_message = Some(format!(
-                            "Exported {} ({} bundled mods, {} config files) to {}",
+                            "Exported {} ({} bundled mods, {} config files, {} additional files) to {}",
                             instance.name,
                             stats.bundled_mod_files,
                             stats.config_files,
+                            stats.additional_files,
                             output_path.display()
                         ));
                     }
@@ -4025,6 +4083,7 @@ fn configured_java_path_options(config: &Config) -> Vec<(u8, String)> {
 struct VtmpackExportStats {
     bundled_mod_files: usize,
     config_files: usize,
+    additional_files: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4042,15 +4101,17 @@ impl VtmpackProviderMode {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct VtmpackExportOptions {
     provider_mode: VtmpackProviderMode,
+    included_root_entries: BTreeMap<String, bool>,
 }
 
 impl Default for VtmpackExportOptions {
     fn default() -> Self {
         Self {
             provider_mode: VtmpackProviderMode::IncludeCurseForge,
+            included_root_entries: BTreeMap::new(),
         }
     }
 }
@@ -4064,6 +4125,7 @@ struct VtmpackManifest {
     downloadable_content: Vec<VtmpackDownloadableEntry>,
     bundled_mods: Vec<String>,
     configs: Vec<String>,
+    additional_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -4144,7 +4206,7 @@ fn enforce_vtmpack_extension(mut path: PathBuf) -> PathBuf {
 
 fn sanitize_managed_manifest_for_export(
     manifest: &ManagedContentManifest,
-    options: VtmpackExportOptions,
+    options: &VtmpackExportOptions,
 ) -> ManagedContentManifest {
     match options.provider_mode {
         VtmpackProviderMode::IncludeCurseForge => manifest.clone(),
@@ -4173,7 +4235,7 @@ fn export_instance_as_vtmpack(
     instance: &InstanceRecord,
     instance_root: &Path,
     output_path: &Path,
-    options: VtmpackExportOptions,
+    options: &VtmpackExportOptions,
 ) -> Result<VtmpackExportStats, String> {
     let managed_manifest_path = instance_root.join(VERTEX_CONTENT_MANIFEST_FILE_NAME);
     let managed_manifest = fs::read_to_string(managed_manifest_path.as_path())
@@ -4214,9 +4276,15 @@ fn export_instance_as_vtmpack(
         .map(|entry| normalize_pack_path(entry.file_path.as_str()))
         .collect::<HashSet<_>>();
 
+    let selected_root_entries = options
+        .included_root_entries
+        .iter()
+        .filter_map(|(entry, included)| included.then_some(entry.as_str()))
+        .collect::<HashSet<_>>();
+
     let mods_dir = instance_root.join("mods");
     let mut bundled_mod_files = Vec::<PathBuf>::new();
-    if mods_dir.exists() {
+    if selected_root_entries.contains("mods") && mods_dir.exists() {
         let entries = fs::read_dir(mods_dir.as_path()).map_err(|err| {
             format!(
                 "failed to read mods directory {}: {err}",
@@ -4241,7 +4309,7 @@ fn export_instance_as_vtmpack(
 
     let configs_dir = instance_root.join("config");
     let mut config_files = Vec::<PathBuf>::new();
-    if configs_dir.exists() {
+    if selected_root_entries.contains("config") && configs_dir.exists() {
         collect_regular_files_recursive(configs_dir.as_path(), &mut config_files).map_err(
             |err| {
                 format!(
@@ -4282,6 +4350,36 @@ fn export_instance_as_vtmpack(
             )
         })
         .collect::<Vec<_>>();
+    let mut additional_files = Vec::<PathBuf>::new();
+    for entry in selected_root_entries {
+        if matches!(entry, "mods" | "config") {
+            continue;
+        }
+        let root_entry_path = instance_root.join(entry);
+        if !root_entry_path.exists() {
+            continue;
+        }
+        if root_entry_path.is_dir() {
+            collect_regular_files_recursive(root_entry_path.as_path(), &mut additional_files)
+                .map_err(|err| {
+                    format!(
+                        "failed to collect files under {}: {err}",
+                        root_entry_path.display()
+                    )
+                })?;
+        } else if root_entry_path.is_file() {
+            additional_files.push(root_entry_path);
+        }
+    }
+    additional_files.sort();
+    additional_files.dedup();
+    let additional_paths = additional_files
+        .iter()
+        .map(|path| {
+            let relative = path.strip_prefix(instance_root).unwrap_or(path.as_path());
+            normalize_pack_path(relative.display().to_string().as_str())
+        })
+        .collect::<Vec<_>>();
 
     let pack_manifest = VtmpackManifest {
         format: "vtmpack".to_owned(),
@@ -4300,6 +4398,7 @@ fn export_instance_as_vtmpack(
         downloadable_content: downloadable_entries,
         bundled_mods: bundled_mod_paths,
         configs: config_paths,
+        additional_paths,
     };
 
     if let Some(parent) = output_path.parent()
@@ -4353,6 +4452,14 @@ fn export_instance_as_vtmpack(
             .map_err(|err| format!("failed to append config file {}: {err}", file.display()))?;
     }
 
+    for file in additional_files {
+        let relative = file.strip_prefix(instance_root).unwrap_or(file.as_path());
+        let target = Path::new("root_entries").join(relative);
+        archive
+            .append_path_with_name(file.as_path(), target.as_path())
+            .map_err(|err| format!("failed to append extra file {}: {err}", file.display()))?;
+    }
+
     archive
         .finish()
         .map_err(|err| format!("failed to finalize archive: {err}"))?;
@@ -4366,7 +4473,52 @@ fn export_instance_as_vtmpack(
     Ok(VtmpackExportStats {
         bundled_mod_files: pack_manifest.bundled_mods.len(),
         config_files: pack_manifest.configs.len(),
+        additional_files: pack_manifest.additional_paths.len(),
     })
+}
+
+fn sync_vtmpack_export_options(instance_root: &Path, options: &mut VtmpackExportOptions) {
+    let available_entries = list_exportable_root_entries(instance_root);
+    let available_set = available_entries.iter().cloned().collect::<HashSet<_>>();
+    options
+        .included_root_entries
+        .retain(|entry, _| available_set.contains(entry));
+    for entry in available_entries {
+        options
+            .included_root_entries
+            .entry(entry.clone())
+            .or_insert_with(|| default_vtmpack_root_entry_selected(&entry));
+    }
+}
+
+fn list_exportable_root_entries(instance_root: &Path) -> Vec<String> {
+    let mut entries = fs::read_dir(instance_root)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || name == VERTEX_CONTENT_MANIFEST_FILE_NAME {
+                return None;
+            }
+            if !(path.is_dir() || path.is_file()) {
+                return None;
+            }
+            Some(name)
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| {
+        (
+            !default_vtmpack_root_entry_selected(entry),
+            entry.to_ascii_lowercase(),
+        )
+    });
+    entries
+}
+
+fn default_vtmpack_root_entry_selected(entry: &str) -> bool {
+    matches!(entry, "mods" | "resourcepacks" | "shaderpacks" | "config")
 }
 
 fn collect_regular_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
@@ -4605,8 +4757,9 @@ mod tests {
 
         let sanitized = sanitize_managed_manifest_for_export(
             &manifest,
-            VtmpackExportOptions {
+            &VtmpackExportOptions {
                 provider_mode: VtmpackProviderMode::ExcludeCurseForge,
+                included_root_entries: BTreeMap::new(),
             },
         );
 

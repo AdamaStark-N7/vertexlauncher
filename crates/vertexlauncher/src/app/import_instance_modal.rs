@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
@@ -14,7 +14,8 @@ use launcher_ui::{
     ui::{components::settings_widgets, modal},
 };
 use modrinth::Client as ModrinthClient;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
 const MODAL_GAP_SM: f32 = 6.0;
@@ -25,7 +26,10 @@ const MANAGED_CONTENT_MANIFEST_FILE_NAME: &str = ".vertex-content-manifest.toml"
 
 #[derive(Debug, Default)]
 pub struct ImportInstanceState {
+    pub source_mode_index: usize,
     pub package_path: String,
+    pub launcher_path: String,
+    pub launcher_kind_index: usize,
     pub instance_name: String,
     pub error: Option<String>,
     preview: Option<ImportPreview>,
@@ -39,8 +43,17 @@ impl ImportInstanceState {
 
 #[derive(Clone, Debug)]
 pub struct ImportRequest {
-    pub package_path: PathBuf,
+    pub source: ImportSource,
     pub instance_name: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum ImportSource {
+    ManifestFile(PathBuf),
+    LauncherDirectory {
+        path: PathBuf,
+        launcher: Option<LauncherKind>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -52,12 +65,27 @@ pub enum ModalAction {
 
 #[derive(Clone, Debug)]
 struct ImportPreview {
-    kind: ImportPackageKind,
+    kind: ImportPreviewKind,
     detected_name: String,
     game_version: String,
     modloader: String,
     modloader_version: String,
     summary: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ImportPreviewKind {
+    Manifest(ImportPackageKind),
+    Launcher(LauncherKind),
+}
+
+impl ImportPreviewKind {
+    fn label(self) -> &'static str {
+        match self {
+            ImportPreviewKind::Manifest(kind) => kind.label(),
+            ImportPreviewKind::Launcher(kind) => kind.label(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +100,72 @@ impl ImportPackageKind {
             ImportPackageKind::VertexPack => "Vertex .vtmpack",
             ImportPackageKind::ModrinthPack => "Modrinth .mrpack",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImportMode {
+    ManifestFile,
+    LauncherDirectory,
+}
+
+impl ImportMode {
+    fn from_index(index: usize) -> Self {
+        match index {
+            1 => Self::LauncherDirectory,
+            _ => Self::ManifestFile,
+        }
+    }
+
+    fn options() -> [&'static str; 2] {
+        ["From manifest file", "Import from another launcher"]
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LauncherKind {
+    Vertex,
+    Modrinth,
+    CurseForge,
+    Prism,
+    ATLauncher,
+    Unknown,
+}
+
+impl LauncherKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vertex => "Vertex instance folder",
+            Self::Modrinth => "Modrinth launcher instance",
+            Self::CurseForge => "CurseForge instance",
+            Self::Prism => "Prism / MultiMC / PolyMC instance",
+            Self::ATLauncher => "ATLauncher instance",
+            Self::Unknown => "Generic launcher instance",
+        }
+    }
+}
+
+const LAUNCHER_KIND_OPTIONS: [&str; 6] = [
+    "Auto-detect",
+    "Vertex",
+    "Modrinth",
+    "CurseForge",
+    "Prism / MultiMC",
+    "ATLauncher",
+];
+
+fn selected_import_mode(state: &ImportInstanceState) -> ImportMode {
+    ImportMode::from_index(state.source_mode_index)
+}
+
+fn selected_launcher_hint(state: &ImportInstanceState) -> Option<LauncherKind> {
+    match state.launcher_kind_index {
+        1 => Some(LauncherKind::Vertex),
+        2 => Some(LauncherKind::Modrinth),
+        3 => Some(LauncherKind::CurseForge),
+        4 => Some(LauncherKind::Prism),
+        5 => Some(LauncherKind::ATLauncher),
+        _ => None,
     }
 }
 
@@ -138,54 +232,132 @@ pub fn render(
             let _ = text_ui.label(
                 ui,
                 "instance_import_subheading",
-                "Import a Vertex .vtmpack or Modrinth .mrpack into a new profile.",
+                "Import from a pack manifest or copy an instance out of another launcher.",
                 &body_style,
             );
 
-            let previous_path = state.package_path.clone();
-            let _ = settings_widgets::full_width_text_input_row(
+            let previous_mode = state.source_mode_index;
+            let _ = settings_widgets::full_width_dropdown_row(
                 text_ui,
                 ui,
-                "instance_import_package_path",
-                "Package file",
-                Some("Select a .vtmpack or .mrpack file."),
-                &mut state.package_path,
+                "instance_import_mode",
+                "Import source",
+                Some("Choose whether to import from a pack manifest or an existing launcher instance folder."),
+                &mut state.source_mode_index,
+                &ImportMode::options(),
             );
-            if state.package_path != previous_path {
+            if state.source_mode_index != previous_mode {
                 state.preview = None;
                 state.error = None;
             }
+            ui.add_space(MODAL_GAP_SM);
 
-            ui.horizontal(|ui| {
-                if settings_widgets::full_width_button(
-                    text_ui,
-                    ui,
-                    "instance_import_choose_file",
-                    "Choose package",
-                    (ui.available_width() * 0.5).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
-                    false,
-                )
-                .clicked()
-                {
-                    if let Some(path) = pick_import_file() {
-                        state.package_path = path.display().to_string();
-                        load_preview_from_state(state);
+            match selected_import_mode(state) {
+                ImportMode::ManifestFile => {
+                    let previous_path = state.package_path.clone();
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        "instance_import_package_path",
+                        "Manifest file",
+                        Some("Select a .vtmpack or .mrpack file."),
+                        &mut state.package_path,
+                    );
+                    if state.package_path != previous_path {
+                        state.preview = None;
+                        state.error = None;
                     }
-                }
 
-                if settings_widgets::full_width_button(
-                    text_ui,
-                    ui,
-                    "instance_import_inspect_file",
-                    "Inspect package",
-                    (ui.available_width()).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
-                    false,
-                )
-                .clicked()
-                {
-                    load_preview_from_state(state);
+                    ui.horizontal(|ui| {
+                        if settings_widgets::full_width_button(
+                            text_ui,
+                            ui,
+                            "instance_import_choose_file",
+                            "Choose manifest",
+                            (ui.available_width() * 0.5).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
+                            false,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = pick_import_file() {
+                                state.package_path = path.display().to_string();
+                                load_preview_from_state(state);
+                            }
+                        }
+
+                        if settings_widgets::full_width_button(
+                            text_ui,
+                            ui,
+                            "instance_import_inspect_file",
+                            "Inspect manifest",
+                            (ui.available_width()).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
+                            false,
+                        )
+                        .clicked()
+                        {
+                            load_preview_from_state(state);
+                        }
+                    });
                 }
-            });
+                ImportMode::LauncherDirectory => {
+                    let previous_path = state.launcher_path.clone();
+                    let previous_launcher_kind = state.launcher_kind_index;
+                    let _ = settings_widgets::full_width_dropdown_row(
+                        text_ui,
+                        ui,
+                        "instance_import_launcher_kind",
+                        "Launcher",
+                        Some("Use Auto-detect unless you know which launcher produced the instance."),
+                        &mut state.launcher_kind_index,
+                        &LAUNCHER_KIND_OPTIONS,
+                    );
+                    let _ = settings_widgets::full_width_text_input_row(
+                        text_ui,
+                        ui,
+                        "instance_import_launcher_path",
+                        "Instance folder",
+                        Some("Choose the instance directory from Modrinth, CurseForge, Prism, ATLauncher, or another launcher."),
+                        &mut state.launcher_path,
+                    );
+                    if state.launcher_path != previous_path
+                        || state.launcher_kind_index != previous_launcher_kind
+                    {
+                        state.preview = None;
+                        state.error = None;
+                    }
+
+                    ui.horizontal(|ui| {
+                        if settings_widgets::full_width_button(
+                            text_ui,
+                            ui,
+                            "instance_import_choose_folder",
+                            "Choose folder",
+                            (ui.available_width() * 0.5).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
+                            false,
+                        )
+                        .clicked()
+                        {
+                            if let Some(path) = pick_import_directory() {
+                                state.launcher_path = path.display().to_string();
+                                load_preview_from_state(state);
+                            }
+                        }
+
+                        if settings_widgets::full_width_button(
+                            text_ui,
+                            ui,
+                            "instance_import_inspect_launcher",
+                            "Inspect folder",
+                            (ui.available_width()).clamp(120.0, ACTION_BUTTON_MAX_WIDTH),
+                            false,
+                        )
+                        .clicked()
+                        {
+                            load_preview_from_state(state);
+                        }
+                    });
+                }
+            }
 
             ui.add_space(MODAL_GAP_SM);
             let _ = settings_widgets::full_width_text_input_row(
@@ -275,7 +447,10 @@ pub fn render(
                     action = ModalAction::Cancel;
                 }
 
-                let import_disabled = state.package_path.trim().is_empty();
+                let import_disabled = match selected_import_mode(state) {
+                    ImportMode::ManifestFile => state.package_path.trim().is_empty(),
+                    ImportMode::LauncherDirectory => state.launcher_path.trim().is_empty(),
+                };
                 if ui
                     .add_enabled_ui(!import_disabled, |ui| {
                         text_ui.button(
@@ -295,7 +470,19 @@ pub fn render(
                         let instance_name = non_empty(state.instance_name.as_str())
                             .unwrap_or_else(|| preview.detected_name.clone());
                         action = ModalAction::Import(ImportRequest {
-                            package_path: PathBuf::from(state.package_path.trim()),
+                            source: match selected_import_mode(state) {
+                                ImportMode::ManifestFile => {
+                                    ImportSource::ManifestFile(PathBuf::from(
+                                        state.package_path.trim(),
+                                    ))
+                                }
+                                ImportMode::LauncherDirectory => {
+                                    ImportSource::LauncherDirectory {
+                                        path: PathBuf::from(state.launcher_path.trim()),
+                                        launcher: selected_launcher_hint(state),
+                                    }
+                                }
+                            },
                             instance_name,
                         });
                     }
@@ -311,22 +498,50 @@ pub fn import_package(
     installations_root: &Path,
     request: ImportRequest,
 ) -> Result<InstanceRecord, String> {
-    let preview = inspect_package(request.package_path.as_path())?;
-    match preview.kind {
-        ImportPackageKind::VertexPack => import_vtmpack(store, installations_root, &request),
-        ImportPackageKind::ModrinthPack => import_mrpack(store, installations_root, &request),
+    match &request.source {
+        ImportSource::ManifestFile(path) => {
+            let preview = inspect_package(path.as_path())?;
+            match preview.kind {
+                ImportPreviewKind::Manifest(ImportPackageKind::VertexPack) => {
+                    import_vtmpack(store, installations_root, &request)
+                }
+                ImportPreviewKind::Manifest(ImportPackageKind::ModrinthPack) => {
+                    import_mrpack(store, installations_root, &request)
+                }
+                ImportPreviewKind::Launcher(_) => {
+                    Err("Launcher previews are not valid for manifest imports.".to_owned())
+                }
+            }
+        }
+        ImportSource::LauncherDirectory { .. } => {
+            import_launcher_instance(store, installations_root, &request)
+        }
     }
 }
 
 fn load_preview_from_state(state: &mut ImportInstanceState) {
-    let path = PathBuf::from(state.package_path.trim());
-    if path.as_os_str().is_empty() {
-        state.preview = None;
-        state.error = Some("Choose a .vtmpack or .mrpack file first.".to_owned());
-        return;
-    }
+    let preview_result = match selected_import_mode(state) {
+        ImportMode::ManifestFile => {
+            let path = PathBuf::from(state.package_path.trim());
+            if path.as_os_str().is_empty() {
+                state.preview = None;
+                state.error = Some("Choose a .vtmpack or .mrpack file first.".to_owned());
+                return;
+            }
+            inspect_package(path.as_path())
+        }
+        ImportMode::LauncherDirectory => {
+            let path = PathBuf::from(state.launcher_path.trim());
+            if path.as_os_str().is_empty() {
+                state.preview = None;
+                state.error = Some("Choose an instance folder first.".to_owned());
+                return;
+            }
+            inspect_launcher_instance(path.as_path(), selected_launcher_hint(state))
+        }
+    };
 
-    match inspect_package(path.as_path()) {
+    match preview_result {
         Ok(preview) => {
             if state.instance_name.trim().is_empty() {
                 state.instance_name = preview.detected_name.clone();
@@ -349,6 +564,10 @@ fn pick_import_file() -> Option<PathBuf> {
         .pick_file()
 }
 
+fn pick_import_directory() -> Option<PathBuf> {
+    rfd::FileDialog::new().pick_folder()
+}
+
 fn inspect_package(path: &Path) -> Result<ImportPreview, String> {
     let extension = path
         .extension()
@@ -368,7 +587,7 @@ fn inspect_package(path: &Path) -> Result<ImportPreview, String> {
 fn inspect_vtmpack(path: &Path) -> Result<ImportPreview, String> {
     let manifest = read_vtmpack_manifest(path)?;
     Ok(ImportPreview {
-        kind: ImportPackageKind::VertexPack,
+        kind: ImportPreviewKind::Manifest(ImportPackageKind::VertexPack),
         detected_name: manifest.instance.name.clone(),
         game_version: manifest.instance.game_version.clone(),
         modloader: manifest.instance.modloader.clone(),
@@ -392,7 +611,7 @@ fn inspect_mrpack(path: &Path) -> Result<ImportPreview, String> {
     let manifest = read_mrpack_manifest(path)?;
     let dependency_info = resolve_mrpack_dependencies(&manifest.dependencies)?;
     Ok(ImportPreview {
-        kind: ImportPackageKind::ModrinthPack,
+        kind: ImportPreviewKind::Manifest(ImportPackageKind::ModrinthPack),
         detected_name: non_empty(manifest.name.as_str())
             .unwrap_or_else(|| "Imported Modrinth Pack".to_owned()),
         game_version: dependency_info.game_version.clone(),
@@ -414,12 +633,1136 @@ fn inspect_mrpack(path: &Path) -> Result<ImportPreview, String> {
     })
 }
 
+#[derive(Clone, Debug)]
+struct LauncherInspection {
+    launcher: LauncherKind,
+    name: String,
+    description: Option<String>,
+    game_version: String,
+    modloader: String,
+    modloader_version: String,
+    summary: String,
+    source_root: PathBuf,
+    managed_manifest: ManagedContentManifest,
+}
+
+fn inspect_launcher_instance(
+    path: &Path,
+    launcher_hint: Option<LauncherKind>,
+) -> Result<ImportPreview, String> {
+    let inspection = inspect_launcher_details(path, launcher_hint)?;
+    Ok(ImportPreview {
+        kind: ImportPreviewKind::Launcher(inspection.launcher),
+        detected_name: inspection.name,
+        game_version: inspection.game_version,
+        modloader: inspection.modloader,
+        modloader_version: inspection.modloader_version,
+        summary: inspection.summary,
+    })
+}
+
+fn inspect_launcher_details(
+    path: &Path,
+    launcher_hint: Option<LauncherKind>,
+) -> Result<LauncherInspection, String> {
+    if !path.exists() {
+        return Err(format!(
+            "Instance folder {} does not exist.",
+            path.display()
+        ));
+    }
+    if !path.is_dir() {
+        return Err(format!(
+            "Import source {} is not a directory.",
+            path.display()
+        ));
+    }
+
+    let launcher = launcher_hint.unwrap_or_else(|| detect_launcher_kind(path));
+    match launcher {
+        LauncherKind::Vertex => inspect_vertex_launcher_instance(path),
+        LauncherKind::Modrinth => inspect_modrinth_launcher_instance(path),
+        LauncherKind::CurseForge => inspect_curseforge_launcher_instance(path),
+        LauncherKind::Prism => inspect_prism_launcher_instance(path),
+        LauncherKind::ATLauncher => inspect_atlauncher_instance(path),
+        LauncherKind::Unknown => inspect_generic_launcher_instance(path),
+    }
+}
+
+fn import_launcher_instance(
+    store: &mut InstanceStore,
+    installations_root: &Path,
+    request: &ImportRequest,
+) -> Result<InstanceRecord, String> {
+    let ImportSource::LauncherDirectory { path, launcher } = &request.source else {
+        return Err("Launcher import requires an instance directory source.".to_owned());
+    };
+
+    let inspection = inspect_launcher_details(path.as_path(), *launcher)?;
+    let instance = create_instance(
+        store,
+        installations_root,
+        NewInstanceSpec {
+            name: request.instance_name.clone(),
+            description: inspection.description.clone(),
+            thumbnail_path: None,
+            modloader: default_if_blank(inspection.modloader.as_str(), "Vanilla".to_owned()),
+            game_version: default_if_blank(inspection.game_version.as_str(), "latest".to_owned()),
+            modloader_version: inspection.modloader_version.clone(),
+        },
+    )
+    .map_err(|err| format!("failed to create imported profile: {err}"))?;
+    let instance_root = instance_root_path(installations_root, &instance);
+
+    if let Err(err) = copy_launcher_instance_content(
+        inspection.source_root.as_path(),
+        instance_root.as_path(),
+        &inspection.managed_manifest,
+    ) {
+        let _ = delete_instance(store, instance.id.as_str(), installations_root);
+        return Err(err);
+    }
+
+    Ok(instance)
+}
+
+fn detect_launcher_kind(path: &Path) -> LauncherKind {
+    if path.join(MANAGED_CONTENT_MANIFEST_FILE_NAME).is_file() {
+        LauncherKind::Vertex
+    } else if path.join("profile.json").is_file() || looks_like_modrinth_profile_path(path) {
+        LauncherKind::Modrinth
+    } else if path.join("minecraftinstance.json").is_file() {
+        LauncherKind::CurseForge
+    } else if path.join("instance.cfg").is_file() || path.join("mmc-pack.json").is_file() {
+        LauncherKind::Prism
+    } else if path.join("instance.json").is_file() {
+        LauncherKind::ATLauncher
+    } else {
+        LauncherKind::Unknown
+    }
+}
+
+fn inspect_vertex_launcher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    inspect_generic_launcher_instance_with_launcher(path, LauncherKind::Vertex)
+}
+
+fn inspect_modrinth_launcher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    if !path.join("profile.json").is_file() {
+        let mut inspection =
+            inspect_generic_launcher_instance_with_launcher(path, LauncherKind::Modrinth)?;
+        let inferred = infer_modrinth_profile_metadata(path);
+        if let Some(game_version) = inferred.game_version {
+            inspection.game_version = game_version;
+        }
+        if let Some(modloader) = inferred.modloader {
+            inspection.modloader = modloader;
+        }
+        if let Some(modloader_version) = inferred.modloader_version {
+            inspection.modloader_version = modloader_version;
+        }
+        inspection.description = Some(
+            "Imported from a Modrinth instance folder without profile.json metadata.".to_owned(),
+        );
+        inspection.summary = format!(
+            "Detected {} by location. No profile.json was present, so Minecraft and loader metadata were inferred from profile contents where possible; files will still be copied from the instance root.",
+            inspection.launcher.label()
+        );
+        return Ok(inspection);
+    }
+
+    let profile = read_json_file(path.join("profile.json").as_path())?;
+    let source_root = path.to_path_buf();
+    let name = first_non_empty([
+        json_string_at_path(&profile, &["metadata", "name"]),
+        json_string_at_path(&profile, &["name"]),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned),
+    ])
+    .unwrap_or_else(|| "Imported Modrinth Instance".to_owned());
+    let game_version = first_non_empty([
+        json_string_at_path(&profile, &["metadata", "game_version"]),
+        json_string_at_path(&profile, &["game_version"]),
+        json_string_at_path(&profile, &["metadata", "minecraft_version"]),
+        json_string_at_path(&profile, &["minecraft_version"]),
+    ])
+    .unwrap_or_else(|| "latest".to_owned());
+    let (modloader, modloader_version) = infer_loader_pair(
+        first_non_empty([
+            json_string_at_path(&profile, &["metadata", "loader"]),
+            json_string_at_path(&profile, &["loader"]),
+            json_string_at_path(&profile, &["loader_type"]),
+        ]),
+        first_non_empty([
+            json_string_at_path(&profile, &["metadata", "loader_version"]),
+            json_string_at_path(&profile, &["loader_version"]),
+            json_string_at_path(&profile, &["loaderVersion"]),
+        ]),
+    );
+    let mut managed_manifest =
+        load_existing_managed_manifest(path).unwrap_or_else(|_| ManagedContentManifest::default());
+    if managed_manifest.projects.is_empty() {
+        managed_manifest = extract_managed_manifest_from_json(
+            &profile,
+            source_root.as_path(),
+            ManagedContentSourceHint::Modrinth,
+        );
+    }
+    Ok(build_launcher_inspection(
+        LauncherKind::Modrinth,
+        name,
+        Some("Imported from an existing Modrinth launcher instance.".to_owned()),
+        game_version,
+        modloader,
+        modloader_version,
+        source_root,
+        managed_manifest,
+    ))
+}
+
+fn looks_like_modrinth_profile_path(path: &Path) -> bool {
+    let Some(parent) = path.parent() else {
+        return false;
+    };
+    let Some(parent_name) = parent.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    if parent_name != "profiles" {
+        return false;
+    }
+    path.ancestors().any(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name == "ModrinthApp")
+    })
+}
+
+#[derive(Default)]
+struct ModrinthProfileMetadata {
+    game_version: Option<String>,
+    modloader: Option<String>,
+    modloader_version: Option<String>,
+}
+
+fn infer_modrinth_profile_metadata(path: &Path) -> ModrinthProfileMetadata {
+    let mut metadata = ModrinthProfileMetadata::default();
+    metadata.game_version = infer_modrinth_game_version_from_telemetry(path)
+        .or_else(|| infer_modrinth_game_version_from_filenames(path));
+
+    let (modloader, modloader_version) = infer_modrinth_loader_from_profile(path);
+    metadata.modloader = modloader;
+    metadata.modloader_version = modloader_version;
+
+    if let Some(app_root) = modrinth_app_root(path) {
+        refine_modrinth_metadata_from_meta_cache(app_root.as_path(), &mut metadata);
+    }
+
+    metadata
+}
+
+fn infer_modrinth_game_version_from_telemetry(path: &Path) -> Option<String> {
+    let telemetry_dir = path.join("logs").join("telemetry");
+    let mut files = fs::read_dir(telemetry_dir)
+        .ok()?
+        .flatten()
+        .collect::<Vec<_>>();
+    files.sort_by_key(|entry| entry.file_name());
+    files.reverse();
+
+    for entry in files {
+        let raw = fs::read_to_string(entry.path()).ok()?;
+        for line in raw.lines().rev() {
+            if let Ok(value) = serde_json::from_str::<Value>(line)
+                && let Some(game_version) = value.get("game_version").and_then(Value::as_str)
+            {
+                let trimmed = game_version.trim();
+                if !trimmed.is_empty() {
+                    return Some(trimmed.to_owned());
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn infer_modrinth_loader_from_profile(path: &Path) -> (Option<String>, Option<String>) {
+    if let Some((loader, version)) = infer_modrinth_loader_from_dependencies_file(
+        path.join("config/fabric_loader_dependencies.json")
+            .as_path(),
+    ) {
+        return (Some(loader), Some(version));
+    }
+
+    if let Some((loader, version)) = infer_modrinth_loader_from_mod_filenames(path) {
+        return (Some(loader), version);
+    }
+
+    (None, None)
+}
+
+fn infer_modrinth_loader_from_dependencies_file(path: &Path) -> Option<(String, String)> {
+    let value = read_json_file_optional(path).ok()??;
+    let fabric_requirement = value
+        .get("overrides")
+        .and_then(|value| value.get("fabricloader"))
+        .and_then(|value| value.get("+depends"))
+        .and_then(|value| value.get("fabricloader"))
+        .and_then(Value::as_str)
+        .and_then(clean_version_requirement)?;
+    Some(("Fabric".to_owned(), fabric_requirement))
+}
+
+fn clean_version_requirement(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    let mut started = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            started = true;
+            out.push(ch);
+            continue;
+        }
+        if started && ch == '.' {
+            out.push(ch);
+            continue;
+        }
+        if started {
+            break;
+        }
+    }
+
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn infer_modrinth_loader_from_mod_filenames(path: &Path) -> Option<(String, Option<String>)> {
+    let mods_dir = path.join("mods");
+    let entries = fs::read_dir(mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if file_name.contains("fabric") {
+            return Some(("Fabric".to_owned(), None));
+        }
+        if file_name.contains("quilt") {
+            return Some(("Quilt".to_owned(), None));
+        }
+        if file_name.contains("neoforge") {
+            return Some(("NeoForge".to_owned(), None));
+        }
+        if file_name.contains("forge") {
+            return Some(("Forge".to_owned(), None));
+        }
+    }
+    None
+}
+
+fn infer_modrinth_game_version_from_filenames(path: &Path) -> Option<String> {
+    let mods_dir = path.join("mods");
+    let entries = fs::read_dir(mods_dir).ok()?;
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if let Some(version) = find_minecraft_version_in_text(file_name.as_ref()) {
+            return Some(version);
+        }
+    }
+    None
+}
+
+fn find_minecraft_version_in_text(text: &str) -> Option<String> {
+    let chars = text.chars().collect::<Vec<_>>();
+    for start in 0..chars.len() {
+        if !chars[start].is_ascii_digit() {
+            continue;
+        }
+        let mut end = start;
+        let mut dot_count = 0usize;
+        while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == '.') {
+            if chars[end] == '.' {
+                dot_count += 1;
+            }
+            end += 1;
+        }
+        if dot_count >= 2 {
+            let candidate = chars[start..end].iter().collect::<String>();
+            if candidate.split('.').all(|segment| !segment.is_empty()) {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+fn modrinth_app_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        ancestor
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name == "ModrinthApp")
+            .then(|| ancestor.to_path_buf())
+    })
+}
+
+fn refine_modrinth_metadata_from_meta_cache(
+    app_root: &Path,
+    metadata: &mut ModrinthProfileMetadata,
+) {
+    let versions_dir = app_root.join("meta").join("versions");
+    let Ok(entries) = fs::read_dir(versions_dir) else {
+        return;
+    };
+
+    let game_version = metadata.game_version.clone();
+    for entry in entries.flatten() {
+        let version_name = entry.file_name().to_string_lossy().to_string();
+        let Some(version_json) =
+            read_meta_version_file(entry.path().as_path(), version_name.as_str())
+        else {
+            continue;
+        };
+
+        if let Some(expected_game_version) = game_version.as_deref()
+            && !version_name.starts_with(expected_game_version)
+        {
+            continue;
+        }
+
+        if metadata.modloader.is_none() || metadata.modloader_version.is_none() {
+            if let Some((loader, loader_version)) = infer_loader_from_meta_version(&version_json) {
+                metadata.modloader.get_or_insert(loader);
+                metadata.modloader_version.get_or_insert(loader_version);
+            }
+        }
+
+        if metadata.game_version.is_none()
+            && let Some(id) = version_json.get("id").and_then(Value::as_str)
+            && let Some(version) = id.split('-').next()
+            && !version.trim().is_empty()
+        {
+            metadata.game_version = Some(version.to_owned());
+        }
+
+        if metadata.game_version.is_some()
+            && metadata.modloader.is_some()
+            && metadata.modloader_version.is_some()
+        {
+            break;
+        }
+    }
+}
+
+fn read_meta_version_file(dir: &Path, dir_name: &str) -> Option<Value> {
+    let path = dir.join(format!("{dir_name}.json"));
+    read_json_file_optional(path.as_path()).ok().flatten()
+}
+
+fn infer_loader_from_meta_version(value: &Value) -> Option<(String, String)> {
+    let libraries = value.get("libraries")?.as_array()?;
+    for library in libraries {
+        let name = library
+            .get("name")
+            .and_then(Value::as_str)?
+            .to_ascii_lowercase();
+        if let Some(version) = name.strip_prefix("net.fabricmc:fabric-loader:") {
+            return Some(("Fabric".to_owned(), version.to_owned()));
+        }
+        if let Some(version) = name.strip_prefix("org.quiltmc:quilt-loader:") {
+            return Some(("Quilt".to_owned(), version.to_owned()));
+        }
+        if let Some(version) = name.strip_prefix("net.neoforged:neoforge:") {
+            return Some(("NeoForge".to_owned(), version.to_owned()));
+        }
+        if let Some(version) = name.strip_prefix("net.minecraftforge:forge:") {
+            return Some(("Forge".to_owned(), version.to_owned()));
+        }
+    }
+    None
+}
+
+fn inspect_curseforge_launcher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    let manifest = read_json_file(path.join("minecraftinstance.json").as_path())?;
+    let source_root = path.to_path_buf();
+    let name = first_non_empty([
+        json_string_at_path(&manifest, &["name"]),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned),
+    ])
+    .unwrap_or_else(|| "Imported CurseForge Instance".to_owned());
+    let game_version = first_non_empty([
+        json_string_at_path(&manifest, &["gameVersion"]),
+        json_string_at_path(&manifest, &["minecraftVersion"]),
+        json_string_at_path(&manifest, &["baseModLoader", "minecraftVersion"]),
+    ])
+    .unwrap_or_else(|| "latest".to_owned());
+    let loader_hint = first_non_empty([
+        json_string_at_path(&manifest, &["baseModLoader", "name"]),
+        json_string_at_path(&manifest, &["baseModLoader", "modLoader"]),
+        json_string_at_path(&manifest, &["modLoader"]),
+    ]);
+    let loader_version_hint = first_non_empty([
+        json_string_at_path(&manifest, &["baseModLoader", "forgeVersion"]),
+        json_string_at_path(&manifest, &["baseModLoader", "version"]),
+        json_string_at_path(&manifest, &["modLoaderVersion"]),
+    ]);
+    let (modloader, modloader_version) = infer_loader_pair(loader_hint, loader_version_hint);
+    let mut managed_manifest =
+        load_existing_managed_manifest(path).unwrap_or_else(|_| ManagedContentManifest::default());
+    if managed_manifest.projects.is_empty() {
+        managed_manifest = extract_managed_manifest_from_json(
+            &manifest,
+            source_root.as_path(),
+            ManagedContentSourceHint::CurseForge,
+        );
+    }
+    Ok(build_launcher_inspection(
+        LauncherKind::CurseForge,
+        name,
+        Some("Imported from an existing CurseForge instance.".to_owned()),
+        game_version,
+        modloader,
+        modloader_version,
+        source_root,
+        managed_manifest,
+    ))
+}
+
+fn inspect_prism_launcher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    let source_root = if path.join(".minecraft").is_dir() {
+        path.join(".minecraft")
+    } else {
+        path.to_path_buf()
+    };
+    let cfg = read_key_value_file(path.join("instance.cfg").as_path()).unwrap_or_default();
+    let pack_json = read_json_file_optional(path.join("mmc-pack.json").as_path())?;
+    let name = first_non_empty([
+        cfg.get("name").cloned(),
+        pack_json
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["name"])),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned),
+    ])
+    .unwrap_or_else(|| "Imported Prism Instance".to_owned());
+    let (game_version, modloader, modloader_version) =
+        parse_prism_versions(pack_json.as_ref(), cfg.get("MCVersion").cloned());
+    let managed_manifest =
+        load_existing_managed_manifest(source_root.as_path()).unwrap_or_default();
+    Ok(build_launcher_inspection(
+        LauncherKind::Prism,
+        name,
+        Some("Imported from a Prism / MultiMC style instance.".to_owned()),
+        game_version,
+        modloader,
+        modloader_version,
+        source_root,
+        managed_manifest,
+    ))
+}
+
+fn inspect_atlauncher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    let manifest = read_json_file_optional(path.join("instance.json").as_path())?;
+    let source_root = path.to_path_buf();
+    let name = first_non_empty([
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["name"])),
+        path.file_name()
+            .and_then(|value| value.to_str())
+            .map(str::to_owned),
+    ])
+    .unwrap_or_else(|| "Imported ATLauncher Instance".to_owned());
+    let game_version = first_non_empty([
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["minecraft", "version"])),
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["minecraftVersion"])),
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["version"])),
+    ])
+    .unwrap_or_else(|| "latest".to_owned());
+    let (modloader, modloader_version) = infer_loader_pair(
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["loader"])),
+        manifest
+            .as_ref()
+            .and_then(|value| json_string_at_path(value, &["loaderVersion"])),
+    );
+    let mut managed_manifest =
+        load_existing_managed_manifest(path).unwrap_or_else(|_| ManagedContentManifest::default());
+    if managed_manifest.projects.is_empty()
+        && let Some(value) = manifest.as_ref()
+    {
+        managed_manifest = extract_managed_manifest_from_json(
+            value,
+            source_root.as_path(),
+            ManagedContentSourceHint::Auto,
+        );
+    }
+    Ok(build_launcher_inspection(
+        LauncherKind::ATLauncher,
+        name,
+        Some("Imported from an existing ATLauncher instance.".to_owned()),
+        game_version,
+        modloader,
+        modloader_version,
+        source_root,
+        managed_manifest,
+    ))
+}
+
+fn inspect_generic_launcher_instance(path: &Path) -> Result<LauncherInspection, String> {
+    inspect_generic_launcher_instance_with_launcher(path, LauncherKind::Unknown)
+}
+
+fn inspect_generic_launcher_instance_with_launcher(
+    path: &Path,
+    launcher: LauncherKind,
+) -> Result<LauncherInspection, String> {
+    if !path.is_dir() {
+        return Err(format!("{} is not a directory.", path.display()));
+    }
+    let managed_manifest = load_existing_managed_manifest(path).unwrap_or_default();
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .map(str::to_owned)
+        .unwrap_or_else(|| "Imported Instance".to_owned());
+    Ok(build_launcher_inspection(
+        launcher,
+        name,
+        Some(format!(
+            "Imported by copying files from {}.",
+            launcher.label()
+        )),
+        "latest".to_owned(),
+        "Vanilla".to_owned(),
+        String::new(),
+        path.to_path_buf(),
+        managed_manifest,
+    ))
+}
+
+fn build_launcher_inspection(
+    launcher: LauncherKind,
+    name: String,
+    description: Option<String>,
+    game_version: String,
+    modloader: String,
+    modloader_version: String,
+    source_root: PathBuf,
+    managed_manifest: ManagedContentManifest,
+) -> LauncherInspection {
+    let mods_count = count_regular_files(source_root.join("mods").as_path());
+    let config_count = count_regular_files(source_root.join("config").as_path());
+    let managed_count = managed_manifest.projects.len();
+    LauncherInspection {
+        launcher,
+        name,
+        description,
+        game_version: default_if_blank(game_version.as_str(), "latest".to_owned()),
+        modloader: default_if_blank(modloader.as_str(), "Vanilla".to_owned()),
+        modloader_version,
+        summary: format!(
+            "Detected {} with {} managed projects, {} mods, and {} config files.",
+            launcher.label(),
+            managed_count,
+            mods_count,
+            config_count
+        ),
+        source_root,
+        managed_manifest,
+    }
+}
+
+fn copy_launcher_instance_content(
+    source_root: &Path,
+    destination_root: &Path,
+    managed_manifest: &ManagedContentManifest,
+) -> Result<(), String> {
+    copy_dir_recursive(source_root, source_root, destination_root)?;
+    if !managed_manifest.projects.is_empty() {
+        let raw = toml::to_string_pretty(managed_manifest)
+            .map_err(|err| format!("failed to serialize managed import manifest: {err}"))?;
+        fs::write(
+            destination_root.join(MANAGED_CONTENT_MANIFEST_FILE_NAME),
+            raw,
+        )
+        .map_err(|err| {
+            format!(
+                "failed to write managed import manifest into {}: {err}",
+                destination_root.display()
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn copy_dir_recursive(root: &Path, current: &Path, destination_root: &Path) -> Result<(), String> {
+    let entries = fs::read_dir(current)
+        .map_err(|err| format!("failed to read {}: {err}", current.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|err| format!("failed to normalize {}: {err}", path.display()))?;
+        if should_skip_import_path(relative) {
+            continue;
+        }
+        let destination = destination_root.join(relative);
+        if path.is_dir() {
+            fs::create_dir_all(destination.as_path())
+                .map_err(|err| format!("failed to create {}: {err}", destination.display()))?;
+            copy_dir_recursive(root, path.as_path(), destination_root)?;
+        } else if path.is_file() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+            }
+            fs::copy(path.as_path(), destination.as_path()).map_err(|err| {
+                format!(
+                    "failed to copy {} to {}: {err}",
+                    path.display(),
+                    destination.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn should_skip_import_path(relative: &Path) -> bool {
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    if normalized.is_empty() {
+        return false;
+    }
+    let skip_exact = [
+        "instance.cfg",
+        "mmc-pack.json",
+        "profile.json",
+        "minecraftinstance.json",
+        "instance.json",
+        MANAGED_CONTENT_MANIFEST_FILE_NAME,
+    ];
+    if skip_exact
+        .iter()
+        .any(|candidate| normalized.eq_ignore_ascii_case(candidate))
+    {
+        return true;
+    }
+    let skip_prefixes = [
+        "logs/",
+        "crash-reports/",
+        "versions/",
+        "libraries/",
+        "natives/",
+        ".cache/",
+        "cache/",
+        "downloads/",
+    ];
+    skip_prefixes
+        .iter()
+        .any(|prefix| normalized.to_ascii_lowercase().starts_with(prefix))
+}
+
+fn read_json_file(path: &Path) -> Result<Value, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|err| format!("failed to parse {}: {err}", path.display()))
+}
+
+fn read_json_file_optional(path: &Path) -> Result<Option<Value>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    read_json_file(path).map(Some)
+}
+
+fn read_key_value_file(path: &Path) -> Result<HashMap<String, String>, String> {
+    let raw = fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let mut values = HashMap::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, value)) = trimmed.split_once('=') {
+            values.insert(key.trim().to_owned(), value.trim().to_owned());
+        }
+    }
+    Ok(values)
+}
+
+fn parse_prism_versions(
+    pack_json: Option<&Value>,
+    cfg_game_version: Option<String>,
+) -> (String, String, String) {
+    let mut game_version = cfg_game_version.unwrap_or_else(|| "latest".to_owned());
+    let mut loader = "Vanilla".to_owned();
+    let mut loader_version = String::new();
+
+    if let Some(Value::Array(components)) =
+        pack_json.and_then(|value| value.get("components")).cloned()
+    {
+        for component in components {
+            let uid = component
+                .get("uid")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            let version = component
+                .get("version")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned();
+            if uid.contains("minecraft") && game_version == "latest" && !version.trim().is_empty() {
+                game_version = version.clone();
+            }
+            if uid.contains("fabric") {
+                loader = "Fabric".to_owned();
+                loader_version = version;
+            } else if uid.contains("neoforge") {
+                loader = "NeoForge".to_owned();
+                loader_version = version;
+            } else if uid.contains("forge") {
+                loader = "Forge".to_owned();
+                loader_version = version;
+            } else if uid.contains("quilt") {
+                loader = "Quilt".to_owned();
+                loader_version = version;
+            }
+        }
+    }
+
+    (game_version, loader, loader_version)
+}
+
+fn json_string_at_path(value: &Value, path: &[&str]) -> Option<String> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn first_non_empty<const N: usize>(values: [Option<String>; N]) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .find(|value| !value.trim().is_empty())
+}
+
+fn infer_loader_pair(
+    loader_hint: Option<String>,
+    version_hint: Option<String>,
+) -> (String, String) {
+    let loader_hint = loader_hint.unwrap_or_else(|| "Vanilla".to_owned());
+    let loader_hint_trimmed = loader_hint.trim().to_owned();
+    let loader_hint_lower = loader_hint_trimmed.to_ascii_lowercase();
+    let version_hint = version_hint.unwrap_or_default();
+    if loader_hint_lower.contains("neoforge") {
+        return (
+            "NeoForge".to_owned(),
+            trailing_loader_version(&loader_hint_trimmed, &version_hint),
+        );
+    }
+    if loader_hint_lower.contains("fabric") {
+        return (
+            "Fabric".to_owned(),
+            trailing_loader_version(&loader_hint_trimmed, &version_hint),
+        );
+    }
+    if loader_hint_lower.contains("quilt") {
+        return (
+            "Quilt".to_owned(),
+            trailing_loader_version(&loader_hint_trimmed, &version_hint),
+        );
+    }
+    if loader_hint_lower.contains("forge") {
+        return (
+            "Forge".to_owned(),
+            trailing_loader_version(&loader_hint_trimmed, &version_hint),
+        );
+    }
+    (
+        default_if_blank(loader_hint_trimmed.as_str(), "Vanilla".to_owned()),
+        version_hint,
+    )
+}
+
+fn trailing_loader_version(loader_hint: &str, explicit_version: &str) -> String {
+    let explicit = explicit_version.trim();
+    if !explicit.is_empty() {
+        return explicit.to_owned();
+    }
+    loader_hint
+        .split_once('-')
+        .map(|(_, version)| version.trim().to_owned())
+        .unwrap_or_default()
+}
+
+fn load_existing_managed_manifest(path: &Path) -> Result<ManagedContentManifest, String> {
+    let manifest_path = path.join(MANAGED_CONTENT_MANIFEST_FILE_NAME);
+    if !manifest_path.exists() {
+        return Ok(ManagedContentManifest::default());
+    }
+    let raw = fs::read_to_string(manifest_path.as_path())
+        .map_err(|err| format!("failed to read {}: {err}", manifest_path.display()))?;
+    toml::from_str(&raw)
+        .map_err(|err| format!("failed to parse {}: {err}", manifest_path.display()))
+}
+
+#[derive(Clone, Copy)]
+enum ManagedContentSourceHint {
+    Auto,
+    Modrinth,
+    CurseForge,
+}
+
+fn extract_managed_manifest_from_json(
+    value: &Value,
+    source_root: &Path,
+    source_hint: ManagedContentSourceHint,
+) -> ManagedContentManifest {
+    let mut manifest = ManagedContentManifest::default();
+    walk_json_for_projects(value, source_root, source_hint, &mut manifest);
+    manifest
+}
+
+fn walk_json_for_projects(
+    value: &Value,
+    source_root: &Path,
+    source_hint: ManagedContentSourceHint,
+    manifest: &mut ManagedContentManifest,
+) {
+    maybe_add_project_from_json(value, source_root, source_hint, manifest);
+    match value {
+        Value::Object(map) => {
+            for child in map.values() {
+                walk_json_for_projects(child, source_root, source_hint, manifest);
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                walk_json_for_projects(child, source_root, source_hint, manifest);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn maybe_add_project_from_json(
+    value: &Value,
+    source_root: &Path,
+    source_hint: ManagedContentSourceHint,
+    manifest: &mut ManagedContentManifest,
+) {
+    let Value::Object(map) = value else {
+        return;
+    };
+
+    let modrinth_project_id = json_object_string(
+        map,
+        &[
+            "project_id",
+            "projectId",
+            "modrinth_project_id",
+            "modrinthProjectId",
+        ],
+    );
+    let curseforge_project_id = json_object_u64(
+        map,
+        &[
+            "addonID",
+            "addonId",
+            "projectID",
+            "projectId",
+            "curseforge_project_id",
+            "curseforgeProjectId",
+        ],
+    );
+    let source = match source_hint {
+        ManagedContentSourceHint::Modrinth if modrinth_project_id.is_some() => Some("modrinth"),
+        ManagedContentSourceHint::CurseForge if curseforge_project_id.is_some() => {
+            Some("curseforge")
+        }
+        ManagedContentSourceHint::Auto => {
+            if modrinth_project_id.is_some() {
+                Some("modrinth")
+            } else if curseforge_project_id.is_some() {
+                Some("curseforge")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    if source.is_none() {
+        return;
+    }
+
+    let version_id = first_non_empty([
+        json_object_string(
+            map,
+            &[
+                "version_id",
+                "versionId",
+                "fileId",
+                "fileID",
+                "gameVersionFileID",
+            ],
+        ),
+        map.get("installedFile")
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string()),
+    ])
+    .unwrap_or_default();
+    let version_name = json_object_string(
+        map,
+        &[
+            "version_name",
+            "versionName",
+            "fileName",
+            "filename",
+            "file_name",
+        ],
+    )
+    .or_else(|| {
+        map.get("installedFile")
+            .and_then(|value| value.get("fileName"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+    .unwrap_or_default();
+    let name = json_object_string(map, &["name", "title"])
+        .or_else(|| {
+            map.get("installedFile")
+                .and_then(|value| value.get("displayName"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_else(|| version_name.clone());
+
+    let file_path = first_non_empty([
+        json_object_string(map, &["path", "file_path", "filePath"]),
+        json_object_string(map, &["filename", "fileName", "file_name"])
+            .map(|value| guess_relative_mod_path(source_root, value.as_str())),
+        map.get("installedFile")
+            .and_then(|value| value.get("fileName"))
+            .and_then(Value::as_str)
+            .map(|value| guess_relative_mod_path(source_root, value)),
+    ]);
+    let Some(file_path) = file_path else {
+        return;
+    };
+
+    let project_key = if let Some(id) = modrinth_project_id.as_ref() {
+        format!("modrinth:{id}")
+    } else if let Some(id) = curseforge_project_id {
+        format!("curseforge:{id}")
+    } else {
+        normalize_project_key(file_path.as_str())
+    };
+    manifest.projects.insert(
+        project_key.clone(),
+        ManagedContentManifestProject {
+            project_key,
+            name,
+            file_path,
+            modrinth_project_id,
+            curseforge_project_id,
+            selected_source: source.map(str::to_owned),
+            selected_version_id: non_empty(version_id.as_str()),
+            selected_version_name: non_empty(version_name.as_str()),
+        },
+    );
+}
+
+fn json_object_string(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        map.get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn json_object_u64(map: &serde_json::Map<String, Value>, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        map.get(*key).and_then(|value| match value {
+            Value::Number(number) => number.as_u64(),
+            Value::String(raw) => raw.trim().parse::<u64>().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn guess_relative_mod_path(source_root: &Path, file_name: &str) -> String {
+    let mods_candidate = source_root.join("mods").join(file_name);
+    if mods_candidate.exists() {
+        return format!("mods/{file_name}");
+    }
+    file_name.to_owned()
+}
+
+fn normalize_project_key(value: &str) -> String {
+    value
+        .trim()
+        .replace('\\', "/")
+        .trim_start_matches("./")
+        .to_ascii_lowercase()
+}
+
+fn count_regular_files(path: &Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+    count_regular_files_recursive(path).unwrap_or(0)
+}
+
+fn count_regular_files_recursive(path: &Path) -> Result<usize, String> {
+    let mut count = 0usize;
+    let entries =
+        fs::read_dir(path).map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed to read directory entry: {err}"))?;
+        let entry_path = entry.path();
+        if entry_path.is_dir() {
+            count += count_regular_files_recursive(entry_path.as_path())?;
+        } else if entry_path.is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
 fn import_vtmpack(
     store: &mut InstanceStore,
     installations_root: &Path,
     request: &ImportRequest,
 ) -> Result<InstanceRecord, String> {
-    let manifest = read_vtmpack_manifest(request.package_path.as_path())?;
+    let ImportSource::ManifestFile(package_path) = &request.source else {
+        return Err("Vertex pack import requires a manifest file source.".to_owned());
+    };
+    let manifest = read_vtmpack_manifest(package_path.as_path())?;
     let instance = create_instance(
         store,
         installations_root,
@@ -438,11 +1781,9 @@ fn import_vtmpack(
     .map_err(|err| format!("failed to create imported profile: {err}"))?;
     let instance_root = instance_root_path(installations_root, &instance);
 
-    if let Err(err) = populate_vtmpack_instance(
-        request.package_path.as_path(),
-        manifest,
-        instance_root.as_path(),
-    ) {
+    if let Err(err) =
+        populate_vtmpack_instance(package_path.as_path(), manifest, instance_root.as_path())
+    {
         let _ = delete_instance(store, instance.id.as_str(), installations_root);
         return Err(err);
     }
@@ -455,7 +1796,10 @@ fn import_mrpack(
     installations_root: &Path,
     request: &ImportRequest,
 ) -> Result<InstanceRecord, String> {
-    let manifest = read_mrpack_manifest(request.package_path.as_path())?;
+    let ImportSource::ManifestFile(package_path) = &request.source else {
+        return Err("Modrinth pack import requires a manifest file source.".to_owned());
+    };
+    let manifest = read_mrpack_manifest(package_path.as_path())?;
     let dependency_info = resolve_mrpack_dependencies(&manifest.dependencies)?;
     let instance = create_instance(
         store,
@@ -472,11 +1816,9 @@ fn import_mrpack(
     .map_err(|err| format!("failed to create imported profile: {err}"))?;
     let instance_root = instance_root_path(installations_root, &instance);
 
-    if let Err(err) = populate_mrpack_instance(
-        request.package_path.as_path(),
-        manifest,
-        instance_root.as_path(),
-    ) {
+    if let Err(err) =
+        populate_mrpack_instance(package_path.as_path(), manifest, instance_root.as_path())
+    {
         let _ = delete_instance(store, instance.id.as_str(), installations_root);
         return Err(err);
     }
@@ -583,6 +1925,24 @@ fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<
             }
             entry.unpack(destination.as_path()).map_err(|err| {
                 format!("failed to import config {}: {err}", destination.display())
+            })?;
+            continue;
+        }
+        if let Some(relative) = entry_string.strip_prefix("root_entries/") {
+            let destination = join_safe(instance_root, relative)?;
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "failed to create imported root entry directory {}: {err}",
+                        parent.display()
+                    )
+                })?;
+            }
+            entry.unpack(destination.as_path()).map_err(|err| {
+                format!(
+                    "failed to import extra root entry {}: {err}",
+                    destination.display()
+                )
             })?;
         }
     }
@@ -977,6 +2337,32 @@ struct MrpackFile {
 struct MrpackFileEnv {
     #[serde(default)]
     client: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ManagedContentManifest {
+    #[serde(default)]
+    projects: BTreeMap<String, ManagedContentManifestProject>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct ManagedContentManifestProject {
+    #[serde(default)]
+    project_key: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    file_path: String,
+    #[serde(default)]
+    modrinth_project_id: Option<String>,
+    #[serde(default)]
+    curseforge_project_id: Option<u64>,
+    #[serde(default)]
+    selected_source: Option<String>,
+    #[serde(default)]
+    selected_version_id: Option<String>,
+    #[serde(default)]
+    selected_version_name: Option<String>,
 }
 
 #[cfg(test)]
