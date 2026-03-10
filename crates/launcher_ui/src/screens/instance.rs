@@ -24,6 +24,7 @@ use std::{
 use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 
 use crate::app::tokio_runtime;
+use crate::desktop;
 use crate::screens::content_browser::InstalledContentIdentity;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
@@ -1634,7 +1635,7 @@ fn render_instance_settings_modal(
                                 PathBuf::from(config.minecraft_installations_root());
                             let instance_root =
                                 instances::instance_root_path(&installations_root, instance);
-                            match open_instance_folder(instance_root.as_path()) {
+                            match desktop::open_in_file_manager(instance_root.as_path()) {
                                 Ok(()) => {
                                     state.status_message = Some(format!(
                                         "Opened instance folder: {}",
@@ -3685,35 +3686,6 @@ fn memory_slider_max_mib() -> u128 {
             .saturating_sub(RESERVED_SYSTEM_MEMORY_MIB)
             .max(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN)
     })
-}
-
-fn open_instance_folder(path: &Path) -> Result<(), String> {
-    if !path.exists() {
-        return Err(format!("folder does not exist: {}", path.display()));
-    }
-
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = std::process::Command::new("explorer");
-        command.arg(path);
-        command
-    };
-
-    #[cfg(target_os = "macos")]
-    let mut command = {
-        let mut command = std::process::Command::new("open");
-        command.arg(path);
-        command
-    };
-
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    let mut command = {
-        let mut command = std::process::Command::new("xdg-open");
-        command.arg(path);
-        command
-    };
-
-    command.spawn().map(|_| ()).map_err(|err| err.to_string())
 }
 
 #[cfg(target_os = "linux")]

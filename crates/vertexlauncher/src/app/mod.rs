@@ -61,18 +61,41 @@ impl VertexApp {
     fn new(cc: &eframe::CreationContext<'_>, config_state: LoadConfigResult) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
 
-        let (mut config, show_config_format_modal, selected_config_format, default_config_format) =
-            match config_state {
-                LoadConfigResult::Loaded(config) => {
-                    (config, false, ConfigFormat::Json, ConfigFormat::Json)
-                }
-                LoadConfigResult::Missing { default_format } => {
-                    (Config::default(), true, default_format, default_format)
-                }
-            };
+        let (
+            mut config,
+            config_loaded_from_disk,
+            show_config_format_modal,
+            selected_config_format,
+            default_config_format,
+        ) = match config_state {
+            LoadConfigResult::Loaded(config) => {
+                (config, true, false, ConfigFormat::Json, ConfigFormat::Json)
+            }
+            LoadConfigResult::Missing { default_format } => (
+                Config::default(),
+                false,
+                true,
+                default_format,
+                default_format,
+            ),
+        };
 
         config.normalize();
-        window_effects::apply(cc, config.window_blur_enabled());
+        if let Err(error) = window_effects::apply(cc, config.window_blur_enabled()) {
+            config.set_window_blur_enabled(false);
+            cc.egui_ctx
+                .send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+            notification::warn!(
+                "window_blur",
+                "Window blur is unsupported here and has been disabled. Restart may be required to fully apply the change. {error}"
+            );
+            if config_loaded_from_disk && let Err(save_error) = save_config(&config) {
+                notification::warn!(
+                    "config",
+                    "Failed to persist disabled blur setting after unsupported platform check: {save_error}"
+                );
+            }
+        }
 
         let theme_catalog = ui::theme::ThemeCatalog::load();
         if !theme_catalog.contains(config.theme_id()) {

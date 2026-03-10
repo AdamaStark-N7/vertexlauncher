@@ -497,6 +497,11 @@ impl Config {
         self.window_blur_enabled
     }
 
+    /// Enables or disables platform blur effects.
+    pub fn set_window_blur_enabled(&mut self, enabled: bool) {
+        self.window_blur_enabled = enabled;
+    }
+
     /// Returns active theme id.
     pub fn theme_id(&self) -> &str {
         &self.theme_id

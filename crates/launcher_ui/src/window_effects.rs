@@ -1,17 +1,20 @@
 use eframe::CreationContext;
 
 /// Applies platform-specific window blur/backdrop effects when enabled.
-pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) {
+pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) -> Result<(), String> {
     if !blur_enabled {
-        return;
+        return Ok(());
     }
 
     #[cfg(target_os = "windows")]
-    windows::apply(cc, blur_enabled);
+    return windows::apply(cc);
     #[cfg(target_os = "linux")]
-    linux::apply(cc, blur_enabled);
+    return linux::apply(cc);
     #[cfg(target_os = "macos")]
-    macos::apply(cc, blur_enabled);
+    return macos::apply(cc);
+
+    #[allow(unreachable_code)]
+    Err("window blur is not supported on this platform".to_owned())
 }
 
 #[cfg(target_os = "windows")]
@@ -25,19 +28,13 @@ mod windows {
     const DWMWA_SYSTEMBACKDROP_TYPE: u32 = 38;
     const DWMSBT_TRANSIENTWINDOW: i32 = 3;
 
-    pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) {
-        if !blur_enabled {
-            return;
-        }
-
-        let Ok(window_handle) = cc.window_handle() else {
-            return;
-        };
-
+    pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
+        let window_handle = cc
+            .window_handle()
+            .map_err(|error| format!("window handle unavailable: {error}"))?;
         let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
-            return;
+            return Err("unsupported window handle for Windows blur".to_owned());
         };
-
         let hwnd: HWND = handle.hwnd.get() as HWND;
         let backdrop_type = DWMSBT_TRANSIENTWINDOW;
         let result = unsafe {
@@ -50,12 +47,11 @@ mod windows {
         };
 
         if result != 0 {
-            tracing::warn!(
-                target: "vertexlauncher/ui/window_effects",
-                hresult = %format!("{result:#x}"),
-                "failed to enable Windows acrylic backdrop"
-            );
+            return Err(format!(
+                "Windows backdrop API rejected the blur request ({result:#x})"
+            ));
         }
+        Ok(())
     }
 }
 
@@ -77,49 +73,41 @@ mod linux {
     static KDE_BLUR_ATOM: &CStr = c"_KDE_NET_WM_BLUR_BEHIND_REGION";
     static CARDINAL_ATOM: &CStr = c"CARDINAL";
 
-    pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) {
-        if !blur_enabled {
-            return;
-        }
-
-        let Ok(window_handle) = cc.window_handle() else {
-            return;
-        };
-        let Ok(display_handle) = cc.display_handle() else {
-            return;
-        };
+    pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
+        let window_handle = cc
+            .window_handle()
+            .map_err(|error| format!("window handle unavailable: {error}"))?;
+        let display_handle = cc
+            .display_handle()
+            .map_err(|error| format!("display handle unavailable: {error}"))?;
 
         match (display_handle.as_raw(), window_handle.as_raw()) {
             (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(window)) => {
                 let Some(display) = display.display else {
-                    return;
+                    return Err("X11 display pointer unavailable".to_owned());
                 };
-                apply_x11(display.as_ptr().cast::<xlib::Display>(), window.window);
+                apply_x11(display.as_ptr().cast::<xlib::Display>(), window.window)
             }
             (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) => {
                 apply_wayland(
                     display.display.as_ptr().cast::<c_void>(),
                     window.surface.as_ptr().cast::<c_void>(),
-                );
+                )
             }
-            _ => {
-                // Unsupported Linux display backend.
-                return;
-            }
+            _ => Err("unsupported Linux window/display backend for blur".to_owned()),
         }
     }
 
-    fn apply_x11(display: *mut xlib::Display, window: std::os::raw::c_ulong) {
-        let Ok(xlib) = xlib::Xlib::open() else {
-            return;
-        };
+    fn apply_x11(display: *mut xlib::Display, window: std::os::raw::c_ulong) -> Result<(), String> {
+        let xlib =
+            xlib::Xlib::open().map_err(|_| "failed to load Xlib for blur support".to_owned())?;
 
         let kde_blur_atom =
             unsafe { (xlib.XInternAtom)(display, KDE_BLUR_ATOM.as_ptr(), xlib::False) };
         let cardinal_atom =
             unsafe { (xlib.XInternAtom)(display, CARDINAL_ATOM.as_ptr(), xlib::False) };
         if kde_blur_atom == 0 || cardinal_atom == 0 {
-            return;
+            return Err("KDE X11 blur atoms are unavailable on this display".to_owned());
         }
 
         unsafe {
@@ -136,6 +124,7 @@ mod linux {
             );
             (xlib.XFlush)(display);
         }
+        Ok(())
     }
 
     struct KdeBlurState;
@@ -155,9 +144,9 @@ mod linux {
     delegate_noop!(KdeBlurState: ignore OrgKdeKwinBlurManager);
     delegate_noop!(KdeBlurState: ignore OrgKdeKwinBlur);
 
-    fn apply_wayland(display: *mut c_void, surface: *mut c_void) {
+    fn apply_wayland(display: *mut c_void, surface: *mut c_void) -> Result<(), String> {
         if display.is_null() || surface.is_null() {
-            return;
+            return Err("Wayland display or surface pointer unavailable".to_owned());
         }
 
         let backend = unsafe { Backend::from_foreign_display(display.cast()) };
@@ -165,21 +154,21 @@ mod linux {
 
         let surface_id = unsafe { ObjectId::from_ptr(WlSurface::interface(), surface.cast()) };
         let Ok(surface_id) = surface_id else {
-            return;
+            return Err("failed to resolve Wayland surface object id".to_owned());
         };
         let Ok(surface) = WlSurface::from_id(&conn, surface_id) else {
-            return;
+            return Err("failed to resolve Wayland surface proxy".to_owned());
         };
 
         let Ok((globals, mut queue)) =
             wayland_client::globals::registry_queue_init::<KdeBlurState>(&conn)
         else {
-            return;
+            return Err("failed to initialize Wayland registry for blur support".to_owned());
         };
 
         let qh = queue.handle();
         let Ok(manager) = globals.bind::<OrgKdeKwinBlurManager, _, _>(&qh, 1..=1, ()) else {
-            return;
+            return Err("KDE Wayland blur manager is unavailable".to_owned());
         };
 
         let blur = manager.create(&surface, &qh, ());
@@ -187,6 +176,7 @@ mod linux {
 
         let _ = conn.flush();
         let _ = queue.dispatch_pending(&mut KdeBlurState);
+        Ok(())
     }
 }
 
@@ -224,30 +214,31 @@ mod macos {
     const NS_VIEW_WIDTH_SIZABLE: usize = 1 << 1;
     const NS_VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
 
-    pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) {
-        if !blur_enabled {
-            return;
-        }
-
-        let Ok(window_handle) = cc.window_handle() else {
-            return;
-        };
-
+    pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
+        let window_handle = cc
+            .window_handle()
+            .map_err(|error| format!("window handle unavailable: {error}"))?;
         let RawWindowHandle::AppKit(handle) = window_handle.as_raw() else {
-            return;
+            return Err("unsupported window handle for macOS blur".to_owned());
         };
 
         let ns_view = handle.ns_view.as_ptr().cast::<Object>();
         unsafe {
             let ns_window: *mut Object = msg_send![ns_view, window];
             if ns_window.is_null() {
-                return;
+                return Err("AppKit window pointer unavailable".to_owned());
             }
 
             let content_view: *mut Object = msg_send![ns_window, contentView];
+            if content_view.is_null() {
+                return Err("AppKit content view unavailable".to_owned());
+            }
             let bounds: NSRect = msg_send![content_view, bounds];
             let effect_view: *mut Object = msg_send![class!(NSVisualEffectView), alloc];
             let effect_view: *mut Object = msg_send![effect_view, initWithFrame: bounds];
+            if effect_view.is_null() {
+                return Err("failed to allocate NSVisualEffectView".to_owned());
+            }
 
             let _: () = msg_send![effect_view, setAutoresizingMask: (NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE)];
             let _: () = msg_send![effect_view, setBlendingMode: NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW];
@@ -255,5 +246,6 @@ mod macos {
             let _: () = msg_send![effect_view, setState: NS_VISUAL_EFFECT_STATE_ACTIVE];
             let _: () = msg_send![content_view, addSubview: effect_view positioned: 0isize relativeTo: std::ptr::null::<Object>()];
         }
+        Ok(())
     }
 }
