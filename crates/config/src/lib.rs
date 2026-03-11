@@ -17,6 +17,18 @@ pub const DOWNLOAD_CONCURRENCY_MAX: u32 = 128;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: u32 = 8;
 pub const FRAME_LIMIT_FPS_MIN: i32 = 30;
 pub const FRAME_LIMIT_FPS_MAX: i32 = 240;
+pub const SKIN_PREVIEW_MSAA_SAMPLES_MIN: i32 = 1;
+pub const SKIN_PREVIEW_MSAA_SAMPLES_MAX: i32 = 8;
+pub const SKIN_PREVIEW_MSAA_SAMPLES_STEP: i32 = 1;
+pub const SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN: f32 = 0.0;
+pub const SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX: f32 = 1.0;
+pub const SKIN_PREVIEW_MOTION_BLUR_AMOUNT_STEP: f32 = 0.05;
+pub const SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN: f32 = 0.1;
+pub const SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX: f32 = 4.0;
+pub const SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_STEP: f32 = 0.05;
+pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN: i32 = 2;
+pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX: i32 = 16;
+pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP: i32 = 1;
 
 const MAPLE_FONT_FAMILIES: &[&str] = &["Maple Mono NF", "Maple Mono", "Maple Mono Normal"];
 const JETBRAINS_FONT_FAMILIES: &[&str] = &[
@@ -82,13 +94,15 @@ const UI_FONT_OPTION_LABELS: &[&str] = &[
 pub enum SkinPreviewAaMode {
     Off,
     Msaa,
+    Smaa,
     Fxaa,
     Taa,
 }
 
 impl SkinPreviewAaMode {
-    pub const ALL: [SkinPreviewAaMode; 4] = [
+    pub const ALL: [SkinPreviewAaMode; 5] = [
         SkinPreviewAaMode::Msaa,
+        SkinPreviewAaMode::Smaa,
         SkinPreviewAaMode::Fxaa,
         SkinPreviewAaMode::Taa,
         SkinPreviewAaMode::Off,
@@ -98,6 +112,7 @@ impl SkinPreviewAaMode {
         match self {
             SkinPreviewAaMode::Off => "Off",
             SkinPreviewAaMode::Msaa => "MSAA (GPU)",
+            SkinPreviewAaMode::Smaa => "SMAA (GPU Post)",
             SkinPreviewAaMode::Fxaa => "FXAA (Post)",
             SkinPreviewAaMode::Taa => "TAA (Temporal)",
         }
@@ -337,6 +352,8 @@ impl DropdownSettingId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloatSettingId {
     UiFontSize,
+    SkinPreviewMotionBlurAmount,
+    SkinPreviewMotionBlurShutterFrames,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -361,6 +378,26 @@ impl FloatSettingId {
                 max: UI_FONT_SIZE_MAX,
                 step: UI_FONT_SIZE_STEP,
             },
+            FloatSettingId::SkinPreviewMotionBlurAmount => FloatSettingSpec {
+                id: FloatSettingId::SkinPreviewMotionBlurAmount,
+                label: "Skin Preview Motion Blur Amount",
+                info_tooltip: Some(
+                    "Controls how strongly off-center shutter samples contribute to the final image.",
+                ),
+                min: SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
+                max: SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX,
+                step: SKIN_PREVIEW_MOTION_BLUR_AMOUNT_STEP,
+            },
+            FloatSettingId::SkinPreviewMotionBlurShutterFrames => FloatSettingSpec {
+                id: FloatSettingId::SkinPreviewMotionBlurShutterFrames,
+                label: "Skin Preview Motion Blur Shutter",
+                info_tooltip: Some(
+                    "Total shutter interval in 60 FPS frame lengths used for motion blur accumulation.",
+                ),
+                min: SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN,
+                max: SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX,
+                step: SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_STEP,
+            },
         }
     }
 }
@@ -369,6 +406,8 @@ impl FloatSettingId {
 pub enum IntSettingId {
     UiFontWeight,
     FrameLimitFps,
+    SkinPreviewMsaaSamples,
+    SkinPreviewMotionBlurSampleCount,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -400,6 +439,26 @@ impl IntSettingId {
                 min: FRAME_LIMIT_FPS_MIN,
                 max: FRAME_LIMIT_FPS_MAX,
                 step: 1,
+            },
+            IntSettingId::SkinPreviewMsaaSamples => IntSettingSpec {
+                id: IntSettingId::SkinPreviewMsaaSamples,
+                label: "Skin Preview MSAA Samples",
+                info_tooltip: Some(
+                    "GPU MSAA sample count used when Skin Preview Anti-Aliasing is set to MSAA.",
+                ),
+                min: SKIN_PREVIEW_MSAA_SAMPLES_MIN,
+                max: SKIN_PREVIEW_MSAA_SAMPLES_MAX,
+                step: SKIN_PREVIEW_MSAA_SAMPLES_STEP,
+            },
+            IntSettingId::SkinPreviewMotionBlurSampleCount => IntSettingSpec {
+                id: IntSettingId::SkinPreviewMotionBlurSampleCount,
+                label: "Skin Preview Motion Blur Samples",
+                info_tooltip: Some(
+                    "How many temporal samples are accumulated across the shutter interval.",
+                ),
+                min: SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN,
+                max: SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX,
+                step: SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP,
             },
         }
     }
@@ -446,6 +505,11 @@ pub struct Config {
     open_type_features_to_enable: String,
     ui_font_family: UiFontFamily,
     skin_preview_aa_mode: SkinPreviewAaMode,
+    skin_preview_msaa_samples: i32,
+    skin_preview_motion_blur_enabled: bool,
+    skin_preview_motion_blur_amount: f32,
+    skin_preview_motion_blur_shutter_frames: f32,
+    skin_preview_motion_blur_sample_count: i32,
     frame_limiter_enabled: bool,
     frame_limit_fps: i32,
     ui_font_size: f32,
@@ -489,6 +553,56 @@ impl Config {
     /// Sets skin preview anti-aliasing mode.
     pub fn set_skin_preview_aa_mode(&mut self, mode: SkinPreviewAaMode) {
         self.skin_preview_aa_mode = mode;
+    }
+
+    pub fn skin_preview_msaa_samples(&self) -> i32 {
+        self.skin_preview_msaa_samples
+    }
+
+    pub fn set_skin_preview_msaa_samples(&mut self, samples: i32) {
+        self.skin_preview_msaa_samples =
+            samples.clamp(SKIN_PREVIEW_MSAA_SAMPLES_MIN, SKIN_PREVIEW_MSAA_SAMPLES_MAX);
+    }
+
+    pub fn skin_preview_motion_blur_enabled(&self) -> bool {
+        self.skin_preview_motion_blur_enabled
+    }
+
+    pub fn set_skin_preview_motion_blur_enabled(&mut self, enabled: bool) {
+        self.skin_preview_motion_blur_enabled = enabled;
+    }
+
+    pub fn skin_preview_motion_blur_amount(&self) -> f32 {
+        self.skin_preview_motion_blur_amount
+    }
+
+    pub fn set_skin_preview_motion_blur_amount(&mut self, amount: f32) {
+        self.skin_preview_motion_blur_amount = amount.clamp(
+            SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
+            SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX,
+        );
+    }
+
+    pub fn skin_preview_motion_blur_shutter_frames(&self) -> f32 {
+        self.skin_preview_motion_blur_shutter_frames
+    }
+
+    pub fn set_skin_preview_motion_blur_shutter_frames(&mut self, frames: f32) {
+        self.skin_preview_motion_blur_shutter_frames = frames.clamp(
+            SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN,
+            SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX,
+        );
+    }
+
+    pub fn skin_preview_motion_blur_sample_count(&self) -> i32 {
+        self.skin_preview_motion_blur_sample_count
+    }
+
+    pub fn set_skin_preview_motion_blur_sample_count(&mut self, count: i32) {
+        self.skin_preview_motion_blur_sample_count = count.clamp(
+            SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN,
+            SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX,
+        );
     }
 
     /// Returns whether frame limiter is enabled.
@@ -670,6 +784,23 @@ impl Config {
     /// Normalizes all config values into launcher-supported ranges/defaults.
     pub fn normalize(&mut self) {
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+        self.skin_preview_motion_blur_amount = self.skin_preview_motion_blur_amount.clamp(
+            SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
+            SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX,
+        );
+        self.skin_preview_motion_blur_shutter_frames =
+            self.skin_preview_motion_blur_shutter_frames.clamp(
+                SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN,
+                SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX,
+            );
+        self.skin_preview_motion_blur_sample_count =
+            self.skin_preview_motion_blur_sample_count.clamp(
+                SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN,
+                SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX,
+            );
+        self.skin_preview_msaa_samples = self
+            .skin_preview_msaa_samples
+            .clamp(SKIN_PREVIEW_MSAA_SAMPLES_MIN, SKIN_PREVIEW_MSAA_SAMPLES_MAX);
         self.ui_font_weight = self
             .ui_font_weight
             .clamp(UI_FONT_WEIGHT_MIN, UI_FONT_WEIGHT_MAX);
@@ -710,6 +841,11 @@ impl Config {
             open_type_features_to_enable: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_msaa_samples: _,
+            skin_preview_motion_blur_enabled: _,
+            skin_preview_motion_blur_amount: _,
+            skin_preview_motion_blur_shutter_frames: _,
+            skin_preview_motion_blur_sample_count: _,
             ui_font_size: _,
             ui_font_weight: _,
             include_snapshots_and_betas,
@@ -774,6 +910,11 @@ impl Config {
             open_type_features_to_enable: _,
             ui_font_family,
             skin_preview_aa_mode: _,
+            skin_preview_msaa_samples: _,
+            skin_preview_motion_blur_enabled: _,
+            skin_preview_motion_blur_amount: _,
+            skin_preview_motion_blur_shutter_frames: _,
+            skin_preview_motion_blur_sample_count: _,
             ui_font_size: _,
             ui_font_weight: _,
             include_snapshots_and_betas: _,
@@ -808,12 +949,17 @@ impl Config {
             open_type_features_to_enable: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_msaa_samples: _,
+            skin_preview_motion_blur_enabled: _,
+            skin_preview_motion_blur_amount,
+            skin_preview_motion_blur_shutter_frames,
             ui_font_size,
             ui_font_weight: _,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
             frame_limiter_enabled: _,
             frame_limit_fps: _,
+            skin_preview_motion_blur_sample_count: _,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
@@ -828,6 +974,14 @@ impl Config {
         } = self;
 
         visit(FloatSettingId::UiFontSize.spec(), ui_font_size);
+        visit(
+            FloatSettingId::SkinPreviewMotionBlurAmount.spec(),
+            skin_preview_motion_blur_amount,
+        );
+        visit(
+            FloatSettingId::SkinPreviewMotionBlurShutterFrames.spec(),
+            skin_preview_motion_blur_shutter_frames,
+        );
     }
 
     /// Visits each integer setting with mutable access to its backing value.
@@ -842,10 +996,15 @@ impl Config {
             open_type_features_to_enable: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_motion_blur_enabled: _,
+            skin_preview_motion_blur_amount: _,
+            skin_preview_motion_blur_shutter_frames: _,
+            skin_preview_msaa_samples,
             ui_font_size: _,
             ui_font_weight,
             frame_limiter_enabled: _,
             frame_limit_fps,
+            skin_preview_motion_blur_sample_count,
             include_snapshots_and_betas: _,
             force_java_21_minimum: _,
             default_instance_max_memory_mib: _,
@@ -863,6 +1022,14 @@ impl Config {
 
         visit(IntSettingId::UiFontWeight.spec(), ui_font_weight);
         visit(IntSettingId::FrameLimitFps.spec(), frame_limit_fps);
+        visit(
+            IntSettingId::SkinPreviewMsaaSamples.spec(),
+            skin_preview_msaa_samples,
+        );
+        visit(
+            IntSettingId::SkinPreviewMotionBlurSampleCount.spec(),
+            skin_preview_motion_blur_sample_count,
+        );
     }
 
     /// Visits each text setting with mutable access to its backing value.
@@ -877,6 +1044,11 @@ impl Config {
             open_type_features_to_enable,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_msaa_samples: _,
+            skin_preview_motion_blur_enabled: _,
+            skin_preview_motion_blur_amount: _,
+            skin_preview_motion_blur_shutter_frames: _,
+            skin_preview_motion_blur_sample_count: _,
             ui_font_size: _,
             ui_font_weight: _,
             frame_limiter_enabled: _,
@@ -931,6 +1103,11 @@ impl Default for Config {
             open_type_features_to_enable: String::new(),
             ui_font_family: UiFontFamily::MapleMonoNf,
             skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
+            skin_preview_msaa_samples: 4,
+            skin_preview_motion_blur_enabled: false,
+            skin_preview_motion_blur_amount: 0.15,
+            skin_preview_motion_blur_shutter_frames: 0.75,
+            skin_preview_motion_blur_sample_count: 5,
             frame_limiter_enabled: false,
             frame_limit_fps: 120,
             ui_font_size: 18.0,

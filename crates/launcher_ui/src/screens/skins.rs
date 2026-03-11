@@ -8,6 +8,7 @@ use std::time::Duration;
 use auth::{CachedAccount, MinecraftProfileState, MinecraftSkinVariant};
 use bytemuck::{Pod, Zeroable};
 use config::SkinPreviewAaMode;
+use eframe::egui_wgpu::wgpu::util::DeviceExt as _;
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui};
 use image::RgbaImage;
@@ -28,6 +29,7 @@ const CAPE_TILE_WIDTH_MIN: f32 = 132.0;
 const CAPE_TILE_HEIGHT: f32 = 186.0;
 const SKIN_PREVIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 const SKIN_PREVIEW_NEAR: f32 = 1.5;
+const MOTION_BLUR_MIN_ANGULAR_SPAN: f32 = 0.015;
 
 pub fn render(
     ui: &mut Ui,
@@ -40,6 +42,10 @@ pub fn render(
     wgpu_target_format: Option<wgpu::TextureFormat>,
     skin_preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_motion_blur_enabled: bool,
+    preview_motion_blur_amount: f32,
+    preview_motion_blur_shutter_frames: f32,
+    preview_motion_blur_sample_count: i32,
 ) {
     let state_id = ui.make_persistent_id("skins_screen_state");
     let mut state = ui
@@ -65,10 +71,27 @@ pub fn render(
     state.wgpu_target_format = wgpu_target_format;
     state.preview_msaa_samples = skin_preview_msaa_samples.max(1);
     state.preview_aa_mode = preview_aa_mode;
-    if state.last_preview_aa_mode != state.preview_aa_mode {
+    state.preview_motion_blur_enabled = preview_motion_blur_enabled;
+    state.preview_motion_blur_amount = preview_motion_blur_amount.clamp(0.0, 1.0);
+    state.preview_motion_blur_shutter_frames = preview_motion_blur_shutter_frames.max(0.0);
+    state.preview_motion_blur_sample_count = preview_motion_blur_sample_count.max(1) as usize;
+    if state.last_preview_aa_mode != state.preview_aa_mode
+        || state.last_preview_motion_blur_enabled != state.preview_motion_blur_enabled
+        || (state.last_preview_motion_blur_amount - state.preview_motion_blur_amount).abs()
+            > f32::EPSILON
+        || (state.last_preview_motion_blur_shutter_frames
+            - state.preview_motion_blur_shutter_frames)
+            .abs()
+            > f32::EPSILON
+        || state.last_preview_motion_blur_sample_count != state.preview_motion_blur_sample_count
+    {
         state.preview_texture = None;
         state.preview_history = None;
         state.last_preview_aa_mode = state.preview_aa_mode;
+        state.last_preview_motion_blur_enabled = state.preview_motion_blur_enabled;
+        state.last_preview_motion_blur_amount = state.preview_motion_blur_amount;
+        state.last_preview_motion_blur_shutter_frames = state.preview_motion_blur_shutter_frames;
+        state.last_preview_motion_blur_sample_count = state.preview_motion_blur_sample_count;
     }
     state.poll_worker(ui.ctx());
     state.try_consume_open_refresh();
@@ -273,6 +296,13 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     let orbit_time = state.effective_orbit_time(now);
     let yaw = ((orbit_time / PREVIEW_ORBIT_SECONDS) as f32) * std::f32::consts::TAU
         + state.camera_yaw_offset;
+    let yaw_velocity = if state.camera_drag_active {
+        state.camera_drag_velocity
+    } else if state.orbit_pause_started_at.is_some() {
+        state.camera_inertial_velocity
+    } else {
+        std::f32::consts::TAU / PREVIEW_ORBIT_SECONDS as f32
+    };
     let walk = (now as f32 * 3.3).sin();
 
     let skin_texture = state.skin_texture.as_ref();
@@ -287,6 +317,10 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     let wgpu_target_format = state.wgpu_target_format;
     let preview_msaa_samples = state.preview_msaa_samples;
     let preview_aa_mode = state.preview_aa_mode;
+    let preview_motion_blur_enabled = state.preview_motion_blur_enabled;
+    let preview_motion_blur_amount = state.preview_motion_blur_amount;
+    let preview_motion_blur_shutter_frames = state.preview_motion_blur_shutter_frames;
+    let preview_motion_blur_sample_count = state.preview_motion_blur_sample_count;
     let preview_texture = &mut state.preview_texture;
     let preview_history = &mut state.preview_history;
 
@@ -303,6 +337,7 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
             default_elytra_sample,
             cape_uv,
             yaw,
+            yaw_velocity,
             now as f32,
             walk,
             variant,
@@ -310,6 +345,10 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
             wgpu_target_format,
             preview_msaa_samples,
             preview_aa_mode,
+            preview_motion_blur_enabled,
+            preview_motion_blur_amount,
+            preview_motion_blur_shutter_frames,
+            preview_motion_blur_sample_count,
             preview_texture,
             preview_history,
         );
@@ -376,6 +415,7 @@ fn draw_character(
     default_elytra_sample: Option<Arc<RgbaImage>>,
     cape_uv: FaceUvs,
     yaw: f32,
+    yaw_velocity: f32,
     time_seconds: f32,
     walk_phase: f32,
     variant: MinecraftSkinVariant,
@@ -383,9 +423,102 @@ fn draw_character(
     wgpu_target_format: Option<wgpu::TextureFormat>,
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_motion_blur_enabled: bool,
+    preview_motion_blur_amount: f32,
+    preview_motion_blur_shutter_frames: f32,
+    preview_motion_blur_sample_count: usize,
     preview_texture: &mut Option<TextureHandle>,
     preview_history: &mut Option<PreviewHistory>,
 ) {
+    let cape_render_texture = if show_elytra {
+        cape_texture.or(default_elytra_texture)
+    } else {
+        cape_texture
+    };
+    let scene = build_character_scene(
+        rect,
+        cape_uv,
+        yaw,
+        time_seconds,
+        walk_phase,
+        variant,
+        show_elytra,
+        cape_sample.clone(),
+        default_elytra_sample.clone(),
+    );
+
+    if preview_motion_blur_enabled {
+        if let (Some(target_format), Some(skin_sample)) = (wgpu_target_format, skin_sample.as_ref())
+        {
+            let motion_blur_samples = build_motion_blur_scene_samples(
+                rect,
+                cape_uv,
+                yaw,
+                yaw_velocity,
+                time_seconds,
+                walk_phase,
+                preview_motion_blur_shutter_frames,
+                preview_motion_blur_sample_count,
+                variant,
+                show_elytra,
+                cape_sample,
+                default_elytra_sample,
+                preview_motion_blur_amount,
+            );
+            if !motion_blur_samples.is_empty() {
+                render_motion_blur_wgpu_scene(
+                    ui,
+                    rect,
+                    &motion_blur_samples,
+                    Arc::clone(skin_sample),
+                    scene.cape_render_sample.clone(),
+                    target_format,
+                    if preview_aa_mode == SkinPreviewAaMode::Msaa {
+                        preview_msaa_samples.max(1)
+                    } else {
+                        1
+                    },
+                    preview_msaa_samples.max(1),
+                    preview_aa_mode,
+                );
+                return;
+            }
+        }
+    }
+
+    render_depth_buffered_scene(
+        ui,
+        painter,
+        rect,
+        &scene.triangles,
+        skin_texture,
+        cape_render_texture,
+        skin_sample,
+        scene.cape_render_sample,
+        wgpu_target_format,
+        preview_msaa_samples,
+        preview_aa_mode,
+        preview_texture,
+        preview_history,
+    );
+}
+
+struct BuiltCharacterScene {
+    triangles: Vec<RenderTriangle>,
+    cape_render_sample: Option<Arc<RgbaImage>>,
+}
+
+fn build_character_scene(
+    rect: Rect,
+    cape_uv: FaceUvs,
+    yaw: f32,
+    time_seconds: f32,
+    walk_phase: f32,
+    variant: MinecraftSkinVariant,
+    show_elytra: bool,
+    cape_sample: Option<Arc<RgbaImage>>,
+    default_elytra_sample: Option<Arc<RgbaImage>>,
+) -> BuiltCharacterScene {
     let arm_width = if variant == MinecraftSkinVariant::Slim {
         3.0
     } else {
@@ -746,10 +879,9 @@ fn draw_character(
     let mut scene_tris = base_tris;
     scene_tris.extend(overlay_tris);
 
-    let mut cape_render_texture = cape_texture;
     let mut cape_render_sample = cape_sample;
 
-    if cape_texture.is_some() && !show_elytra {
+    if cape_render_sample.is_some() && !show_elytra {
         add_cape_triangles(
             &mut scene_tris,
             TriangleTexture::Cape,
@@ -764,9 +896,6 @@ fn draw_character(
     }
 
     if show_elytra {
-        if cape_render_texture.is_none() {
-            cape_render_texture = default_elytra_texture;
-        }
         if cape_render_sample.is_none() {
             cape_render_sample = default_elytra_sample.clone();
         }
@@ -790,21 +919,121 @@ fn draw_character(
         );
     }
 
-    render_depth_buffered_scene(
-        ui,
-        painter,
-        rect,
-        &scene_tris,
-        skin_texture,
-        cape_render_texture,
-        skin_sample,
+    BuiltCharacterScene {
+        triangles: scene_tris,
         cape_render_sample,
-        wgpu_target_format,
-        preview_msaa_samples,
+    }
+}
+
+struct WeightedPreviewScene {
+    weight: f32,
+    triangles: Vec<RenderTriangle>,
+}
+
+fn build_motion_blur_scene_samples(
+    rect: Rect,
+    cape_uv: FaceUvs,
+    yaw: f32,
+    yaw_velocity: f32,
+    time_seconds: f32,
+    walk_phase: f32,
+    shutter_frames: f32,
+    sample_count: usize,
+    variant: MinecraftSkinVariant,
+    show_elytra: bool,
+    cape_sample: Option<Arc<RgbaImage>>,
+    default_elytra_sample: Option<Arc<RgbaImage>>,
+    amount: f32,
+) -> Vec<WeightedPreviewScene> {
+    let amount = amount.clamp(0.0, 1.0);
+    if amount <= 0.001 {
+        return Vec::new();
+    }
+
+    let sample_count = sample_count.max(2);
+    let shutter_seconds = motion_blur_shutter_seconds(shutter_frames);
+    if shutter_seconds * yaw_velocity.abs() <= MOTION_BLUR_MIN_ANGULAR_SPAN {
+        return Vec::new();
+    }
+    let center = (sample_count.saturating_sub(1)) as f32 * 0.5;
+    let mut weights = Vec::with_capacity(sample_count);
+    let mut total_weight = 0.0;
+
+    for index in 0..sample_count {
+        let distance = (index as f32 - center).abs();
+        let normalized_distance = if center <= f32::EPSILON {
+            0.0
+        } else {
+            distance / center
+        };
+        let falloff = egui::lerp(4.8..=1.35, amount);
+        let edge_floor = egui::lerp(0.0..=0.08, amount * amount);
+        let weight = (1.0 - normalized_distance * normalized_distance)
+            .max(0.0)
+            .powf(falloff)
+            .max(edge_floor)
+            .max(0.02);
+        weights.push(weight);
+        total_weight += weight;
+    }
+
+    let total_weight = total_weight.max(f32::EPSILON);
+    let mut scenes = Vec::with_capacity(sample_count);
+    for (index, raw_weight) in weights.into_iter().enumerate() {
+        let sample_t = if sample_count <= 1 {
+            0.5
+        } else {
+            index as f32 / (sample_count - 1) as f32
+        };
+        let time_offset = (sample_t - 0.5) * shutter_seconds;
+        let sample_yaw = yaw + time_offset * yaw_velocity;
+        let scene = build_character_scene(
+            rect,
+            cape_uv,
+            sample_yaw,
+            time_seconds,
+            walk_phase,
+            variant,
+            show_elytra,
+            cape_sample.clone(),
+            default_elytra_sample.clone(),
+        );
+        scenes.push(WeightedPreviewScene {
+            weight: raw_weight / total_weight,
+            triangles: scene.triangles,
+        });
+    }
+
+    scenes
+}
+
+fn motion_blur_shutter_seconds(shutter_frames: f32) -> f32 {
+    let frame = 1.0 / PREVIEW_TARGET_FPS;
+    frame * shutter_frames.max(0.0)
+}
+
+fn render_motion_blur_wgpu_scene(
+    ui: &Ui,
+    rect: Rect,
+    scenes: &[WeightedPreviewScene],
+    skin_sample: Arc<RgbaImage>,
+    cape_sample: Option<Arc<RgbaImage>>,
+    target_format: wgpu::TextureFormat,
+    scene_msaa_samples: u32,
+    present_msaa_samples: u32,
+    preview_aa_mode: SkinPreviewAaMode,
+) {
+    let callback = SkinPreviewPostProcessWgpuCallback::from_weighted_scenes(
+        scenes,
+        skin_sample,
+        cape_sample,
+        target_format,
+        scene_msaa_samples,
+        present_msaa_samples,
         preview_aa_mode,
-        preview_texture,
-        preview_history,
     );
+    let callback_shape = egui_wgpu::Callback::new_paint_callback(rect, callback);
+    ui.painter().add(callback_shape);
 }
 
 fn add_cape_triangles(
@@ -986,28 +1215,6 @@ fn render_depth_buffered_scene(
     preview_texture: &mut Option<TextureHandle>,
     preview_history: &mut Option<PreviewHistory>,
 ) {
-    if matches!(
-        preview_aa_mode,
-        SkinPreviewAaMode::Fxaa | SkinPreviewAaMode::Taa
-    ) {
-        let Some(skin_sample) = skin_sample else {
-            paint_scene_fallback_mesh(painter, triangles, skin_texture, cape_texture);
-            return;
-        };
-        render_cpu_post_aa_scene(
-            ui.ctx(),
-            painter,
-            rect,
-            triangles,
-            &skin_sample,
-            cape_sample.as_deref(),
-            preview_aa_mode,
-            preview_texture,
-            preview_history,
-        );
-        return;
-    }
-
     let Some(target_format) = wgpu_target_format else {
         // WGPU target format can be absent on non-wgpu renderers.
         paint_scene_fallback_mesh(painter, triangles, skin_texture, cape_texture);
@@ -1018,8 +1225,7 @@ fn render_depth_buffered_scene(
         return;
     };
 
-    let callback = SkinPreviewWgpuCallback::from_scene(
-        rect,
+    let callback = SkinPreviewPostProcessWgpuCallback::from_scene(
         triangles,
         skin_sample,
         cape_sample,
@@ -1029,9 +1235,12 @@ fn render_depth_buffered_scene(
         } else {
             1
         },
+        preview_msaa_samples.max(1),
+        preview_aa_mode,
     );
     let callback_shape = egui_wgpu::Callback::new_paint_callback(rect, callback);
     ui.painter().add(callback_shape);
+    let _ = (preview_texture, preview_history);
 }
 
 fn paint_scene_fallback_mesh(
@@ -1069,6 +1278,7 @@ fn paint_scene_fallback_mesh(
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone)]
 struct PreviewHistory {
     width: usize,
@@ -1076,6 +1286,7 @@ struct PreviewHistory {
     rgba: Vec<u8>,
 }
 
+#[allow(dead_code)]
 fn render_cpu_post_aa_scene(
     ctx: &egui::Context,
     painter: &egui::Painter,
@@ -1104,6 +1315,7 @@ fn render_cpu_post_aa_scene(
     }
 
     match mode {
+        SkinPreviewAaMode::Smaa => apply_fxaa_rgba(&mut color, width, height),
         SkinPreviewAaMode::Fxaa => apply_fxaa_rgba(&mut color, width, height),
         SkinPreviewAaMode::Taa => apply_taa_rgba(&mut color, width, height, preview_history, 0.35),
         _ => {}
@@ -1124,6 +1336,7 @@ fn render_cpu_post_aa_scene(
     }
 }
 
+#[allow(dead_code)]
 fn rasterize_triangle_depth_tested(
     color_buffer: &mut [u8],
     depth_buffer: &mut [f32],
@@ -1192,6 +1405,7 @@ fn rasterize_triangle_depth_tested(
     }
 }
 
+#[allow(dead_code)]
 fn sample_texture_nearest(texture: &RgbaImage, u: f32, v: f32) -> [u8; 4] {
     let width = texture.width() as usize;
     let height = texture.height() as usize;
@@ -1207,6 +1421,7 @@ fn sample_texture_nearest(texture: &RgbaImage, u: f32, v: f32) -> [u8; 4] {
     [raw[idx], raw[idx + 1], raw[idx + 2], raw[idx + 3]]
 }
 
+#[allow(dead_code)]
 fn tint_rgba(color: [u8; 4], tint: Color32) -> [u8; 4] {
     [
         ((color[0] as u16 * tint.r() as u16) / 255) as u8,
@@ -1216,6 +1431,7 @@ fn tint_rgba(color: [u8; 4], tint: Color32) -> [u8; 4] {
     ]
 }
 
+#[allow(dead_code)]
 fn blend_rgba_over(buffer: &mut [u8], base: usize, src: [u8; 4]) {
     let src_a = src[3] as f32 / 255.0;
     if src_a <= 0.0 {
@@ -1244,6 +1460,7 @@ fn blend_rgba_over(buffer: &mut [u8], base: usize, src: [u8; 4]) {
     buffer[base + 3] = (out_a * 255.0).round() as u8;
 }
 
+#[allow(dead_code)]
 fn apply_taa_rgba(
     color: &mut [u8],
     width: usize,
@@ -1285,6 +1502,7 @@ fn apply_taa_rgba(
     hist.rgba.copy_from_slice(color);
 }
 
+#[allow(dead_code)]
 fn apply_fxaa_rgba(buffer: &mut [u8], width: usize, height: usize) {
     if width < 3 || height < 3 {
         return;
@@ -1373,6 +1591,7 @@ fn apply_fxaa_rgba(buffer: &mut [u8], width: usize, height: usize) {
     }
 }
 
+#[allow(dead_code)]
 fn luma_at(src: &[u8], width: usize, x: usize, y: usize) -> f32 {
     let idx = (y * width + x) * 4;
     rgb_luma([
@@ -1382,10 +1601,12 @@ fn luma_at(src: &[u8], width: usize, x: usize, y: usize) -> f32 {
     ])
 }
 
+#[allow(dead_code)]
 fn rgb_luma(rgb: [f32; 3]) -> f32 {
     rgb[0] * 0.299 + rgb[1] * 0.587 + rgb[2] * 0.114
 }
 
+#[allow(dead_code)]
 fn sample_rgb_linear(src: &[u8], width: usize, height: usize, x: f32, y: f32) -> [f32; 3] {
     let max_x = (width - 1) as f32;
     let max_y = (height - 1) as f32;
@@ -1423,6 +1644,7 @@ fn sample_rgb_linear(src: &[u8], width: usize, height: usize, x: f32, y: f32) ->
     ]
 }
 
+#[allow(dead_code)]
 fn rgb_at(src: &[u8], width: usize, x: usize, y: usize) -> [f32; 3] {
     let idx = (y * width + x) * 4;
     [
@@ -1432,6 +1654,7 @@ fn rgb_at(src: &[u8], width: usize, x: usize, y: usize) -> [f32; 3] {
     ]
 }
 
+#[allow(dead_code)]
 fn edge_function(a: Pos2, b: Pos2, p: Pos2) -> f32 {
     (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)
 }
@@ -1452,6 +1675,1648 @@ struct GpuPreviewUniform {
     _pad: [f32; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct GpuPreviewScalarUniform {
+    value: [f32; 4],
+}
+
+struct GpuPreviewSceneBatch {
+    weight: f32,
+    skin_vertices: Vec<GpuPreviewVertex>,
+    skin_indices: Vec<u32>,
+    cape_vertices: Vec<GpuPreviewVertex>,
+    cape_indices: Vec<u32>,
+}
+
+struct PreparedGpuPreviewSceneBatch {
+    _weight_buffer: wgpu::Buffer,
+    weight_bind_group: wgpu::BindGroup,
+    skin_vertex_buffer: wgpu::Buffer,
+    skin_index_buffer: wgpu::Buffer,
+    cape_vertex_buffer: wgpu::Buffer,
+    cape_index_buffer: wgpu::Buffer,
+    skin_index_count: u32,
+    cape_index_count: u32,
+}
+
+fn build_gpu_preview_scene_batch(
+    triangles: &[RenderTriangle],
+    weight: f32,
+) -> GpuPreviewSceneBatch {
+    let mut skin_vertices = Vec::with_capacity(triangles.len() * 3);
+    let mut skin_indices = Vec::with_capacity(triangles.len() * 3);
+    let mut cape_vertices = Vec::new();
+    let mut cape_indices = Vec::new();
+
+    for tri in triangles {
+        let target = match tri.texture {
+            TriangleTexture::Skin => (&mut skin_vertices, &mut skin_indices),
+            TriangleTexture::Cape => (&mut cape_vertices, &mut cape_indices),
+        };
+        let base = target.0.len() as u32;
+        for i in 0..3 {
+            target.0.push(GpuPreviewVertex {
+                pos_points: [tri.pos[i].x, tri.pos[i].y],
+                camera_z: tri.depth[i].max(SKIN_PREVIEW_NEAR + 0.000_1),
+                uv: [tri.uv[i].x, tri.uv[i].y],
+                color: tri.color.to_normalized_gamma_f32(),
+            });
+        }
+        target
+            .1
+            .extend_from_slice(&[base, base.saturating_add(1), base.saturating_add(2)]);
+    }
+
+    GpuPreviewSceneBatch {
+        weight,
+        skin_vertices,
+        skin_indices,
+        cape_vertices,
+        cape_indices,
+    }
+}
+
+fn prepare_gpu_preview_scene_batch(
+    device: &wgpu::Device,
+    scalar_uniform_bind_group_layout: &wgpu::BindGroupLayout,
+    batch: &GpuPreviewSceneBatch,
+) -> PreparedGpuPreviewSceneBatch {
+    let weight_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("skins-preview-batch-weight-buffer"),
+        contents: bytemuck::bytes_of(&GpuPreviewScalarUniform {
+            value: [batch.weight, 0.0, 0.0, 0.0],
+        }),
+        usage: wgpu::BufferUsages::UNIFORM,
+    });
+    let weight_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("skins-preview-batch-weight-bind-group"),
+        layout: scalar_uniform_bind_group_layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: weight_buffer.as_entire_binding(),
+        }],
+    });
+
+    PreparedGpuPreviewSceneBatch {
+        _weight_buffer: weight_buffer,
+        weight_bind_group,
+        skin_vertex_buffer: create_preview_vertex_buffer(
+            device,
+            "skins-preview-batch-skin-vertex-buffer",
+            &batch.skin_vertices,
+        ),
+        skin_index_buffer: create_preview_index_buffer(
+            device,
+            "skins-preview-batch-skin-index-buffer",
+            &batch.skin_indices,
+        ),
+        cape_vertex_buffer: create_preview_vertex_buffer(
+            device,
+            "skins-preview-batch-cape-vertex-buffer",
+            &batch.cape_vertices,
+        ),
+        cape_index_buffer: create_preview_index_buffer(
+            device,
+            "skins-preview-batch-cape-index-buffer",
+            &batch.cape_indices,
+        ),
+        skin_index_count: batch.skin_indices.len() as u32,
+        cape_index_count: batch.cape_indices.len() as u32,
+    }
+}
+
+struct SkinPreviewPostProcessWgpuCallback {
+    scene_batches: Vec<GpuPreviewSceneBatch>,
+    skin_sample: Arc<RgbaImage>,
+    cape_sample: Option<Arc<RgbaImage>>,
+    skin_hash: u64,
+    cape_hash: Option<u64>,
+    target_format: wgpu::TextureFormat,
+    scene_msaa_samples: u32,
+    present_msaa_samples: u32,
+    aa_mode: SkinPreviewAaMode,
+}
+
+impl SkinPreviewPostProcessWgpuCallback {
+    fn from_scene(
+        triangles: &[RenderTriangle],
+        skin_sample: Arc<RgbaImage>,
+        cape_sample: Option<Arc<RgbaImage>>,
+        target_format: wgpu::TextureFormat,
+        scene_msaa_samples: u32,
+        present_msaa_samples: u32,
+        aa_mode: SkinPreviewAaMode,
+    ) -> Self {
+        Self {
+            scene_batches: vec![build_gpu_preview_scene_batch(triangles, 1.0)],
+            skin_hash: hash_rgba_image(&skin_sample),
+            cape_hash: cape_sample
+                .as_ref()
+                .map(|image| hash_rgba_image(image.as_ref())),
+            skin_sample,
+            cape_sample,
+            target_format,
+            scene_msaa_samples,
+            present_msaa_samples,
+            aa_mode,
+        }
+    }
+
+    fn from_weighted_scenes(
+        scenes: &[WeightedPreviewScene],
+        skin_sample: Arc<RgbaImage>,
+        cape_sample: Option<Arc<RgbaImage>>,
+        target_format: wgpu::TextureFormat,
+        scene_msaa_samples: u32,
+        present_msaa_samples: u32,
+        aa_mode: SkinPreviewAaMode,
+    ) -> Self {
+        let scene_batches = scenes
+            .iter()
+            .map(|scene| build_gpu_preview_scene_batch(&scene.triangles, scene.weight))
+            .collect();
+        Self {
+            scene_batches,
+            skin_hash: hash_rgba_image(&skin_sample),
+            cape_hash: cape_sample
+                .as_ref()
+                .map(|image| hash_rgba_image(image.as_ref())),
+            skin_sample,
+            cape_sample,
+            target_format,
+            scene_msaa_samples,
+            present_msaa_samples,
+            aa_mode,
+        }
+    }
+}
+
+impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
+    fn prepare(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        screen_descriptor: &egui_wgpu::ScreenDescriptor,
+        _egui_encoder: &mut wgpu::CommandEncoder,
+        callback_resources: &mut egui_wgpu::CallbackResources,
+    ) -> Vec<wgpu::CommandBuffer> {
+        let resources = callback_resources
+            .entry::<SkinPreviewPostProcessWgpuResources>()
+            .or_insert_with(|| {
+                SkinPreviewPostProcessWgpuResources::new(
+                    device,
+                    self.target_format,
+                    self.scene_msaa_samples,
+                    self.present_msaa_samples,
+                )
+            });
+        if resources.target_format != self.target_format
+            || resources.scene_msaa_samples != self.scene_msaa_samples
+            || resources.present_msaa_samples != self.present_msaa_samples
+        {
+            *resources = SkinPreviewPostProcessWgpuResources::new(
+                device,
+                self.target_format,
+                self.scene_msaa_samples,
+                self.present_msaa_samples,
+            );
+        }
+
+        resources.update_scene_uniform(
+            queue,
+            [
+                screen_descriptor.size_in_pixels[0] as f32 / screen_descriptor.pixels_per_point,
+                screen_descriptor.size_in_pixels[1] as f32 / screen_descriptor.pixels_per_point,
+            ],
+        );
+        resources.ensure_render_targets(device, screen_descriptor.size_in_pixels);
+        resources.update_texture(
+            device,
+            queue,
+            TextureSlot::Skin,
+            self.skin_hash,
+            &self.skin_sample,
+        );
+        if let (Some(cape_hash), Some(cape_sample)) = (self.cape_hash, self.cape_sample.as_ref()) {
+            resources.update_texture(device, queue, TextureSlot::Cape, cape_hash, cape_sample);
+        } else {
+            resources.cape_texture = None;
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("skins-preview-post-process-encoder"),
+        });
+
+        let use_smaa = self.aa_mode == SkinPreviewAaMode::Smaa;
+        let use_fxaa = self.aa_mode == SkinPreviewAaMode::Fxaa;
+        let use_taa = self.aa_mode == SkinPreviewAaMode::Taa;
+        resources.present_source = PresentSource::Accumulation;
+
+        for (index, batch) in self.scene_batches.iter().enumerate() {
+            let prepared_batch = prepare_gpu_preview_scene_batch(
+                device,
+                &resources.scalar_uniform_bind_group_layout,
+                batch,
+            );
+
+            {
+                let color_attachment =
+                    resources.scene_color_attachment(index == 0 || self.scene_batches.len() == 1);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("skins-preview-scene-pass"),
+                    color_attachments: &[Some(color_attachment)],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: resources.scene_depth_view(),
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                resources.paint_scene(&mut pass, &prepared_batch);
+            }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("skins-preview-accumulation-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &resources.accumulation_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: if index == 0 {
+                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.accumulate_pipeline);
+                pass.set_bind_group(0, &resources.scene_resolve_bind_group, &[]);
+                pass.set_bind_group(1, &prepared_batch.weight_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+        }
+
+        if use_smaa {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("skins-preview-smaa-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &resources.post_process_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.smaa_pipeline);
+                pass.set_bind_group(0, &resources.accumulation_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            resources.present_source = PresentSource::PostProcess;
+            resources.taa_history_valid = false;
+        } else if use_fxaa {
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("skins-preview-fxaa-pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &resources.post_process_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.fxaa_pipeline);
+                pass.set_bind_group(0, &resources.accumulation_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            resources.present_source = PresentSource::PostProcess;
+        } else if use_taa {
+            if resources.taa_history_valid {
+                queue.write_buffer(
+                    &resources.scalar_uniform_buffer,
+                    0,
+                    bytemuck::bytes_of(&GpuPreviewScalarUniform {
+                        value: [0.22, 0.0, 0.0, 0.0],
+                    }),
+                );
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("skins-preview-taa-pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: &resources.post_process_view,
+                            resolve_target: None,
+                            depth_slice: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        depth_stencil_attachment: None,
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                    pass.set_pipeline(&resources.taa_pipeline);
+                    pass.set_bind_group(0, &resources.accumulation_bind_group, &[]);
+                    pass.set_bind_group(1, &resources.taa_history_bind_group, &[]);
+                    pass.set_bind_group(2, &resources.scalar_uniform_bind_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &resources.post_process_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &resources.taa_history_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    resources.render_target_extent(),
+                );
+                resources.present_source = PresentSource::PostProcess;
+            } else {
+                encoder.copy_texture_to_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &resources.accumulation_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &resources.taa_history_texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    resources.render_target_extent(),
+                );
+                resources.present_source = PresentSource::Accumulation;
+            }
+            resources.taa_history_valid = true;
+        } else {
+            resources.taa_history_valid = false;
+        }
+
+        vec![encoder.finish()]
+    }
+
+    fn paint(
+        &self,
+        info: egui::PaintCallbackInfo,
+        render_pass: &mut wgpu::RenderPass<'static>,
+        callback_resources: &egui_wgpu::CallbackResources,
+    ) {
+        let Some(resources) = callback_resources.get::<SkinPreviewPostProcessWgpuResources>()
+        else {
+            return;
+        };
+        let viewport = info.viewport_in_pixels();
+        render_pass.set_viewport(
+            viewport.left_px as f32,
+            viewport.top_px as f32,
+            viewport.width_px as f32,
+            viewport.height_px as f32,
+            0.0,
+            1.0,
+        );
+        render_pass.set_pipeline(&resources.present_pipeline);
+        let bind_group = match resources.present_source {
+            PresentSource::Accumulation => &resources.accumulation_bind_group,
+            PresentSource::PostProcess => &resources.post_process_bind_group,
+        };
+        render_pass.set_bind_group(0, bind_group, &[]);
+        render_pass.draw(0..3, 0..1);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PresentSource {
+    Accumulation,
+    PostProcess,
+}
+
+struct SkinPreviewPostProcessWgpuResources {
+    scene_pipeline: wgpu::RenderPipeline,
+    accumulate_pipeline: wgpu::RenderPipeline,
+    smaa_pipeline: wgpu::RenderPipeline,
+    fxaa_pipeline: wgpu::RenderPipeline,
+    taa_pipeline: wgpu::RenderPipeline,
+    present_pipeline: wgpu::RenderPipeline,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_bind_group: wgpu::BindGroup,
+    uniform_buffer: wgpu::Buffer,
+    scalar_uniform_bind_group_layout: wgpu::BindGroupLayout,
+    scalar_uniform_bind_group: wgpu::BindGroup,
+    scalar_uniform_buffer: wgpu::Buffer,
+    skin_texture: Option<UploadedPreviewTexture>,
+    cape_texture: Option<UploadedPreviewTexture>,
+    accumulation_texture: wgpu::Texture,
+    accumulation_view: wgpu::TextureView,
+    accumulation_bind_group: wgpu::BindGroup,
+    scene_resolve_texture: wgpu::Texture,
+    scene_resolve_view: wgpu::TextureView,
+    scene_resolve_bind_group: wgpu::BindGroup,
+    scene_msaa_texture: Option<wgpu::Texture>,
+    scene_msaa_view: Option<wgpu::TextureView>,
+    scene_depth_texture: wgpu::Texture,
+    scene_depth_view: wgpu::TextureView,
+    post_process_texture: wgpu::Texture,
+    post_process_view: wgpu::TextureView,
+    post_process_bind_group: wgpu::BindGroup,
+    taa_history_texture: wgpu::Texture,
+    taa_history_view: wgpu::TextureView,
+    taa_history_bind_group: wgpu::BindGroup,
+    taa_history_valid: bool,
+    render_target_size: [u32; 2],
+    target_format: wgpu::TextureFormat,
+    scene_msaa_samples: u32,
+    present_msaa_samples: u32,
+    present_source: PresentSource,
+}
+
+impl SkinPreviewPostProcessWgpuResources {
+    fn new(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        scene_msaa_samples: u32,
+        present_msaa_samples: u32,
+    ) -> Self {
+        const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+
+        let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-post-scene-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct VertexIn {
+    @location(0) pos_points: vec2<f32>,
+    @location(1) camera_z: f32,
+    @location(2) uv: vec2<f32>,
+    @location(3) color: vec4<f32>,
+};
+
+struct Globals {
+    screen_size_points: vec2<f32>,
+    _pad: vec2<f32>,
+};
+
+struct VertexOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var preview_tex: texture_2d<f32>;
+@group(1) @binding(0)
+var<uniform> globals: Globals;
+
+@vertex
+fn vs_main(input: VertexIn) -> VertexOut {
+    var out: VertexOut;
+    let x_ndc = (input.pos_points.x / globals.screen_size_points.x) * 2.0 - 1.0;
+    let y_ndc = 1.0 - (input.pos_points.y / globals.screen_size_points.y) * 2.0;
+    let z_cam = max(input.camera_z, 1.5 + 0.0001);
+    let clip_w = z_cam;
+    let clip_z = z_cam - 1.5;
+    out.pos = vec4<f32>(x_ndc * clip_w, y_ndc * clip_w, clip_z, clip_w);
+    out.uv = input.uv;
+    out.color = input.color;
+    return out;
+}
+
+@fragment
+fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
+    let dims = vec2<f32>(textureDimensions(preview_tex));
+    let uv = clamp(input.uv, vec2<f32>(0.0), vec2<f32>(0.999999));
+    let texel = vec2<i32>(floor(uv * dims));
+    let sampled = textureLoad(preview_tex, texel, 0) * input.color;
+    if sampled.a <= 0.001 {
+        discard;
+    }
+    return sampled;
+}
+"#,
+            )),
+        });
+
+        let accumulate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-accumulate-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct Scalar {
+    value: vec4<f32>,
+};
+
+struct FullscreenOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var source_tex: texture_2d<f32>;
+@group(1) @binding(0)
+var<uniform> scalar: Scalar;
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
+    var out: FullscreenOut;
+    let x = f32((vertex_index << 1u) & 2u);
+    let y = f32(vertex_index & 2u);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let pixel = clamp(vec2<i32>(pos.xy), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(source_tex, pixel, 0) * scalar.value.x;
+}
+"#,
+            )),
+        });
+
+        let fxaa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-fxaa-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct FullscreenOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var source_tex: texture_2d<f32>;
+
+fn rgb_luma(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn load_rgba(pixel: vec2<i32>) -> vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(source_tex, clamped, 0);
+}
+
+fn sample_linear(pixel: vec2<f32>) -> vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let max_pixel = vec2<f32>(vec2<i32>(dims) - vec2<i32>(1));
+    let p = clamp(pixel, vec2<f32>(0.0), max_pixel);
+    let p0 = vec2<i32>(floor(p));
+    let p1 = min(p0 + vec2<i32>(1), vec2<i32>(dims) - vec2<i32>(1));
+    let f = fract(p);
+    let c00 = load_rgba(p0);
+    let c10 = load_rgba(vec2<i32>(p1.x, p0.y));
+    let c01 = load_rgba(vec2<i32>(p0.x, p1.y));
+    let c11 = load_rgba(p1);
+    let top = mix(c00, c10, f.x);
+    let bottom = mix(c01, c11, f.x);
+    return mix(top, bottom, f.y);
+}
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
+    var out: FullscreenOut;
+    let x = f32((vertex_index << 1u) & 2u);
+    let y = f32(vertex_index & 2u);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(pos.xy);
+    let nw = load_rgba(p + vec2<i32>(-1, -1));
+    let ne = load_rgba(p + vec2<i32>(1, -1));
+    let sw = load_rgba(p + vec2<i32>(-1, 1));
+    let se = load_rgba(p + vec2<i32>(1, 1));
+    let m = load_rgba(p);
+
+    let luma_nw = rgb_luma(nw.rgb);
+    let luma_ne = rgb_luma(ne.rgb);
+    let luma_sw = rgb_luma(sw.rgb);
+    let luma_se = rgb_luma(se.rgb);
+    let luma_m = rgb_luma(m.rgb);
+
+    let luma_min = min(luma_m, min(min(luma_nw, luma_ne), min(luma_sw, luma_se)));
+    let luma_max = max(luma_m, max(max(luma_nw, luma_ne), max(luma_sw, luma_se)));
+    let luma_range = luma_max - luma_min;
+    let threshold = max(1.0 / 16.0, luma_max * (1.0 / 8.0));
+    if luma_range < threshold {
+        return m;
+    }
+
+    var dir = vec2<f32>(
+        -((luma_nw + luma_ne) - (luma_sw + luma_se)),
+        (luma_nw + luma_sw) - (luma_ne + luma_se),
+    );
+    let dir_reduce = max(
+        ((luma_nw + luma_ne + luma_sw + luma_se) * 0.25) * (1.0 / 8.0),
+        1.0 / 128.0,
+    );
+    let rcp_dir_min = 1.0 / (min(abs(dir.x), abs(dir.y)) + dir_reduce);
+    dir = clamp(dir * rcp_dir_min, vec2<f32>(-8.0), vec2<f32>(8.0));
+
+    let fp = pos.xy;
+    let rgb_a = 0.5 * (
+        sample_linear(fp + dir * (1.0 / 3.0 - 0.5)).rgb +
+        sample_linear(fp + dir * (2.0 / 3.0 - 0.5)).rgb
+    );
+    let rgb_b = rgb_a * 0.5 + 0.25 * (
+        sample_linear(fp + dir * -0.5).rgb +
+        sample_linear(fp + dir * 0.5).rgb
+    );
+
+    let luma_b = rgb_luma(rgb_b);
+    var final_rgb = rgb_b;
+    if luma_b < luma_min || luma_b > luma_max {
+        final_rgb = rgb_a;
+    }
+    return vec4<f32>(final_rgb, m.a);
+}
+"#,
+            )),
+        });
+
+        let smaa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-smaa-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct FullscreenOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var source_tex: texture_2d<f32>;
+
+fn rgb_luma(rgb: vec3<f32>) -> f32 {
+    return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
+}
+
+fn load_rgba(pixel: vec2<i32>) -> vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(source_tex, clamped, 0);
+}
+
+fn sample_linear(pixel: vec2<f32>) -> vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let max_pixel = vec2<f32>(vec2<i32>(dims) - vec2<i32>(1));
+    let p = clamp(pixel, vec2<f32>(0.0), max_pixel);
+    let p0 = vec2<i32>(floor(p));
+    let p1 = min(p0 + vec2<i32>(1), vec2<i32>(dims) - vec2<i32>(1));
+    let f = fract(p);
+    let c00 = load_rgba(p0);
+    let c10 = load_rgba(vec2<i32>(p1.x, p0.y));
+    let c01 = load_rgba(vec2<i32>(p0.x, p1.y));
+    let c11 = load_rgba(p1);
+    let top = mix(c00, c10, f.x);
+    let bottom = mix(c01, c11, f.x);
+    return mix(top, bottom, f.y);
+}
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
+    var out: FullscreenOut;
+    let x = f32((vertex_index << 1u) & 2u);
+    let y = f32(vertex_index & 2u);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(pos.xy);
+    let c = load_rgba(p);
+    let l = load_rgba(p + vec2<i32>(-1, 0));
+    let r = load_rgba(p + vec2<i32>(1, 0));
+    let t = load_rgba(p + vec2<i32>(0, -1));
+    let b = load_rgba(p + vec2<i32>(0, 1));
+
+    let luma_c = rgb_luma(c.rgb);
+    let luma_l = rgb_luma(l.rgb);
+    let luma_r = rgb_luma(r.rgb);
+    let luma_t = rgb_luma(t.rgb);
+    let luma_b = rgb_luma(b.rgb);
+
+    let edge_h = max(abs(luma_l - luma_c), abs(luma_r - luma_c));
+    let edge_v = max(abs(luma_t - luma_c), abs(luma_b - luma_c));
+    let threshold = max(0.04, luma_c * 0.12);
+
+    if max(edge_h, edge_v) < threshold {
+        return c;
+    }
+
+    let center = pos.xy;
+    if edge_h >= edge_v {
+        let a = sample_linear(center + vec2<f32>(-0.75, 0.0));
+        let b = sample_linear(center + vec2<f32>(0.75, 0.0));
+        let long_a = sample_linear(center + vec2<f32>(-1.5, 0.0));
+        let long_b = sample_linear(center + vec2<f32>(1.5, 0.0));
+        let blend = clamp((edge_h - threshold) * 6.0, 0.0, 1.0);
+        let neighbor = mix(0.5 * (a + b), 0.5 * (long_a + long_b), 0.35);
+        return mix(c, vec4<f32>(neighbor.rgb, c.a), blend * 0.75);
+    }
+
+    let sample_a = sample_linear(center + vec2<f32>(0.0, -0.75));
+    let sample_b = sample_linear(center + vec2<f32>(0.0, 0.75));
+    let long_sample_a = sample_linear(center + vec2<f32>(0.0, -1.5));
+    let long_sample_b = sample_linear(center + vec2<f32>(0.0, 1.5));
+    let blend = clamp((edge_v - threshold) * 6.0, 0.0, 1.0);
+    let neighbor = mix(
+        0.5 * (sample_a + sample_b),
+        0.5 * (long_sample_a + long_sample_b),
+        0.35,
+    );
+    return mix(c, vec4<f32>(neighbor.rgb, c.a), blend * 0.75);
+}
+"#,
+            )),
+        });
+
+        let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-taa-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct Scalar {
+    value: vec4<f32>,
+};
+
+struct FullscreenOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var current_tex: texture_2d<f32>;
+@group(1) @binding(0)
+var history_tex: texture_2d<f32>;
+@group(2) @binding(0)
+var<uniform> scalar: Scalar;
+
+fn load_current(pixel: vec2<i32>) -> vec4<f32> {
+    let dims = textureDimensions(current_tex);
+    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(current_tex, clamped, 0);
+}
+
+fn load_history(pixel: vec2<i32>) -> vec4<f32> {
+    let dims = textureDimensions(history_tex);
+    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(history_tex, clamped, 0);
+}
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
+    var out: FullscreenOut;
+    let x = f32((vertex_index << 1u) & 2u);
+    let y = f32(vertex_index & 2u);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let pixel = vec2<i32>(pos.xy);
+    let current = load_current(pixel);
+    var lo = current;
+    var hi = current;
+    for (var y = -1; y <= 1; y = y + 1) {
+        for (var x = -1; x <= 1; x = x + 1) {
+            let sample = load_current(pixel + vec2<i32>(x, y));
+            lo = min(lo, sample);
+            hi = max(hi, sample);
+        }
+    }
+    let history = clamp(load_history(pixel), lo, hi);
+    let current_weight = clamp(scalar.value.x, 0.05, 1.0);
+    return mix(history, current, current_weight);
+}
+"#,
+            )),
+        });
+
+        let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("skins-preview-present-shader"),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
+                r#"
+struct FullscreenOut {
+    @builtin(position) pos: vec4<f32>,
+};
+
+@group(0) @binding(0)
+var source_tex: texture_2d<f32>;
+
+@vertex
+fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
+    var out: FullscreenOut;
+    let x = f32((vertex_index << 1u) & 2u);
+    let y = f32(vertex_index & 2u);
+    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let dims = textureDimensions(source_tex);
+    let pixel = clamp(vec2<i32>(pos.xy), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
+    return textureLoad(source_tex, pixel, 0);
+}
+"#,
+            )),
+        });
+
+        let texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skins-preview-post-texture-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    },
+                    count: None,
+                }],
+            });
+        let scene_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skins-preview-post-scene-uniform-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+        let scalar_uniform_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("skins-preview-post-scalar-layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skins-preview-post-scene-uniform-buffer"),
+            size: std::mem::size_of::<GpuPreviewUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skins-preview-post-scene-uniform-bind-group"),
+            layout: &scene_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let scalar_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("skins-preview-post-scalar-uniform-buffer"),
+            size: std::mem::size_of::<GpuPreviewScalarUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let scalar_uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skins-preview-post-scalar-bind-group"),
+            layout: &scalar_uniform_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: scalar_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let scene_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("skins-preview-post-scene-layout"),
+                bind_group_layouts: &[&texture_bind_group_layout, &scene_uniform_layout],
+                push_constant_ranges: &[],
+            });
+        let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-post-scene-pipeline"),
+            layout: Some(&scene_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &scene_shader,
+                entry_point: Some("vs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<GpuPreviewVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32,
+                        2 => Float32x2,
+                        3 => Float32x4
+                    ],
+                }],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &scene_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SKIN_PREVIEW_DEPTH_FORMAT,
+                depth_write_enabled: true,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: scene_msaa_samples.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: scene_msaa_samples > 1,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        let fullscreen_vertex = wgpu::VertexState {
+            module: &accumulate_shader,
+            entry_point: Some("vs_fullscreen"),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            buffers: &[],
+        };
+
+        let accumulate_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-accumulate-layout"),
+            bind_group_layouts: &[&texture_bind_group_layout, &scalar_uniform_layout],
+            push_constant_ranges: &[],
+        });
+        let accumulate_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-accumulate-pipeline"),
+            layout: Some(&accumulate_layout),
+            vertex: fullscreen_vertex.clone(),
+            fragment: Some(wgpu::FragmentState {
+                module: &accumulate_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let smaa_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-smaa-layout"),
+            bind_group_layouts: &[&texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let smaa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-smaa-pipeline"),
+            layout: Some(&smaa_layout),
+            vertex: wgpu::VertexState {
+                module: &smaa_shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &smaa_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let fxaa_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-fxaa-layout"),
+            bind_group_layouts: &[&texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let fxaa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-fxaa-pipeline"),
+            layout: Some(&fxaa_layout),
+            vertex: wgpu::VertexState {
+                module: &fxaa_shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &fxaa_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let taa_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-taa-layout"),
+            bind_group_layouts: &[
+                &texture_bind_group_layout,
+                &texture_bind_group_layout,
+                &scalar_uniform_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+        let taa_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-taa-pipeline"),
+            layout: Some(&taa_layout),
+            vertex: wgpu::VertexState {
+                module: &taa_shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &taa_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: OFFSCREEN_FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
+        let present_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("skins-preview-present-layout"),
+            bind_group_layouts: &[&texture_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+        let present_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("skins-preview-present-pipeline"),
+            layout: Some(&present_layout),
+            vertex: wgpu::VertexState {
+                module: &present_shader,
+                entry_point: Some("vs_fullscreen"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &present_shader,
+                entry_point: Some("fs_main"),
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: target_format,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::One,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: SKIN_PREVIEW_DEPTH_FORMAT,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Always,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: present_msaa_samples.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        let (accumulation_texture, accumulation_view, accumulation_bind_group) =
+            create_preview_render_texture(
+                device,
+                &texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                [1, 1],
+                1,
+                "skins-preview-accumulation",
+            );
+        let (scene_resolve_texture, scene_resolve_view, scene_resolve_bind_group) =
+            create_preview_render_texture(
+                device,
+                &texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                [1, 1],
+                1,
+                "skins-preview-scene-resolve",
+            );
+        let (post_process_texture, post_process_view, post_process_bind_group) =
+            create_preview_render_texture(
+                device,
+                &texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                [1, 1],
+                1,
+                "skins-preview-post-process",
+            );
+        let (taa_history_texture, taa_history_view, taa_history_bind_group) =
+            create_preview_render_texture(
+                device,
+                &texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                [1, 1],
+                1,
+                "skins-preview-taa-history",
+            );
+        let (scene_depth_texture, scene_depth_view) = create_preview_depth_texture(
+            device,
+            [1, 1],
+            scene_msaa_samples.max(1),
+            "skins-preview-scene-depth",
+        );
+        let (scene_msaa_texture, scene_msaa_view) = if scene_msaa_samples > 1 {
+            let (texture, view) = create_preview_color_texture(
+                device,
+                OFFSCREEN_FORMAT,
+                [1, 1],
+                scene_msaa_samples.max(1),
+                "skins-preview-scene-msaa",
+            );
+            (Some(texture), Some(view))
+        } else {
+            (None, None)
+        };
+
+        Self {
+            scene_pipeline,
+            accumulate_pipeline,
+            smaa_pipeline,
+            fxaa_pipeline,
+            taa_pipeline,
+            present_pipeline,
+            texture_bind_group_layout,
+            uniform_bind_group,
+            uniform_buffer,
+            scalar_uniform_bind_group_layout: scalar_uniform_layout,
+            scalar_uniform_bind_group,
+            scalar_uniform_buffer,
+            skin_texture: None,
+            cape_texture: None,
+            accumulation_texture,
+            accumulation_view,
+            accumulation_bind_group,
+            scene_resolve_texture,
+            scene_resolve_view,
+            scene_resolve_bind_group,
+            scene_msaa_texture,
+            scene_msaa_view,
+            scene_depth_texture,
+            scene_depth_view,
+            post_process_texture,
+            post_process_view,
+            post_process_bind_group,
+            taa_history_texture,
+            taa_history_view,
+            taa_history_bind_group,
+            taa_history_valid: false,
+            render_target_size: [1, 1],
+            target_format,
+            scene_msaa_samples: scene_msaa_samples.max(1),
+            present_msaa_samples: present_msaa_samples.max(1),
+            present_source: PresentSource::Accumulation,
+        }
+    }
+
+    fn ensure_render_targets(&mut self, device: &wgpu::Device, size: [u32; 2]) {
+        let size = [size[0].max(1), size[1].max(1)];
+        if self.render_target_size == size {
+            return;
+        }
+        self.render_target_size = size;
+        self.taa_history_valid = false;
+
+        const OFFSCREEN_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+        let (accumulation_texture, accumulation_view, accumulation_bind_group) =
+            create_preview_render_texture(
+                device,
+                &self.texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                size,
+                1,
+                "skins-preview-accumulation",
+            );
+        self.accumulation_texture = accumulation_texture;
+        self.accumulation_view = accumulation_view;
+        self.accumulation_bind_group = accumulation_bind_group;
+
+        let (scene_resolve_texture, scene_resolve_view, scene_resolve_bind_group) =
+            create_preview_render_texture(
+                device,
+                &self.texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                size,
+                1,
+                "skins-preview-scene-resolve",
+            );
+        self.scene_resolve_texture = scene_resolve_texture;
+        self.scene_resolve_view = scene_resolve_view;
+        self.scene_resolve_bind_group = scene_resolve_bind_group;
+
+        let (post_process_texture, post_process_view, post_process_bind_group) =
+            create_preview_render_texture(
+                device,
+                &self.texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                size,
+                1,
+                "skins-preview-post-process",
+            );
+        self.post_process_texture = post_process_texture;
+        self.post_process_view = post_process_view;
+        self.post_process_bind_group = post_process_bind_group;
+
+        let (taa_history_texture, taa_history_view, taa_history_bind_group) =
+            create_preview_render_texture(
+                device,
+                &self.texture_bind_group_layout,
+                OFFSCREEN_FORMAT,
+                size,
+                1,
+                "skins-preview-taa-history",
+            );
+        self.taa_history_texture = taa_history_texture;
+        self.taa_history_view = taa_history_view;
+        self.taa_history_bind_group = taa_history_bind_group;
+
+        let (scene_depth_texture, scene_depth_view) = create_preview_depth_texture(
+            device,
+            size,
+            self.scene_msaa_samples.max(1),
+            "skins-preview-scene-depth",
+        );
+        self.scene_depth_texture = scene_depth_texture;
+        self.scene_depth_view = scene_depth_view;
+
+        if self.scene_msaa_samples > 1 {
+            let (texture, view) = create_preview_color_texture(
+                device,
+                OFFSCREEN_FORMAT,
+                size,
+                self.scene_msaa_samples.max(1),
+                "skins-preview-scene-msaa",
+            );
+            self.scene_msaa_texture = Some(texture);
+            self.scene_msaa_view = Some(view);
+        } else {
+            self.scene_msaa_texture = None;
+            self.scene_msaa_view = None;
+        }
+    }
+
+    fn update_texture(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot: TextureSlot,
+        hash: u64,
+        image: &RgbaImage,
+    ) {
+        let size = [image.width(), image.height()];
+        let target = match slot {
+            TextureSlot::Skin => &mut self.skin_texture,
+            TextureSlot::Cape => &mut self.cape_texture,
+        };
+
+        if target
+            .as_ref()
+            .is_some_and(|uploaded| uploaded.hash == hash && uploaded.size == size)
+        {
+            return;
+        }
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("skins-preview-post-source-texture"),
+            size: wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            image.as_raw(),
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size[0] * 4),
+                rows_per_image: Some(size[1]),
+            },
+            wgpu::Extent3d {
+                width: size[0].max(1),
+                height: size[1].max(1),
+                depth_or_array_layers: 1,
+            },
+        );
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("skins-preview-post-source-bind-group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            }],
+        });
+
+        *target = Some(UploadedPreviewTexture {
+            hash,
+            size,
+            bind_group,
+            _texture: texture,
+        });
+    }
+
+    fn update_scene_uniform(&self, queue: &wgpu::Queue, screen_size_points: [f32; 2]) {
+        let uniform = GpuPreviewUniform {
+            screen_size_points,
+            _pad: [0.0; 2],
+        };
+        queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
+    }
+
+    fn scene_color_attachment(&self, _clear: bool) -> wgpu::RenderPassColorAttachment<'_> {
+        if let Some(view) = self.scene_msaa_view.as_ref() {
+            wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: Some(&self.scene_resolve_view),
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }
+        } else {
+            wgpu::RenderPassColorAttachment {
+                view: &self.scene_resolve_view,
+                resolve_target: None,
+                depth_slice: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            }
+        }
+    }
+
+    fn scene_depth_view(&self) -> &wgpu::TextureView {
+        &self.scene_depth_view
+    }
+
+    fn paint_scene(
+        &self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        batch: &PreparedGpuPreviewSceneBatch,
+    ) {
+        render_pass.set_pipeline(&self.scene_pipeline);
+        render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
+
+        if let Some(texture) = self.skin_texture.as_ref() {
+            render_pass.set_bind_group(0, &texture.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, batch.skin_vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(batch.skin_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..batch.skin_index_count, 0, 0..1);
+        }
+        if let Some(texture) = self.cape_texture.as_ref() {
+            render_pass.set_bind_group(0, &texture.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, batch.cape_vertex_buffer.slice(..));
+            render_pass
+                .set_index_buffer(batch.cape_index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            render_pass.draw_indexed(0..batch.cape_index_count, 0, 0..1);
+        }
+    }
+
+    fn render_target_extent(&self) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width: self.render_target_size[0].max(1),
+            height: self.render_target_size[1].max(1),
+            depth_or_array_layers: 1,
+        }
+    }
+}
+
+fn create_preview_vertex_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    vertices: &[GpuPreviewVertex],
+) -> wgpu::Buffer {
+    if vertices.is_empty() {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: std::mem::size_of::<GpuPreviewVertex>() as u64,
+            usage: wgpu::BufferUsages::VERTEX,
+            mapped_at_creation: false,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    }
+}
+
+fn create_preview_index_buffer(
+    device: &wgpu::Device,
+    label: &'static str,
+    indices: &[u32],
+) -> wgpu::Buffer {
+    if indices.is_empty() {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size: std::mem::size_of::<u32>() as u64,
+            usage: wgpu::BufferUsages::INDEX,
+            mapped_at_creation: false,
+        })
+    } else {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some(label),
+            contents: bytemuck::cast_slice(indices),
+            usage: wgpu::BufferUsages::INDEX,
+        })
+    }
+}
+
+fn create_preview_render_texture(
+    device: &wgpu::Device,
+    layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat,
+    size: [u32; 2],
+    sample_count: u32,
+    label: &'static str,
+) -> (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: sample_count.max(1),
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&view),
+        }],
+    });
+    (texture, view, bind_group)
+}
+
+fn create_preview_color_texture(
+    device: &wgpu::Device,
+    format: wgpu::TextureFormat,
+    size: [u32; 2],
+    sample_count: u32,
+    label: &'static str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: sample_count.max(1),
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+fn create_preview_depth_texture(
+    device: &wgpu::Device,
+    size: [u32; 2],
+    sample_count: u32,
+    label: &'static str,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size[0].max(1),
+            height: size[1].max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: sample_count.max(1),
+        dimension: wgpu::TextureDimension::D2,
+        format: SKIN_PREVIEW_DEPTH_FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    (texture, view)
+}
+
+#[allow(dead_code)]
 struct SkinPreviewWgpuCallback {
     skin_vertices: Vec<GpuPreviewVertex>,
     skin_indices: Vec<u32>,
@@ -1465,6 +3330,7 @@ struct SkinPreviewWgpuCallback {
     msaa_samples: u32,
 }
 
+#[allow(dead_code)]
 impl SkinPreviewWgpuCallback {
     fn from_scene(
         _rect: Rect,
@@ -1643,6 +3509,7 @@ struct UploadedPreviewTexture {
     _texture: wgpu::Texture,
 }
 
+#[allow(dead_code)]
 struct SkinPreviewWgpuResources {
     pipeline: Option<wgpu::RenderPipeline>,
     texture_bind_group_layout: Option<wgpu::BindGroupLayout>,
@@ -1664,6 +3531,7 @@ struct SkinPreviewWgpuResources {
     msaa_samples: u32,
 }
 
+#[allow(dead_code)]
 impl SkinPreviewWgpuResources {
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, msaa_samples: u32) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -2726,6 +4594,14 @@ struct SkinManagerState {
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
     last_preview_aa_mode: SkinPreviewAaMode,
+    preview_motion_blur_enabled: bool,
+    last_preview_motion_blur_enabled: bool,
+    preview_motion_blur_amount: f32,
+    last_preview_motion_blur_amount: f32,
+    preview_motion_blur_shutter_frames: f32,
+    last_preview_motion_blur_shutter_frames: f32,
+    preview_motion_blur_sample_count: usize,
+    last_preview_motion_blur_sample_count: usize,
     skin_texture_hash: Option<u64>,
     skin_texture: Option<TextureHandle>,
     skin_sample: Option<Arc<RgbaImage>>,
@@ -2769,6 +4645,14 @@ impl Default for SkinManagerState {
             preview_msaa_samples: 1,
             preview_aa_mode: SkinPreviewAaMode::Msaa,
             last_preview_aa_mode: SkinPreviewAaMode::Msaa,
+            preview_motion_blur_enabled: false,
+            last_preview_motion_blur_enabled: false,
+            preview_motion_blur_amount: 0.15,
+            last_preview_motion_blur_amount: 0.15,
+            preview_motion_blur_shutter_frames: 0.75,
+            last_preview_motion_blur_shutter_frames: 0.75,
+            preview_motion_blur_sample_count: 5,
+            last_preview_motion_blur_sample_count: 5,
             skin_texture_hash: None,
             skin_texture: None,
             skin_sample: None,

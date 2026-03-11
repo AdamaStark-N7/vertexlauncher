@@ -1,5 +1,5 @@
 use config::{
-    Config, DOWNLOAD_CONCURRENCY_MAX, DOWNLOAD_CONCURRENCY_MIN, DropdownSettingId,
+    Config, DOWNLOAD_CONCURRENCY_MAX, DOWNLOAD_CONCURRENCY_MIN, DropdownSettingId, FloatSettingId,
     INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
     JavaRuntimeVersion, SkinPreviewAaMode, UiFontFamily, parse_bitrate_to_bps,
 };
@@ -66,9 +66,10 @@ fn render_settings_contents(
     render_settings_section(
         ui,
         text_ui,
-        "Performance",
-        "GPU, frame pacing, and download throughput behavior.",
+        "Graphics & Performance",
+        "GPU, skin preview rendering, frame pacing, and download throughput behavior.",
         |ui, text_ui| {
+            render_skin_preview_motion_blur_settings(ui, text_ui, config);
             render_selected_toggles(
                 ui,
                 text_ui,
@@ -210,6 +211,13 @@ fn render_ui_font_settings(
     });
 
     config.for_each_float_mut(|setting, value| {
+        if matches!(
+            setting.id,
+            FloatSettingId::SkinPreviewMotionBlurAmount
+                | FloatSettingId::SkinPreviewMotionBlurShutterFrames
+        ) {
+            return;
+        }
         ui.push_id(setting.id, |ui| {
             settings_widgets::float_stepper_row(
                 text_ui,
@@ -243,9 +251,7 @@ fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut C
         ui,
         "skins_preview_aa_mode",
         "Skin Preview Anti-Aliasing",
-        Some(
-            "MSAA uses GPU hardware; FXAA and TAA are post-process modes. Changes apply immediately.",
-        ),
+        Some("MSAA, SMAA, FXAA, and TAA all run on the GPU. Changes apply immediately."),
         &mut selected,
         &labels,
     );
@@ -253,6 +259,96 @@ fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut C
         if let Some(next) = SkinPreviewAaMode::ALL.get(selected).copied() {
             config.set_skin_preview_aa_mode(next);
         }
+    }
+
+    ui.add_space(style::SPACE_MD);
+}
+
+fn render_skin_preview_motion_blur_settings(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    config: &mut Config,
+) {
+    let mut enabled = config.skin_preview_motion_blur_enabled();
+    let response = settings_widgets::toggle_row(
+        text_ui,
+        ui,
+        "Enable Skin Preview Motion Blur",
+        Some(
+            "Uses multi-sample temporal shutter accumulation in the 3D skin preview. Applies immediately.",
+        ),
+        &mut enabled,
+    );
+    if response.changed() {
+        config.set_skin_preview_motion_blur_enabled(enabled);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    if !config.skin_preview_motion_blur_enabled() {
+        return;
+    }
+
+    let spec = FloatSettingId::SkinPreviewMotionBlurAmount.spec();
+    let mut amount = config.skin_preview_motion_blur_amount();
+
+    let response = settings_widgets::float_slider_row(
+        text_ui,
+        ui,
+        spec.id,
+        spec.label,
+        Some(
+            "Longer shutter intervals produce stronger blur but more trailing. Best paired with SMAA, FXAA, or TAA.",
+        ),
+        &mut amount,
+        spec.min,
+        spec.max,
+        true,
+    );
+
+    if response.changed()
+        || (amount - config.skin_preview_motion_blur_amount()).abs() > f32::EPSILON
+    {
+        config.set_skin_preview_motion_blur_amount(amount);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    let shutter_spec = FloatSettingId::SkinPreviewMotionBlurShutterFrames.spec();
+    let mut shutter_frames = config.skin_preview_motion_blur_shutter_frames();
+    let shutter_response = settings_widgets::float_stepper_row(
+        text_ui,
+        ui,
+        shutter_spec.id,
+        shutter_spec.label,
+        Some(
+            "Total shutter interval measured in 60 FPS frames. Higher values create longer streaks.",
+        ),
+        &mut shutter_frames,
+        shutter_spec.min,
+        shutter_spec.max,
+        shutter_spec.step,
+    );
+    if shutter_response.changed()
+        || (shutter_frames - config.skin_preview_motion_blur_shutter_frames()).abs() > f32::EPSILON
+    {
+        config.set_skin_preview_motion_blur_shutter_frames(shutter_frames);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    let sample_spec = IntSettingId::SkinPreviewMotionBlurSampleCount.spec();
+    let mut sample_count = config.skin_preview_motion_blur_sample_count();
+    let sample_response = settings_widgets::int_stepper_row(
+        text_ui,
+        ui,
+        sample_spec.id,
+        sample_spec.label,
+        Some("Higher sample counts smooth the blur at the cost of more GPU work in the preview."),
+        &mut sample_count,
+        sample_spec.min,
+        sample_spec.max,
+        sample_spec.step,
+    );
+    if sample_response.changed() || sample_count != config.skin_preview_motion_blur_sample_count() {
+        config.set_skin_preview_motion_blur_sample_count(sample_count);
     }
     ui.add_space(style::SPACE_MD);
 }

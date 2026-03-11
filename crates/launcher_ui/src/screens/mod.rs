@@ -180,6 +180,10 @@ pub fn render(
                 wgpu_target_format,
                 skin_preview_msaa_samples,
                 config.skin_preview_aa_mode(),
+                config.skin_preview_motion_blur_enabled(),
+                config.skin_preview_motion_blur_amount(),
+                config.skin_preview_motion_blur_shutter_frames(),
+                config.skin_preview_motion_blur_sample_count(),
             );
             ScreenOutput::default()
         }

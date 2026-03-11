@@ -728,6 +728,131 @@ pub fn u128_slider_with_input_row(
     row_response
 }
 
+pub fn float_slider_row(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    label: &str,
+    info_tooltip: Option<&str>,
+    value: &mut f32,
+    min: f32,
+    max: f32,
+    show_percentage: bool,
+) -> Response {
+    let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
+    let full_width = ui.available_width().max(1.0);
+    let id = ui.make_persistent_id(id_source).with("float_slider");
+
+    *value = value.clamp(min, max);
+
+    let row_response = ui
+        .vertical(|ui| {
+            ui.set_min_width(full_width);
+            let label_response = ui
+                .horizontal(|ui| {
+                    let label_response =
+                        text_ui.label(ui, ("float_slider_label", label), label, &label_options);
+                    if info_tooltip.is_some() {
+                        ui.add_space(6.0);
+                        info_hint(text_ui, ui, ("float_slider_info", label), info_tooltip);
+                    }
+                    label_response
+                })
+                .inner;
+
+            let controls_response = ui
+                .vertical(|ui| {
+                    ui.set_min_width(full_width);
+
+                    let slider_outer_height = metrics.control_height + 12.0;
+                    let (slider_outer_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(full_width, slider_outer_height),
+                        Sense::hover(),
+                    );
+
+                    let slider_inner_rect = slider_outer_rect.shrink2(egui::vec2(8.0, 6.0));
+                    let mut slider_response =
+                        ui.interact(slider_inner_rect, id, Sense::click_and_drag());
+
+                    if (slider_response.dragged() || slider_response.clicked())
+                        && let Some(pointer_pos) = ui.ctx().input(|i| i.pointer.interact_pos())
+                    {
+                        let slider_width = slider_inner_rect.width().max(1.0);
+                        let t = ((pointer_pos.x - slider_inner_rect.left()) / slider_width)
+                            .clamp(0.0, 1.0);
+                        let next = egui::lerp(min..=max, t).clamp(min, max);
+                        if (next - *value).abs() > f32::EPSILON {
+                            *value = next;
+                            slider_response.mark_changed();
+                        }
+                    }
+
+                    let progress = if max > min {
+                        (*value - min) / (max - min)
+                    } else {
+                        0.0
+                    }
+                    .clamp(0.0, 1.0);
+
+                    let rail_height = (slider_inner_rect.height() * 0.22).clamp(3.0, 8.0);
+                    let rail_rect = egui::Rect::from_center_size(
+                        slider_inner_rect.center(),
+                        egui::vec2(slider_inner_rect.width(), rail_height),
+                    );
+                    let active_width = rail_rect.width() * progress;
+                    let active_rect = egui::Rect::from_min_size(
+                        rail_rect.min,
+                        egui::vec2(active_width, rail_rect.height()),
+                    );
+                    let knob_x = rail_rect.left() + active_width;
+                    let knob_center = egui::pos2(knob_x, rail_rect.center().y);
+                    let knob_radius = (slider_inner_rect.height() * 0.34).clamp(6.0, 11.0);
+
+                    ui.painter().rect(
+                        rail_rect,
+                        egui::CornerRadius::same((rail_height * 0.5).round() as u8),
+                        ui.visuals().widgets.inactive.bg_fill,
+                        ui.visuals().widgets.inactive.bg_stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().rect(
+                        active_rect,
+                        egui::CornerRadius::same((rail_height * 0.5).round() as u8),
+                        ui.visuals().selection.bg_fill,
+                        egui::Stroke::NONE,
+                        egui::StrokeKind::Inside,
+                    );
+                    ui.painter().circle(
+                        knob_center,
+                        knob_radius,
+                        ui.visuals().widgets.noninteractive.fg_stroke.color,
+                        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+                    );
+
+                    let value_text = if show_percentage {
+                        format!("{:.0}%", *value * 100.0)
+                    } else {
+                        format_float(*value)
+                    };
+                    let mut value_style = row_label_options(ui);
+                    value_style.wrap = false;
+                    value_style.color = ui.visuals().weak_text_color();
+                    let value_response = ui.horizontal(|ui| {
+                        text_ui.label(ui, ("float_slider_value", label), &value_text, &value_style)
+                    });
+
+                    slider_response.union(value_response.inner)
+                })
+                .inner;
+
+            label_response.union(controls_response)
+        })
+        .inner;
+
+    row_response
+}
+
 pub fn info_hint(
     text_ui: &mut TextUi,
     ui: &mut Ui,
