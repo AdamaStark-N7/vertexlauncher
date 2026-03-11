@@ -7,11 +7,29 @@ use crate::error::AuthError;
 use crate::secret_store;
 use crate::types::{CachedAccount, CachedAccountsState};
 
+enum AccountsStateLocation {
+    Disk,
+    SecureStore,
+}
+
 #[track_caller]
 fn fs_read_to_string(path: impl AsRef<Path>) -> Result<String, AuthError> {
     let path = path.as_ref();
     tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
     Ok(fs::read_to_string(path)?)
+}
+
+#[track_caller]
+fn fs_write_string(path: impl AsRef<Path>, contents: &str) -> Result<(), AuthError> {
+    let path = path.as_ref();
+    tracing::debug!(target: "vertexlauncher/io", op = "write_string", path = %path.display());
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(fs::write(path, contents)?)
 }
 
 #[track_caller]
@@ -23,14 +41,14 @@ fn fs_remove_file(path: impl AsRef<Path>) -> Result<(), AuthError> {
 
 pub(crate) fn load_cached_accounts() -> Result<CachedAccountsState, AuthError> {
     let path = account_cache_path();
-    migrate_legacy_disk_cache_to_secure_storage(&path)?;
+    migrate_secure_accounts_state_to_disk(&path)?;
 
-    match secret_store::load_accounts_state()? {
-        Some(contents) => parse_cached_accounts_state(contents.as_str()),
+    match load_cached_accounts_state_contents(&path)? {
+        Some((contents, _)) => parse_cached_accounts_state(contents.as_str()),
         None => {
             tracing::debug!(
                 target: "vertexlauncher/auth/cache",
-                "secure cached accounts state missing; using empty cache"
+                "cached accounts state missing; using empty cache"
             );
             Ok(CachedAccountsState::default())
         }
@@ -39,8 +57,7 @@ pub(crate) fn load_cached_accounts() -> Result<CachedAccountsState, AuthError> {
 
 pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), AuthError> {
     let path = account_cache_path();
-    migrate_legacy_disk_cache_to_secure_storage(&path)?;
-    let previous_profile_ids = load_cached_profile_ids_from_secure_storage()?;
+    let previous_profile_ids = load_cached_profile_ids_from_persisted_storage(&path)?;
     let mut normalized = state.clone().normalize();
     let current_profile_ids = normalized
         .accounts
@@ -53,11 +70,11 @@ pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), Au
         sanitize_cached_profile(account);
     }
     let json = serde_json::to_string(&normalized)?;
-    secret_store::store_accounts_state(&json)?;
-
-    if path.exists() {
-        let _ = fs_remove_file(&path);
+    fs_write_string(&path, &json)?;
+    if path != Path::new(LEGACY_ACCOUNT_CACHE_PATH) {
+        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
     }
+    let _ = secret_store::delete_accounts_state();
 
     for profile_id in previous_profile_ids {
         if !current_profile_ids
@@ -73,12 +90,11 @@ pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), Au
 
 pub(crate) fn clear_cached_accounts() -> Result<(), AuthError> {
     let path = account_cache_path();
-    let previous_profile_ids = load_cached_profile_ids_from_secure_storage()?;
+    let previous_profile_ids = load_cached_profile_ids_from_persisted_storage(&path)?;
 
-    if path.exists() {
-        let _ = fs_remove_file(path);
-    }
-    secret_store::delete_accounts_state()?;
+    remove_legacy_account_cache_file(&path);
+    remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+    let _ = secret_store::delete_accounts_state();
 
     for profile_id in previous_profile_ids {
         secret_store::delete_refresh_token(&profile_id)?;
@@ -165,38 +181,30 @@ fn default_account_cache_path() -> PathBuf {
     PathBuf::from(ACCOUNT_CACHE_FILENAME)
 }
 
-fn migrate_legacy_disk_cache_to_secure_storage(target_path: &Path) -> Result<(), AuthError> {
-    if secret_store::load_accounts_state()?.is_some() {
-        remove_legacy_account_cache_file(target_path);
-        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
-        return Ok(());
-    }
-
-    let Some(state) = load_cached_accounts_state_from_disk(target_path)? else {
-        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+fn migrate_secure_accounts_state_to_disk(target_path: &Path) -> Result<(), AuthError> {
+    let Some(contents) = secret_store::load_accounts_state()? else {
         return Ok(());
     };
 
-    let mut normalized = state.normalize();
-    for account in &mut normalized.accounts {
-        persist_refresh_token(account)?;
-        sanitize_cached_profile(account);
+    if target_path.exists() {
+        let _ = secret_store::delete_accounts_state();
+        return Ok(());
     }
-    let serialized = serde_json::to_string(&normalized)?;
-    secret_store::store_accounts_state(&serialized)?;
 
-    remove_legacy_account_cache_file(target_path);
-    remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+    let state = parse_cached_accounts_state(contents.as_str())?;
+    save_cached_accounts(&state)?;
+    secret_store::delete_accounts_state()?;
     tracing::info!(
         target: "vertexlauncher/auth/cache",
-        "migrated cached account metadata from disk into secure storage"
+        path = %target_path.display(),
+        "migrated cached account metadata from secure storage to disk"
     );
     Ok(())
 }
 
-fn load_cached_accounts_state_from_disk(
+fn load_cached_accounts_state_contents(
     path: &Path,
-) -> Result<Option<CachedAccountsState>, AuthError> {
+) -> Result<Option<(String, AccountsStateLocation)>, AuthError> {
     let candidate_paths = if path == Path::new(LEGACY_ACCOUNT_CACHE_PATH) {
         vec![path.to_path_buf()]
     } else {
@@ -207,19 +215,14 @@ fn load_cached_accounts_state_from_disk(
         if !candidate.exists() {
             continue;
         }
-        let contents = fs_read_to_string(&candidate)?;
-        if let Ok(state) = serde_json::from_str::<CachedAccountsState>(&contents) {
-            return Ok(Some(state));
-        }
-        if let Ok(single_account) = serde_json::from_str::<CachedAccount>(&contents) {
-            tracing::info!(
-                target: "vertexlauncher/auth/cache",
-                "migrated single-account cache format into multi-account state"
-            );
-            let mut state = CachedAccountsState::default();
-            state.upsert_and_activate(single_account);
-            return Ok(Some(state));
-        }
+        return Ok(Some((
+            fs_read_to_string(&candidate)?,
+            AccountsStateLocation::Disk,
+        )));
+    }
+
+    if let Some(contents) = secret_store::load_accounts_state()? {
+        return Ok(Some((contents, AccountsStateLocation::SecureStore)));
     }
 
     Ok(None)
@@ -248,15 +251,15 @@ fn parse_cached_accounts_state(contents: &str) -> Result<CachedAccountsState, Au
             tracing::warn!(
                 target: "vertexlauncher/auth/cache",
                 error = %state_error,
-                "failed to parse secure cached accounts state"
+                "failed to parse cached accounts state"
             );
             Err(AuthError::Json(state_error))
         }
     }
 }
 
-fn load_cached_profile_ids_from_secure_storage() -> Result<Vec<String>, AuthError> {
-    let Some(contents) = secret_store::load_accounts_state()? else {
+fn load_cached_profile_ids_from_persisted_storage(path: &Path) -> Result<Vec<String>, AuthError> {
+    let Some((contents, _)) = load_cached_accounts_state_contents(path)? else {
         return Ok(Vec::new());
     };
     if let Ok(state) = serde_json::from_str::<CachedAccountsState>(&contents) {
@@ -279,10 +282,12 @@ fn load_cached_profile_ids_from_secure_storage() -> Result<Vec<String>, AuthErro
 }
 
 fn sanitize_cached_profile(account: &mut CachedAccount) {
-    // Runtime access tokens stay in memory only, and refresh tokens are
+    // Secrets and account-scoped auth identifiers do not belong in metadata
+    // cache files. Access tokens stay in memory only, and refresh tokens are
     // persisted separately in OS-backed secure storage.
     account.minecraft_access_token = None;
     account.microsoft_refresh_token = None;
+    account.xuid = None;
 
     // Keep lightweight identity/profile metadata only; avoid stale or heavy
     // texture payloads in the on-disk cache.
@@ -340,26 +345,68 @@ fn persist_refresh_token(account: &mut CachedAccount) -> Result<(), AuthError> {
         .map(str::trim)
         .filter(|token| !token.is_empty())
     {
-        Some(token) => {
-            secret_store::store_refresh_token(profile_id, token)?;
-            let stored_token = secret_store::load_refresh_token(profile_id)?;
-            let stored = stored_token
-                .as_deref()
-                .map(str::trim)
-                .filter(|stored| !stored.is_empty())
-                .ok_or_else(|| {
-                    AuthError::SecureStorage(format!(
-                        "Refresh token for profile '{profile_id}' was written to secure storage but could not be reloaded."
-                    ))
-                })?;
-            if stored != token {
-                return Err(AuthError::SecureStorage(format!(
-                    "Refresh token for profile '{profile_id}' did not round-trip correctly through secure storage."
-                )));
-            }
-        }
+        Some(token) => secret_store::store_refresh_token(profile_id, token)?,
         None => secret_store::delete_refresh_token(profile_id)?,
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_cached_profile;
+    use crate::types::{
+        CachedAccount, MinecraftCapeState, MinecraftProfileState, MinecraftSkinState,
+    };
+
+    #[test]
+    fn sanitize_cached_profile_removes_sensitive_fields() {
+        let mut account = CachedAccount {
+            minecraft_profile: MinecraftProfileState {
+                id: "profile-id".to_owned(),
+                name: "Player".to_owned(),
+                skins: vec![MinecraftSkinState {
+                    id: "skin-id".to_owned(),
+                    state: "active".to_owned(),
+                    url: "https://example.invalid/skin".to_owned(),
+                    variant: Some("classic".to_owned()),
+                    alias: Some("Default".to_owned()),
+                    texture_png_base64: Some("skin-bytes".to_owned()),
+                }],
+                capes: vec![MinecraftCapeState {
+                    id: "cape-id".to_owned(),
+                    state: "active".to_owned(),
+                    url: "https://example.invalid/cape".to_owned(),
+                    alias: Some("Cape".to_owned()),
+                    texture_png_base64: Some("cape-bytes".to_owned()),
+                }],
+            },
+            minecraft_access_token: Some("minecraft-access-token".to_owned()),
+            microsoft_refresh_token: Some("microsoft-refresh-token".to_owned()),
+            xuid: Some("xuid-value".to_owned()),
+            user_type: Some("msa".to_owned()),
+            avatar_png_base64: Some("avatar-bytes".to_owned()),
+            avatar_source_skin_url: Some("https://example.invalid/avatar".to_owned()),
+            cached_at_unix_secs: 123,
+        };
+
+        sanitize_cached_profile(&mut account);
+
+        assert!(account.minecraft_access_token.is_none());
+        assert!(account.microsoft_refresh_token.is_none());
+        assert!(account.xuid.is_none());
+        assert_eq!(account.user_type.as_deref(), Some("msa"));
+        assert_eq!(
+            account.avatar_source_skin_url.as_deref(),
+            Some("https://example.invalid/avatar")
+        );
+        assert!(account.minecraft_profile.skins.is_empty());
+        assert_eq!(account.minecraft_profile.capes.len(), 1);
+        assert!(account.minecraft_profile.capes[0].state.is_empty());
+        assert!(
+            account.minecraft_profile.capes[0]
+                .texture_png_base64
+                .is_none()
+        );
+    }
 }

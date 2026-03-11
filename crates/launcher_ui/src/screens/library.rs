@@ -9,9 +9,9 @@ use std::{
 use config::{Config, JavaRuntimeVersion};
 use egui::Ui;
 use installation::{
-    DownloadPolicy, LaunchRequest, LaunchResult, ensure_game_files, ensure_openjdk_runtime,
-    is_instance_running, is_instance_running_for_account, launch_instance,
-    running_instance_for_account, stop_running_instance_for_account,
+    DownloadPolicy, LaunchRequest, LaunchResult, display_user_path, ensure_game_files,
+    ensure_openjdk_runtime, is_instance_running, is_instance_running_for_account, launch_instance,
+    normalize_path_key, running_instance_for_account, stop_running_instance_for_account,
 };
 use instances::{
     InstanceRecord, InstanceStore, delete_instance, instance_root_path,
@@ -126,10 +126,7 @@ pub fn render(
                         .as_deref()
                         .and_then(|key| account_avatars_by_key.get(key))
                         .map(Vec::as_slice);
-                    let instance_root_key = std::fs::canonicalize(instance_root.as_path())
-                        .unwrap_or_else(|_| instance_root.clone())
-                        .display()
-                        .to_string();
+                    let instance_root_key = normalize_path_key(instance_root.as_path());
                     let account_running_root = launch_account
                         .as_deref()
                         .and_then(running_instance_for_account);
@@ -937,7 +934,7 @@ fn request_runtime_launch(
         .as_deref()
         .and_then(normalize_optional)
         .or_else(|| normalize_optional(config.default_instance_cli_args()));
-    let instance_root_display = instance_root.display().to_string();
+    let instance_root_display = display_user_path(instance_root.as_path());
     let tab_user_key = player_uuid
         .as_deref()
         .or(launch_account_name.as_deref())
@@ -1003,7 +1000,7 @@ fn request_runtime_launch(
                 let installed = ensure_openjdk_runtime(runtime_major).map_err(|err| {
                     format!("failed to auto-install OpenJDK {runtime_major}: {err}")
                 })?;
-                let installed = installed.display().to_string();
+                let installed = display_user_path(installed.as_path());
                 configured_java = Some((runtime_major, installed.clone()));
                 installed
             } else {

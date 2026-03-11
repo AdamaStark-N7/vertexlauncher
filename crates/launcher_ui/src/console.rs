@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-use installation::{is_instance_running, stop_running_instance};
+use installation::{is_instance_running, normalize_path_key, stop_running_instance};
 
 const MAX_CONSOLE_LINES: usize = 4000;
 const DEFAULT_TAB_ID: &str = "vertexlauncher";
@@ -434,9 +434,7 @@ fn normalize_instance_root_key(value: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let path = Path::new(trimmed);
-    let normalized = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-    Some(normalized.display().to_string())
+    Some(normalize_path_key(Path::new(trimmed)))
 }
 
 fn normalize_tab_user_identity(value: Option<&str>) -> Option<String> {

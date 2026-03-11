@@ -7,7 +7,8 @@ use auth::{CachedAccount, CachedAccountsState};
 use config::{Config, JavaRuntimeVersion, LoadConfigResult, load_config};
 use flate2::read::GzDecoder;
 use installation::{
-    DownloadPolicy, LaunchRequest, ensure_game_files, ensure_openjdk_runtime, launch_instance,
+    DownloadPolicy, LaunchRequest, display_user_path, ensure_game_files, ensure_openjdk_runtime,
+    launch_instance,
 };
 use instances::{
     InstanceRecord, InstanceStore, instance_root_path, load_store, record_instance_launch_usage,
@@ -196,7 +197,7 @@ fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
         launch.profile_id,
         setup.downloaded_files,
         setup.resolved_modloader_version.as_deref().unwrap_or("n/a"),
-        launch.launch_log_path.display()
+        display_user_path(launch.launch_log_path.as_path())
     );
     Ok(())
 }

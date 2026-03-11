@@ -7,8 +7,9 @@ use egui::Ui;
 use installation::{
     DownloadPolicy, GameSetupResult, InstallProgress, InstallProgressCallback, InstallStage,
     LaunchRequest, LaunchResult, LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry,
-    VersionCatalog, ensure_game_files, ensure_openjdk_runtime, fetch_loader_versions_for_game,
-    fetch_version_catalog_with_refresh, is_instance_running_for_account, launch_instance,
+    VersionCatalog, display_user_path, ensure_game_files, ensure_openjdk_runtime,
+    fetch_loader_versions_for_game, fetch_version_catalog_with_refresh,
+    is_instance_running_for_account, launch_instance, normalize_path_key,
     running_instance_for_account, stop_running_instance_for_account,
 };
 use instances::{
@@ -2437,10 +2438,7 @@ fn render_runtime_row(
     let mut muted_style = LabelOptions::default();
     muted_style.color = ui.visuals().weak_text_color();
     muted_style.wrap = false;
-    let instance_root_key = std::fs::canonicalize(instance_root)
-        .unwrap_or_else(|_| instance_root.to_path_buf())
-        .display()
-        .to_string();
+    let instance_root_key = normalize_path_key(instance_root);
     let launch_account = active_launch_auth
         .map(|auth| auth.account_key.clone())
         .or_else(|| {
@@ -3692,7 +3690,7 @@ fn request_runtime_prepare(
             format!("Reinstalling Minecraft {game_version} profile...")
         }
     });
-    let instance_root_display = instance_root.display().to_string();
+    let instance_root_display = display_user_path(instance_root.as_path());
     state.runtime_prepare_instance_root = Some(instance_root_display.clone());
     let game_version_for_task = game_version.clone();
     let game_version_for_result = game_version.clone();
@@ -3803,7 +3801,7 @@ fn request_runtime_prepare(
                 let installed = ensure_openjdk_runtime(runtime_major).map_err(|err| {
                     format!("failed to auto-install OpenJDK {runtime_major}: {err}")
                 })?;
-                let installed = installed.display().to_string();
+                let installed = display_user_path(installed.as_path());
                 configured_java = Some((runtime_major, installed.clone()));
                 installed
             } else {

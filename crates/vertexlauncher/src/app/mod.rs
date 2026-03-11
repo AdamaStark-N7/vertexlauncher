@@ -5,8 +5,9 @@ use config::{
 use eframe::{self, egui};
 use egui::CentralPanel;
 use installation::{
-    DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, ensure_game_files,
-    ensure_openjdk_runtime, running_instance_for_account, running_instance_roots,
+    DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, display_user_path,
+    ensure_game_files, ensure_openjdk_runtime, running_instance_for_account,
+    running_instance_roots,
 };
 use instances::{
     InstanceRecord, InstanceStore, create_instance, instance_root_path, load_store,
@@ -733,7 +734,7 @@ fn start_initial_instance_install(
                     runtime.and_then(|runtime| {
                         ensure_openjdk_runtime(runtime.major())
                             .ok()
-                            .map(|path| path.display().to_string())
+                            .map(|path| display_user_path(path.as_path()))
                     })
                 })
                 .unwrap_or_else(|| "java".to_owned());

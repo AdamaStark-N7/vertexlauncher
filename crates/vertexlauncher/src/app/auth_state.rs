@@ -841,12 +841,14 @@ fn is_nonfatal_account_cache_error(error_text: &str) -> bool {
     let lowered = error_text.to_ascii_lowercase();
     let mentions_secure_storage = lowered.contains("secure storage")
         || lowered.contains("platform secure storage")
+        || lowered.contains("couldn't access platform secure storage")
         || lowered.contains("secret service")
         || lowered.contains("org/freedesktop/secrets");
     let likely_session_bus_issue = lowered.contains("can't find session")
         || lowered.contains("dbus error")
         || lowered.contains("no such object path")
-        || lowered.contains("no such interface");
+        || lowered.contains("no such interface")
+        || lowered.contains("windows error_no_such_logon_session");
     mentions_secure_storage && likely_session_bus_issue
 }
 
@@ -874,6 +876,14 @@ error: Can't find session /org/freedesktop/secrets/session/654";
     fn marks_secret_service_object_path_failures_as_nonfatal() {
         let message = "Failed to cache account state: Platform secure storage failure: Secret \
 Service response error: No such object path '/org/freedesktop/secrets/collection/login'";
+        assert!(is_nonfatal_account_cache_error(message));
+    }
+
+    #[test]
+    fn marks_windows_secure_storage_session_failures_as_nonfatal() {
+        let message = "Sign-in succeeded, but failed to cache account state: Secure storage error: \
+Failed to store cached accounts state in secure storage: Couldn't access platform secure storage: \
+Windows ERROR_NO_SUCH_LOGON_SESSION";
         assert!(is_nonfatal_account_cache_error(message));
     }
 

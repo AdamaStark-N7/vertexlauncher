@@ -34,6 +34,30 @@ const HTTP_RETRY_BASE_DELAY_MS: u64 = 350;
 const OPENJDK_USER_AGENT: &str =
     "VertexLauncher-JavaProvisioner/0.1 (+https://github.com/SturdyFool10/vertexlauncher)";
 
+pub fn display_user_path(path: &Path) -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let raw = path.as_os_str().to_string_lossy();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\UNC\") {
+            return format!(r"\\{stripped}");
+        }
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return stripped.to_owned();
+        }
+        return raw.into_owned();
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        path.as_os_str().to_string_lossy().into_owned()
+    }
+}
+
+pub fn normalize_path_key(path: &Path) -> String {
+    let normalized = fs_canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    display_user_path(normalized.as_path())
+}
+
 #[track_caller]
 fn fs_create_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
     let path = path.as_ref();
@@ -773,7 +797,7 @@ fn process_registry() -> &'static Mutex<HashMap<String, Vec<RunningInstanceProce
 pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, InstallationError> {
     let instance_root = fs_canonicalize(request.instance_root.as_path())
         .unwrap_or_else(|_| request.instance_root.clone());
-    let instance_key = instance_root.display().to_string();
+    let instance_key = normalize_path_key(instance_root.as_path());
     let requested_account = normalize_account_key(request.account_key.as_deref());
     if let Ok(mut processes) = process_registry().lock() {
         prune_finished_processes(&mut processes);
@@ -850,13 +874,13 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
     )?;
     let classpath = join_classpath(&classpath_entries);
     let (mut launch_log_file, launch_log_path) = prepare_launch_log_file(instance_root.as_path())?;
-    let launch_log_for_error = launch_log_path.display().to_string();
+    let launch_log_for_error = display_user_path(launch_log_path.as_path());
     let _ = writeln!(
         launch_log_file,
         "[vertexlauncher] Launching Minecraft {} with profile {} in {}",
         request.game_version,
         profile_id,
-        instance_root.display()
+        display_user_path(instance_root.as_path())
     );
     let stderr_log = launch_log_file.try_clone()?;
 
@@ -921,7 +945,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
     let pid = child.id();
     if let Ok(mut processes) = process_registry().lock() {
         processes
-            .entry(instance_root.display().to_string())
+            .entry(instance_key.clone())
             .or_default()
             .push(RunningInstanceProcess {
                 child,
