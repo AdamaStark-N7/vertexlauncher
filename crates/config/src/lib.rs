@@ -1317,9 +1317,11 @@ fn construct_new_config(path: &str, conf: &Config) -> Result<(), IOError> {
 
     match format {
         ConfigFormat::Json => {
+            let value =
+                serde_json::to_string_pretty(conf).map_err(|e| IOError::other(e.to_string()))?;
             tracing::debug!(target: "vertexlauncher/io", op = "file_create", path = %path, context = "save config json");
-            serde_json::to_writer(std::fs::File::create(path)?, conf)
-                .map_err(|e| IOError::other(e.to_string()))?;
+            let mut file = std::fs::File::create(path)?;
+            file.write_all(value.as_bytes())?;
         }
         ConfigFormat::Toml => {
             let value = toml::to_string_pretty(conf).map_err(|e| IOError::other(e.to_string()))?;
