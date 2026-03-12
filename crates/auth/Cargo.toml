@@ -9,7 +9,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 image.workspace = true
 base64 = "*"
-ureq = { version = "*", features = ["json"] }
+ureq.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 runtime_bootstrap.workspace = true

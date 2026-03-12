@@ -28,7 +28,7 @@ curseforge.workspace = true
 rfd = "*"
 image.workspace = true
 flate2 = "*"
-ureq = { version = "*", features = ["json"] }
+ureq.workspace = true
 tar = "*"
 xz2 = "*"
 zip = { version = "*", default-features = false, features = ["deflate"] }

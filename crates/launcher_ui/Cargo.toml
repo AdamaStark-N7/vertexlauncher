@@ -23,7 +23,7 @@ auth.workspace = true
 image.workspace = true
 rfd = "*"
 bytemuck = { version = "*", features = ["derive"] }
-ureq = { version = "*", features = ["json"] }
+ureq.workspace = true
 flate2 = "*"
 base64 = "*"
 tar = "*"
