@@ -18,7 +18,7 @@ fn main() {
 
 fn emit_version_metadata() {
     let package_version =
-        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.0-alpha".to_owned());
+        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.1-alpha".to_owned());
     let display_version = format_display_version(&package_version);
     println!("cargo:rustc-env=VERTEX_APP_VERSION={display_version}");
 
@@ -35,6 +35,7 @@ fn format_display_version(package_version: &str) -> String {
     let mut release_parts = release.split('.');
     let major = release_parts.next().unwrap_or("0");
     let minor = release_parts.next().unwrap_or("0");
+    let patch = release_parts.next().unwrap_or("0");
 
     let prerelease = package_version
         .split_once('-')
@@ -48,7 +49,7 @@ fn format_display_version(package_version: &str) -> String {
         _ => "",
     };
 
-    format!("{major}.{minor}{channel}")
+    format!("{major}.{minor}.{patch}{channel}")
 }
 
 fn locate_git_dir() -> Option<PathBuf> {
