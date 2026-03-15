@@ -44,6 +44,18 @@ enum AuthFlowEvent {
     Failed(String),
 }
 
+enum RenewalResult {
+    Bulk {
+        result: Result<CachedAccountsState, String>,
+        failed_account_errors: HashMap<String, String>,
+        succeeded_profile_ids: HashSet<String>,
+    },
+    Single {
+        profile_id: String,
+        result: Result<CachedAccountsState, String>,
+    },
+}
+
 struct AvatarLoadResult {
     profile_id: String,
     avatar_png: Option<Vec<u8>>,
@@ -72,12 +84,13 @@ pub struct LaunchAuthContext {
 pub struct AuthState {
     accounts_state: CachedAccountsState,
     account_avatars: HashMap<String, Vec<u8>>,
+    failed_account_errors: HashMap<String, String>,
     avatar_result_tx: Sender<AvatarLoadResult>,
     avatar_result_rx: Receiver<AvatarLoadResult>,
     avatar_loads_in_flight: HashSet<String>,
     active_avatar_png: Option<Vec<u8>>,
     flow: Option<Receiver<AuthFlowEvent>>,
-    renewal: Option<Receiver<Result<CachedAccountsState, String>>>,
+    renewal: Option<Receiver<RenewalResult>>,
     streamer_mode: bool,
     status: AuthUiStatus,
 }
@@ -98,6 +111,7 @@ impl AuthState {
         let mut auth_state = Self {
             accounts_state,
             account_avatars,
+            failed_account_errors: HashMap::new(),
             avatar_result_tx,
             avatar_result_rx,
             avatar_loads_in_flight: HashSet::new(),
@@ -131,43 +145,89 @@ impl AuthState {
 
         if let Some(renewal) = self.renewal.as_mut() {
             match renewal.try_recv() {
-                Ok(Ok(renewed)) => {
-                    let active_refresh =
-                        matches!(self.status, AuthUiStatus::RefreshingActiveSession);
-                    self.apply_accounts_state(renewed, true);
-                    let refreshed_has_token = self
-                        .accounts_state
-                        .active_account()
-                        .and_then(|account| account.minecraft_access_token.as_deref())
-                        .map(str::trim)
-                        .is_some_and(|token| !token.is_empty());
-                    self.status = if active_refresh && !refreshed_has_token {
-                        notification::warn!(
-                            "auth",
-                            "Active account token could not be renewed. Continuing in offline mode."
-                        );
-                        AuthUiStatus::Idle
-                    } else {
-                        AuthUiStatus::Idle
-                    };
+                Ok(RenewalResult::Bulk {
+                    result,
+                    failed_account_errors,
+                    succeeded_profile_ids,
+                }) => {
+                    match result {
+                        Ok(renewed) => {
+                            let active_refresh =
+                                matches!(self.status, AuthUiStatus::RefreshingActiveSession);
+                            self.apply_accounts_state(renewed, true);
+                            for profile_id in succeeded_profile_ids {
+                                self.failed_account_errors.remove(&profile_id);
+                            }
+                            for (profile_id, error) in failed_account_errors {
+                                self.failed_account_errors.insert(profile_id, error);
+                            }
+                            self.retain_failed_accounts_for_known_profiles();
+                            let refreshed_has_token = self
+                                .accounts_state
+                                .active_account()
+                                .and_then(|account| account.minecraft_access_token.as_deref())
+                                .map(str::trim)
+                                .is_some_and(|token| !token.is_empty());
+                            self.status = if active_refresh && !refreshed_has_token {
+                                notification::warn!(
+                                    "auth",
+                                    "Active account token could not be renewed. Continuing in offline mode."
+                                );
+                                AuthUiStatus::Idle
+                            } else {
+                                AuthUiStatus::Idle
+                            };
+                            self.schedule_missing_avatars();
+                        }
+                        Err(err) => {
+                            let prefix =
+                                if matches!(self.status, AuthUiStatus::RefreshingActiveSession) {
+                                    "Failed to renew active account token"
+                                } else {
+                                    "Loaded cached accounts, but token renewal failed"
+                                };
+                            if is_http_auth_error(err.as_str()) {
+                                notification::warn!(
+                                    "auth",
+                                    "{prefix}: {err}. Continuing with cached account in offline mode."
+                                );
+                                self.status = AuthUiStatus::Idle;
+                            } else {
+                                notification::error!("auth", "{prefix}: {err}");
+                                self.status = AuthUiStatus::Error(format!("{prefix}: {err}"));
+                            }
+                        }
+                    }
                     self.renewal = None;
-                    self.schedule_missing_avatars();
                 }
-                Ok(Err(err)) => {
-                    let prefix = if matches!(self.status, AuthUiStatus::RefreshingActiveSession) {
-                        "Failed to renew active account token"
-                    } else {
-                        "Loaded cached accounts, but token renewal failed"
-                    };
-                    if is_http_auth_error(err.as_str()) {
-                        notification::warn!(
-                            "auth",
-                            "{prefix}: {err}. Continuing with cached account in offline mode."
-                        );
-                        self.status = AuthUiStatus::Idle;
-                    } else {
-                        notification::error!("auth", "{prefix}: {err}");
-                        self.status = AuthUiStatus::Error(format!("{prefix}: {err}"));
+                Ok(RenewalResult::Single { profile_id, result }) => {
+                    match result {
+                        Ok(renewed) => {
+                            self.apply_accounts_state(renewed, true);
+                            self.failed_account_errors.remove(&profile_id);
+                            self.retain_failed_accounts_for_known_profiles();
+                            self.status = AuthUiStatus::Idle;
+                            self.schedule_missing_avatars();
+                        }
+                        Err(err) => {
+                            self.failed_account_errors
+                                .insert(profile_id.clone(), err.clone());
+                            if is_http_auth_error(err.as_str()) {
+                                notification::warn!(
+                                    "auth",
+                                    "Failed to renew account token for {profile_id}: {err}. Continuing in offline mode."
+                                );
+                                self.status = AuthUiStatus::Idle;
+                            } else {
+                                notification::error!(
+                                    "auth",
+                                    "Failed to renew account token for {profile_id}: {err}"
+                                );
+                                self.status = AuthUiStatus::Error(format!(
+                                    "Failed to renew account token for {profile_id}: {err}"
+                                ));
+                            }
+                        }
                     }
                     self.renewal = None;
                 }
@@ -202,6 +262,8 @@ impl AuthState {
                         self.status = AuthUiStatus::WaitingForAuthorization;
                     }
                     AuthFlowEvent::Completed(account) => {
+                        self.failed_account_errors
+                            .remove(&account.minecraft_profile.id);
                         self.accounts_state.upsert_and_activate(account);
                         self.sync_account_avatar_cache();
                         self.rebuild_active_avatar_png();
@@ -280,7 +342,7 @@ impl AuthState {
 
         self.ensure_active_account_token_ready();
         self.rebuild_active_avatar_png();
-        if !self.auth_busy() && !matches!(self.status, AuthUiStatus::Error(_)) {
+        if !self.auth_busy() && !self.failed_account_errors.contains_key(profile_id) {
             self.status = AuthUiStatus::Idle;
         }
 
@@ -301,6 +363,7 @@ impl AuthState {
             return;
         }
 
+        self.failed_account_errors.remove(profile_id);
         self.sync_account_avatar_cache();
         self.rebuild_active_avatar_png();
         self.status = AuthUiStatus::Idle;
@@ -337,10 +400,13 @@ impl AuthState {
             .map(str::trim)
             .is_some_and(|token| !token.is_empty());
         if !has_refresh_token {
-            self.status = AuthUiStatus::Error(format!(
+            let message = format!(
                 "Account '{}' has no renewable Microsoft refresh token.",
                 account.minecraft_profile.name
-            ));
+            );
+            self.failed_account_errors
+                .insert(profile_id.to_owned(), message.clone());
+            self.status = AuthUiStatus::Error(message);
             return;
         }
 
@@ -486,11 +552,9 @@ impl AuthState {
                 is_active: active_id
                     .map(|id| id == account.minecraft_profile.id)
                     .unwrap_or(false),
-                is_failed: account
-                    .minecraft_access_token
-                    .as_deref()
-                    .map(str::trim)
-                    .is_none_or(|token| token.is_empty()),
+                is_failed: self
+                    .failed_account_errors
+                    .contains_key(&account.minecraft_profile.id),
                 avatar_png: self
                     .account_avatars
                     .get(&account.minecraft_profile.id)
@@ -513,14 +577,32 @@ impl AuthState {
             return;
         }
 
-        let (tx, rx) = mpsc::channel::<Result<CachedAccountsState, String>>();
+        let (tx, rx) = mpsc::channel::<RenewalResult>();
         let streamer_mode = self.streamer_mode;
         std::thread::spawn(move || {
+            let mut failed_account_errors = HashMap::new();
+            let mut succeeded_profile_ids = HashSet::new();
             let result = auth::renew_cached_accounts_tokens_with_callback(&client_id, |event| {
+                match &event {
+                    CachedAccountRenewalEvent::Succeeded { profile_id, .. } => {
+                        succeeded_profile_ids.insert(profile_id.clone());
+                        failed_account_errors.remove(profile_id);
+                    }
+                    CachedAccountRenewalEvent::Failed {
+                        profile_id, error, ..
+                    } => {
+                        failed_account_errors.insert(profile_id.clone(), error.clone());
+                    }
+                    CachedAccountRenewalEvent::Started { .. } => {}
+                }
                 emit_cached_account_renewal_notification(event, streamer_mode);
             })
             .map_err(|err| err.to_string());
-            let _ = tx.send(result);
+            let _ = tx.send(RenewalResult::Bulk {
+                result,
+                failed_account_errors,
+                succeeded_profile_ids,
+            });
         });
         self.renewal = Some(rx);
         self.status = status;
@@ -533,11 +615,12 @@ impl AuthState {
 
         let is_active_target =
             self.accounts_state.active_profile_id.as_deref() == Some(profile_id.as_str());
-        let (tx, rx) = mpsc::channel::<Result<CachedAccountsState, String>>();
+        let (tx, rx) = mpsc::channel::<RenewalResult>();
+        self.failed_account_errors.remove(&profile_id);
         std::thread::spawn(move || {
             let result = auth::renew_cached_account_token(&client_id, profile_id.as_str())
                 .map_err(|err| err.to_string());
-            let _ = tx.send(result);
+            let _ = tx.send(RenewalResult::Single { profile_id, result });
         });
         self.renewal = Some(rx);
         self.status = if is_active_target {
@@ -558,7 +641,19 @@ impl AuthState {
             let _ = self.accounts_state.set_active_profile_id(active_id);
         }
         self.sync_account_avatar_cache();
+        self.retain_failed_accounts_for_known_profiles();
         self.rebuild_active_avatar_png();
+    }
+
+    fn retain_failed_accounts_for_known_profiles(&mut self) {
+        let known_profile_ids = self
+            .accounts_state
+            .accounts
+            .iter()
+            .map(|account| account.minecraft_profile.id.as_str())
+            .collect::<HashSet<_>>();
+        self.failed_account_errors
+            .retain(|profile_id, _| known_profile_ids.contains(profile_id.as_str()));
     }
 
     fn sync_account_avatar_cache(&mut self) {

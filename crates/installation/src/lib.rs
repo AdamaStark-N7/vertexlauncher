@@ -248,6 +248,8 @@ pub struct LaunchRequest {
     pub auth_user_type: Option<String>,
     pub quick_play_singleplayer: Option<String>,
     pub quick_play_multiplayer: Option<String>,
+    pub linux_set_opengl_driver: bool,
+    pub linux_use_zink_driver: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -930,6 +932,11 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         .stdin(Stdio::null())
         .stdout(Stdio::from(launch_log_file))
         .stderr(Stdio::from(stderr_log));
+    apply_linux_opengl_driver_env(
+        &mut command,
+        request.linux_set_opengl_driver,
+        request.linux_use_zink_driver,
+    );
 
     command.arg(format!("-Xmx{}M", request.max_memory_mib.max(512)));
     for arg in parse_user_args(request.extra_jvm_args.as_deref()) {
@@ -1011,6 +1018,33 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         profile_id,
         launch_log_path,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn apply_linux_opengl_driver_env(
+    command: &mut Command,
+    set_linux_opengl_driver: bool,
+    use_zink_driver: bool,
+) {
+    if !set_linux_opengl_driver {
+        return;
+    }
+
+    command.env_remove("MESA_LOADER_DRIVER_OVERRIDE");
+    command.env_remove("GALLIUM_DRIVER");
+
+    if use_zink_driver {
+        command.env("MESA_LOADER_DRIVER_OVERRIDE", "zink");
+        command.env("GALLIUM_DRIVER", "zink");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn apply_linux_opengl_driver_env(
+    _command: &mut Command,
+    _set_linux_opengl_driver: bool,
+    _use_zink_driver: bool,
+) {
 }
 
 pub fn stop_running_instance(instance_root: &Path) -> bool {

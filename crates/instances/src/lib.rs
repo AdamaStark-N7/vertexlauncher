@@ -87,6 +87,8 @@ pub struct InstanceRecord {
     pub cli_args: Option<String>,
     pub java_override_enabled: bool,
     pub java_override_runtime_major: Option<u8>,
+    pub linux_set_opengl_driver: Option<bool>,
+    pub linux_use_zink_driver: Option<bool>,
     pub launch_count: u64,
     pub last_launched_at_ms: Option<u64>,
     pub favorite_world_ids: Vec<String>,
@@ -108,6 +110,8 @@ impl Default for InstanceRecord {
             cli_args: None,
             java_override_enabled: false,
             java_override_runtime_major: None,
+            linux_set_opengl_driver: None,
+            linux_use_zink_driver: None,
             launch_count: 0,
             last_launched_at_ms: None,
             favorite_world_ids: Vec::new(),
@@ -287,6 +291,8 @@ pub fn create_instance(
         cli_args: None,
         java_override_enabled: false,
         java_override_runtime_major: None,
+        linux_set_opengl_driver: None,
+        linux_use_zink_driver: None,
         launch_count: 0,
         last_launched_at_ms: None,
         favorite_world_ids: Vec::new(),
@@ -350,6 +356,8 @@ pub fn set_instance_settings(
     cli_args: Option<String>,
     java_override_enabled: bool,
     java_override_runtime_major: Option<u8>,
+    linux_set_opengl_driver: Option<bool>,
+    linux_use_zink_driver: Option<bool>,
 ) -> Result<(), InstanceError> {
     let instance = store
         .find_mut(id)
@@ -359,6 +367,8 @@ pub fn set_instance_settings(
     instance.java_override_enabled = java_override_enabled;
     instance.java_override_runtime_major =
         normalize_java_override(java_override_enabled, java_override_runtime_major);
+    instance.linux_set_opengl_driver = linux_set_opengl_driver;
+    instance.linux_use_zink_driver = linux_use_zink_driver;
     tracing::debug!(
         target: "vertexlauncher/instances",
         id,
@@ -366,6 +376,8 @@ pub fn set_instance_settings(
         has_cli_args = instance.cli_args.is_some(),
         java_override_enabled = instance.java_override_enabled,
         java_override_runtime_major = ?instance.java_override_runtime_major,
+        linux_set_opengl_driver = ?instance.linux_set_opengl_driver,
+        linux_use_zink_driver = ?instance.linux_use_zink_driver,
         "updated instance runtime settings"
     );
     Ok(())

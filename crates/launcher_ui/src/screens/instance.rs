@@ -62,6 +62,8 @@ use runtime::*;
 use runtime_prepare_operation::RuntimePrepareOperation;
 use runtime_prepare_outcome::RuntimePrepareOutcome;
 
+use super::platform_specific::current_platform_specific_section;
+
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
@@ -768,6 +770,8 @@ fn render_instance_settings_modal(
                                         ),
                                         config.download_max_concurrent(),
                                         config.parsed_download_speed_limit_bps(),
+                                        state.linux_set_opengl_driver,
+                                        state.linux_use_zink_driver,
                                         config.default_instance_max_memory_mib(),
                                         None,
                                         None,
@@ -939,6 +943,13 @@ fn render_instance_settings_modal(
                                 None
                             };
                             let cli_override = normalize_optional(state.cli_args_input.as_str());
+                            let (
+                                linux_set_opengl_driver,
+                                linux_use_zink_driver,
+                            ) = linux_instance_driver_settings_for_save(
+                                state,
+                                instances.find(instance_id),
+                            );
                             match set_instance_settings(
                                 instances,
                                 instance_id,
@@ -946,6 +957,8 @@ fn render_instance_settings_modal(
                                 cli_override,
                                 state.java_override_enabled,
                                 java_override_runtime_major,
+                                linux_set_opengl_driver,
+                                linux_use_zink_driver,
                             ) {
                                 Ok(()) => {
                                     instances_changed = true;
@@ -955,6 +968,15 @@ fn render_instance_settings_modal(
                             }
                         }
                     }
+
+                    render_platform_specific_instance_settings_section(
+                        ui,
+                        text_ui,
+                        state,
+                        instance_id,
+                        &section_style,
+                        &muted_style,
+                    );
 
                     ui.add_space(12.0);
                     ui.separator();
@@ -1040,6 +1062,111 @@ fn render_instance_settings_modal(
     }
     state.show_settings_modal = open;
     instances_changed
+}
+
+fn linux_instance_driver_settings_for_save(
+    state: &InstanceScreenState,
+    _existing: Option<&instances::InstanceRecord>,
+) -> (Option<bool>, Option<bool>) {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _existing;
+        return (
+            Some(state.linux_set_opengl_driver),
+            Some(state.linux_use_zink_driver),
+        );
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = state;
+        return _existing
+            .map(|instance| {
+                (
+                    instance.linux_set_opengl_driver,
+                    instance.linux_use_zink_driver,
+                )
+            })
+            .unwrap_or((None, None));
+    }
+}
+
+fn render_platform_specific_instance_settings_section(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
+    instance_id: &str,
+    section_style: &LabelOptions,
+    muted_style: &LabelOptions,
+) {
+    let Some(section) = current_platform_specific_section() else {
+        return;
+    };
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(10.0);
+
+    let _ = text_ui.label(
+        ui,
+        (
+            "instance_platform_settings_heading",
+            instance_id,
+            section.id,
+        ),
+        section.heading,
+        section_style,
+    );
+    let _ = text_ui.label(
+        ui,
+        (
+            "instance_platform_settings_description",
+            instance_id,
+            section.id,
+        ),
+        section.instance_description,
+        muted_style,
+    );
+    ui.add_space(8.0);
+
+    #[cfg(target_os = "linux")]
+    {
+        let response = ui
+            .push_id(("instance_linux_set_opengl_driver", instance_id), |ui| {
+                settings_widgets::toggle_row(
+                    text_ui,
+                    ui,
+                    "Set Linux OpenGL Driver",
+                    Some(
+                        "Linux-only. Overrides the launcher-wide Linux OpenGL driver behavior for this instance. This affects all launches for this instance; versions using Vulkan directly should ignore it.",
+                    ),
+                    &mut state.linux_set_opengl_driver,
+                )
+            })
+            .inner;
+        let _ = response;
+        ui.add_space(6.0);
+
+        let zink_response = ui.add_enabled_ui(state.linux_set_opengl_driver, |ui| {
+            ui.push_id(("instance_linux_use_zink_driver", instance_id), |ui| {
+                settings_widgets::toggle_row(
+                    text_ui,
+                    ui,
+                    "Use Zink Driver (Experimental)",
+                    Some(
+                        "Linux-only. Experimental. When the setting above is enabled, forces Mesa Zink so OpenGL runs over Vulkan for this instance. Disable it to keep Mesa's default OpenGL driver selection. Versions using Vulkan directly should ignore it.",
+                    ),
+                    &mut state.linux_use_zink_driver,
+                )
+            })
+            .inner
+        });
+        let _ = zink_response;
+        ui.add_space(8.0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    let _ = state;
 }
 
 fn render_export_vtmpack_modal(

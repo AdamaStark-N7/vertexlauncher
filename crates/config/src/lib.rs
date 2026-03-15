@@ -524,6 +524,8 @@ pub struct Config {
     low_power_gpu_preferred: bool,
     streamer_mode_enabled: bool,
     window_blur_enabled: bool,
+    linux_set_opengl_driver: bool,
+    linux_use_zink_driver: bool,
     theme_id: String,
     open_type_features_enabled: bool,
     open_type_features_to_enable: String,
@@ -671,6 +673,26 @@ impl Config {
     /// Enables or disables platform blur effects.
     pub fn set_window_blur_enabled(&mut self, enabled: bool) {
         self.window_blur_enabled = enabled;
+    }
+
+    /// Returns whether launch commands should explicitly manage the Linux OpenGL driver.
+    pub fn linux_set_opengl_driver(&self) -> bool {
+        self.linux_set_opengl_driver
+    }
+
+    /// Enables or disables Linux OpenGL driver management for launched games.
+    pub fn set_linux_set_opengl_driver(&mut self, enabled: bool) {
+        self.linux_set_opengl_driver = enabled;
+    }
+
+    /// Returns whether Linux OpenGL launches should force Mesa Zink.
+    pub fn linux_use_zink_driver(&self) -> bool {
+        self.linux_use_zink_driver
+    }
+
+    /// Enables or disables Mesa Zink for Linux OpenGL launches.
+    pub fn set_linux_use_zink_driver(&mut self, enabled: bool) {
+        self.linux_use_zink_driver = enabled;
     }
 
     /// Returns active theme id.
@@ -883,6 +905,8 @@ impl Config {
             low_power_gpu_preferred,
             streamer_mode_enabled,
             window_blur_enabled,
+            linux_set_opengl_driver: _,
+            linux_use_zink_driver: _,
             theme_id: _,
             open_type_features_enabled,
             open_type_features_to_enable: _,
@@ -967,6 +991,8 @@ impl Config {
             low_power_gpu_preferred: _,
             streamer_mode_enabled: _,
             window_blur_enabled: _,
+            linux_set_opengl_driver: _,
+            linux_use_zink_driver: _,
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
@@ -1009,6 +1035,8 @@ impl Config {
             low_power_gpu_preferred: _,
             streamer_mode_enabled: _,
             window_blur_enabled: _,
+            linux_set_opengl_driver: _,
+            linux_use_zink_driver: _,
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
@@ -1059,6 +1087,8 @@ impl Config {
             low_power_gpu_preferred: _,
             streamer_mode_enabled: _,
             window_blur_enabled: _,
+            linux_set_opengl_driver: _,
+            linux_use_zink_driver: _,
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
@@ -1110,6 +1140,8 @@ impl Config {
             low_power_gpu_preferred: _,
             streamer_mode_enabled: _,
             window_blur_enabled: _,
+            linux_set_opengl_driver: _,
+            linux_use_zink_driver: _,
             theme_id: _,
             open_type_features_enabled: _,
             open_type_features_to_enable,
@@ -1172,6 +1204,8 @@ impl Default for Config {
             low_power_gpu_preferred: true,
             streamer_mode_enabled: false,
             window_blur_enabled: true,
+            linux_set_opengl_driver: false,
+            linux_use_zink_driver: false,
             theme_id: "matrix_oled".to_owned(),
             open_type_features_enabled: true,
             open_type_features_to_enable: String::new(),

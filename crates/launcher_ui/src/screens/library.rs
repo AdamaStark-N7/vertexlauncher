@@ -908,6 +908,7 @@ fn request_runtime_launch(
     };
 
     let instance_id = instance.id.clone();
+    let instance_name = instance.name.clone();
     state.pending_launches.insert(instance_id.clone());
     state.status_by_instance.insert(
         instance_id.clone(),
@@ -922,18 +923,30 @@ fn request_runtime_launch(
         .unwrap_or_default();
     let required_java_major = effective_required_java_major(config, game_version.as_str());
     let java_executable = choose_java_executable(config, instance, required_java_major);
+    let download_max_concurrent = config.download_max_concurrent().max(1);
+    let download_speed_limit_bps = config.parsed_download_speed_limit_bps();
+    let default_instance_max_memory_mib = config.default_instance_max_memory_mib();
+    let default_instance_cli_args = normalize_optional(config.default_instance_cli_args());
+    let global_linux_set_opengl_driver = config.linux_set_opengl_driver();
+    let global_linux_use_zink_driver = config.linux_use_zink_driver();
     let download_policy = DownloadPolicy {
-        max_concurrent_downloads: config.download_max_concurrent().max(1),
-        max_download_bps: config.parsed_download_speed_limit_bps(),
+        max_concurrent_downloads: download_max_concurrent,
+        max_download_bps: download_speed_limit_bps,
     };
     let max_memory_mib = instance
         .max_memory_mib
-        .unwrap_or(config.default_instance_max_memory_mib());
+        .unwrap_or(default_instance_max_memory_mib);
     let extra_jvm_args = instance
         .cli_args
         .as_deref()
         .and_then(normalize_optional)
-        .or_else(|| normalize_optional(config.default_instance_cli_args()));
+        .or(default_instance_cli_args);
+    let linux_set_opengl_driver = instance
+        .linux_set_opengl_driver
+        .unwrap_or(global_linux_set_opengl_driver);
+    let linux_use_zink_driver = instance
+        .linux_use_zink_driver
+        .unwrap_or(global_linux_use_zink_driver);
     let instance_root_display = display_user_path(instance_root.as_path());
     let tab_user_key = player_uuid
         .as_deref()
@@ -954,7 +967,7 @@ fn request_runtime_launch(
         .unwrap_or("Player")
         .to_owned();
     let tab_id = console::ensure_instance_tab(
-        instance.name.as_str(),
+        instance_name.as_str(),
         tab_username.as_str(),
         instance_root_display.as_str(),
         tab_user_key.as_deref(),
@@ -978,7 +991,7 @@ fn request_runtime_launch(
     state.pending_launch_contexts.insert(
         instance_id.clone(),
         PendingLaunchContext {
-            instance_name: instance.name.clone(),
+            instance_name,
             instance_root_display: instance_root_display.clone(),
             tab_user_key: tab_user_key.clone(),
             tab_username: tab_username.clone(),
@@ -1034,6 +1047,8 @@ fn request_runtime_launch(
                 auth_user_type: user_type.clone(),
                 quick_play_singleplayer: quick_play_singleplayer.clone(),
                 quick_play_multiplayer: quick_play_multiplayer.clone(),
+                linux_set_opengl_driver,
+                linux_use_zink_driver,
             };
             let launch = launch_instance(&launch_request).map_err(|err| err.to_string())?;
             Ok(RuntimeLaunchOutcome {

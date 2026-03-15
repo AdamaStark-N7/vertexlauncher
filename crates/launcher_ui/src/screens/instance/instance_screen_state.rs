@@ -37,6 +37,8 @@ pub(super) struct InstanceScreenState {
     pub(super) cli_args_input: String,
     pub(super) java_override_enabled: bool,
     pub(super) java_override_runtime_major: Option<u8>,
+    pub(super) linux_set_opengl_driver: bool,
+    pub(super) linux_use_zink_driver: bool,
     pub(super) selected_content_tab: InstalledContentKind,
     pub(super) installed_content_page_size: usize,
     pub(super) installed_content_page: usize,
@@ -116,6 +118,12 @@ impl InstanceScreenState {
                 .unwrap_or_else(|| config.default_instance_cli_args().to_owned()),
             java_override_enabled: instance.java_override_enabled,
             java_override_runtime_major: instance.java_override_runtime_major,
+            linux_set_opengl_driver: instance
+                .linux_set_opengl_driver
+                .unwrap_or(config.linux_set_opengl_driver()),
+            linux_use_zink_driver: instance
+                .linux_use_zink_driver
+                .unwrap_or(config.linux_use_zink_driver()),
             selected_content_tab: InstalledContentKind::Mods,
             installed_content_page_size: INSTALLED_CONTENT_PAGE_SIZES[1],
             installed_content_page: 1,

@@ -15,6 +15,7 @@ mod home;
 mod instance;
 mod legal;
 mod library;
+mod platform_specific;
 mod settings;
 mod skins;
 

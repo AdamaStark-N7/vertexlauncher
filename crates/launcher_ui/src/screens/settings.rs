@@ -8,7 +8,7 @@ use installation::purge_cache as purge_installation_cache;
 use std::sync::OnceLock;
 use textui::{ButtonOptions, TextUi};
 
-use super::SettingsInfo;
+use super::{SettingsInfo, platform_specific::current_platform_specific_section};
 use crate::ui::{components::settings_widgets, style, theme::Theme};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
@@ -116,6 +116,7 @@ fn render_settings_contents(
     );
 
     render_instance_defaults_section(ui, text_ui, config);
+    render_platform_specific_settings_section(ui, text_ui, config);
     render_info_section(ui, text_ui, settings_info);
 }
 
@@ -180,6 +181,64 @@ fn render_info_section(ui: &mut Ui, text_ui: &mut TextUi, settings_info: &Settin
                 });
         },
     );
+}
+
+fn render_platform_specific_settings_section(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    config: &mut Config,
+) {
+    let Some(section) = current_platform_specific_section() else {
+        return;
+    };
+
+    render_settings_section(
+        ui,
+        text_ui,
+        section.heading,
+        section.launcher_description,
+        |ui, text_ui| {
+            #[cfg(target_os = "linux")]
+            render_linux_graphics_settings(ui, text_ui, config);
+            #[cfg(not(target_os = "linux"))]
+            let _ = (ui, text_ui, config);
+        },
+    );
+}
+
+#[cfg(target_os = "linux")]
+fn render_linux_graphics_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let mut set_linux_opengl_driver = config.linux_set_opengl_driver();
+    let response = settings_widgets::toggle_row(
+        text_ui,
+        ui,
+        "Set Linux OpenGL Driver",
+        Some(
+            "Linux-only. Vertex will explicitly manage OpenGL driver environment variables for launched games. This affects all launched versions by default; versions using Vulkan directly should ignore it.",
+        ),
+        &mut set_linux_opengl_driver,
+    );
+    if response.changed() {
+        config.set_linux_set_opengl_driver(set_linux_opengl_driver);
+    }
+    ui.add_space(style::SPACE_MD);
+
+    let mut use_zink_driver = config.linux_use_zink_driver();
+    let zink_response = ui.add_enabled_ui(config.linux_set_opengl_driver(), |ui| {
+        settings_widgets::toggle_row(
+            text_ui,
+            ui,
+            "Use Zink Driver (Experimental)",
+            Some(
+                "Linux-only. Experimental. When the setting above is enabled, forces Mesa Zink so OpenGL runs over Vulkan. Disable it to keep Mesa's default OpenGL driver selection. Versions using Vulkan directly should ignore it.",
+            ),
+            &mut use_zink_driver,
+        )
+    });
+    if zink_response.inner.changed() {
+        config.set_linux_use_zink_driver(use_zink_driver);
+    }
+    ui.add_space(style::SPACE_MD);
 }
 
 fn render_info_row(

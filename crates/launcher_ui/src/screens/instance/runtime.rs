@@ -312,6 +312,8 @@ pub(super) fn render_runtime_row(
                         ),
                         config.download_max_concurrent(),
                         config.parsed_download_speed_limit_bps(),
+                        state.linux_set_opengl_driver,
+                        state.linux_use_zink_driver,
                         max_memory_mib,
                         extra_jvm_args,
                         state.launch_username.clone(),
@@ -1019,6 +1021,8 @@ pub(super) fn request_runtime_prepare(
     java_executable: Option<String>,
     download_max_concurrent: u32,
     download_speed_limit_bps: Option<u64>,
+    linux_set_opengl_driver: bool,
+    linux_use_zink_driver: bool,
     max_memory_mib: u128,
     extra_jvm_args: Option<String>,
     visible_username: Option<String>,
@@ -1206,6 +1210,8 @@ pub(super) fn request_runtime_prepare(
                     auth_user_type: user_type_for_task.clone(),
                     quick_play_singleplayer: None,
                     quick_play_multiplayer: None,
+                    linux_set_opengl_driver,
+                    linux_use_zink_driver,
                 };
                 Some(launch_instance(&launch_request).map_err(|err| err.to_string())?)
             } else {
