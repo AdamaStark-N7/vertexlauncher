@@ -241,7 +241,8 @@ fn render_controls(ui: &mut egui::Ui, ctx: &Context) {
 
     let is_maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
     if is_maximized {
-        if render_control_button(ui, "restore_down", assets::COPY_SVG, "Restore down").clicked() {
+        if render_control_button(ui, "restore_down", assets::RESTORE_SVG, "Restore down").clicked()
+        {
             ctx.send_viewport_cmd(ViewportCommand::Maximized(false));
         }
     } else if render_control_button(ui, "maximize", assets::CHEVRON_UP_SVG, "Maximize").clicked() {

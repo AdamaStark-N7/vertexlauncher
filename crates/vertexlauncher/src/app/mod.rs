@@ -216,6 +216,35 @@ impl VertexApp {
         }
         self.last_frame_end = Some(Instant::now());
     }
+
+    fn handle_escape(&mut self, ctx: &egui::Context) -> bool {
+        if !ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            return false;
+        }
+        if egui::Popup::is_any_open(ctx) {
+            egui::Popup::close_all(ctx);
+            return true;
+        }
+        if self.show_import_instance_modal {
+            self.show_import_instance_modal = false;
+            self.import_instance_state.reset();
+            return true;
+        }
+        if self.show_create_instance_modal {
+            self.show_create_instance_modal = false;
+            self.create_instance_state.reset();
+            return true;
+        }
+        if self.show_config_format_modal {
+            self.create_config_with_choice(self.default_config_format);
+            return true;
+        }
+        screens::handle_escape(
+            ctx,
+            self.active_screen,
+            self.selected_instance_id.as_deref(),
+        )
+    }
 }
 
 fn sleep_precise(duration: Duration) {
@@ -253,6 +282,7 @@ impl eframe::App for VertexApp {
             .ensure_selected_font_is_available(&mut self.config);
         self.fonts
             .apply_from_config(ctx, &self.config, &mut self.text_ui);
+        let _ = self.handle_escape(ctx);
 
         let account_entries = self.auth.account_entries();
         let profile_accounts = account_entries

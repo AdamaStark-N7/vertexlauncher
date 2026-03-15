@@ -40,6 +40,27 @@ pub struct LibraryOutput {
     pub requested_screen: Option<AppScreen>,
 }
 
+fn library_runtime_state_id() -> egui::Id {
+    egui::Id::new("library_runtime_state")
+}
+
+pub(super) fn handle_escape(ctx: &egui::Context) -> bool {
+    let state_id = library_runtime_state_id();
+    let mut handled = false;
+    ctx.data_mut(|data| {
+        let Some(mut state) = data.get_temp::<LibraryRuntimeState>(state_id) else {
+            return;
+        };
+        if state.delete_target_instance_id.is_some() {
+            state.delete_target_instance_id = None;
+            state.delete_error = None;
+            data.insert_temp(state_id, state);
+            handled = true;
+        }
+    });
+    handled
+}
+
 pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
@@ -54,7 +75,7 @@ pub fn render(
     account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> LibraryOutput {
     let mut output = LibraryOutput::default();
-    let state_id = ui.make_persistent_id("library_runtime_state");
+    let state_id = library_runtime_state_id();
     let mut state = ui
         .ctx()
         .data_mut(|data| data.get_temp::<LibraryRuntimeState>(state_id))

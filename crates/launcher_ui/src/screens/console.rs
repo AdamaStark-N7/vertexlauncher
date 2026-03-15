@@ -1,3 +1,5 @@
+use std::hash::Hash;
+
 use egui::Ui;
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
@@ -24,49 +26,62 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                 |ui| {
                     render_tabs_row(ui, text_ui, &snapshot);
                     ui.add_space(style::SPACE_SM);
-                    let viewport_height = ui.available_height().max(1.0);
-                    ui.set_min_height(viewport_height);
-                    egui::ScrollArea::both()
-                        .id_salt("console_scroll_area")
-                        .auto_shrink([false, false])
-                        .max_height(viewport_height)
-                        .stick_to_bottom(true)
-                        .show(ui, |ui| {
-                            if lines.is_empty() {
-                                let mut empty_style = style::muted(ui);
-                                empty_style.wrap = false;
-                                let _ = text_ui.label(
-                                    ui,
-                                    "console_empty",
-                                    "No log entries yet.",
-                                    &empty_style,
-                                );
-                                let _ = ui.allocate_exact_size(
-                                    egui::vec2(1.0, (viewport_height - 24.0).max(1.0)),
-                                    egui::Sense::hover(),
-                                );
-                                return;
-                            }
-
-                            let mut context = LogParseContext::default();
-                            for (index, line) in lines.iter().enumerate() {
-                                let resolved_level = resolve_log_level(line, &mut context);
-                                let mut line_style = style::body(ui);
-                                line_style.wrap = false;
-                                line_style.color = color_for_level(ui, resolved_level);
-                                line_style.padding = egui::Vec2::ZERO;
-                                if matches!(resolved_level, Some(LogLevel::Error | LogLevel::Fatal))
-                                {
-                                    line_style.weight = 700;
-                                }
-                                render_tiled_console_line(ui, text_ui, index, line, &line_style);
-                            }
-                        });
+                    render_log_buffer(
+                        ui,
+                        text_ui,
+                        "console_scroll_area",
+                        lines,
+                        "No log entries yet.",
+                        true,
+                    );
                 },
             );
             ui.add_space(style::SPACE_LG);
         },
     );
+}
+
+pub(crate) fn render_log_buffer(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl Hash,
+    lines: &[String],
+    empty_message: &str,
+    stick_to_bottom: bool,
+) {
+    let viewport_height = ui.available_height().max(1.0);
+    let base_id = ui.make_persistent_id(id_source);
+    ui.set_min_height(viewport_height);
+    egui::ScrollArea::both()
+        .id_salt(base_id.with("scroll_area"))
+        .auto_shrink([false, false])
+        .max_height(viewport_height)
+        .stick_to_bottom(stick_to_bottom)
+        .show(ui, |ui| {
+            if lines.is_empty() {
+                let mut empty_style = style::muted(ui);
+                empty_style.wrap = false;
+                let _ = text_ui.label(ui, (base_id, "empty"), empty_message, &empty_style);
+                let _ = ui.allocate_exact_size(
+                    egui::vec2(1.0, (viewport_height - 24.0).max(1.0)),
+                    egui::Sense::hover(),
+                );
+                return;
+            }
+
+            let mut context = LogParseContext::default();
+            for (index, line) in lines.iter().enumerate() {
+                let resolved_level = resolve_log_level(line, &mut context);
+                let mut line_style = style::body(ui);
+                line_style.wrap = false;
+                line_style.color = color_for_level(ui, resolved_level);
+                line_style.padding = egui::Vec2::ZERO;
+                if matches!(resolved_level, Some(LogLevel::Error | LogLevel::Fatal)) {
+                    line_style.weight = 700;
+                }
+                render_tiled_console_line(ui, text_ui, (base_id, index), line, &line_style);
+            }
+        });
 }
 
 fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::ConsoleSnapshot) {
@@ -307,12 +322,12 @@ fn looks_like_minecraft_timestamp(value: &str) -> bool {
 fn render_tiled_console_line(
     ui: &mut Ui,
     text_ui: &mut TextUi,
-    line_index: usize,
+    line_id_source: impl Hash + Copy,
     line: &str,
     line_style: &LabelOptions,
 ) {
     if line.is_empty() {
-        let _ = text_ui.label_async(ui, ("console_line", line_index, 0usize), "", line_style);
+        let _ = text_ui.label_async(ui, (line_id_source, 0usize), "", line_style);
         return;
     }
 
@@ -323,12 +338,7 @@ fn render_tiled_console_line(
         while start < line.len() {
             let end = tile_end_at_char_limit(line, start, CONSOLE_TEXT_TILE_CHARS);
             let segment = &line[start..end];
-            let _ = text_ui.label_async(
-                ui,
-                ("console_line", line_index, tile_index),
-                segment,
-                line_style,
-            );
+            let _ = text_ui.label_async(ui, (line_id_source, tile_index), segment, line_style);
             start = end;
             tile_index = tile_index.saturating_add(1);
         }

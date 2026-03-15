@@ -7,6 +7,7 @@ use content_resolver::{
     InstalledContentResolver, ResolveInstalledContentRequest,
 };
 use egui::Ui;
+use flate2::read::GzDecoder;
 use installation::{
     DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, LaunchRequest,
     LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry, VersionCatalog,
@@ -20,7 +21,10 @@ use instances::{
 use managed_content::load_managed_content_identities;
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
+    ffi::OsStr,
+    fs,
     hash::{Hash, Hasher},
+    io::Read,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
@@ -57,12 +61,15 @@ use content_lookup_result::ContentLookupResult;
 use installed_content_cache::InstalledContentCache;
 use installed_entry_render_result::InstalledEntryRenderResult;
 pub use instance_screen_output::InstanceScreenOutput;
-use instance_screen_state::{InstalledContentEntryUiCache, InstanceScreenState};
+use instance_screen_state::{
+    InstalledContentEntryUiCache, InstanceLogEntry, InstanceScreenState, InstanceScreenTab,
+    InstanceScreenshotEntry, InstanceScreenshotViewerState,
+};
 use runtime::*;
 use runtime_prepare_operation::RuntimePrepareOperation;
 use runtime_prepare_outcome::RuntimePrepareOutcome;
 
-use super::platform_specific::current_platform_specific_section;
+use super::{console as console_screen, platform_specific::current_platform_specific_section};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -70,6 +77,51 @@ const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", 
 const CUSTOM_MODLOADER_INDEX: usize = MODLOADER_OPTIONS.len() - 1;
 const INSTALLED_CONTENT_SCROLLBAR_RESERVE: f32 = 18.0;
 const INSTALLED_CONTENT_PAGE_SIZES: [usize; 4] = [10, 25, 50, 100];
+const INSTANCE_TABS_HEIGHT: f32 = 38.0;
+const INSTANCE_TAB_MAX_WIDTH: f32 = 220.0;
+const INSTANCE_SCREENSHOT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+const INSTANCE_LOG_SCAN_INTERVAL: Duration = Duration::from_secs(3);
+const INSTANCE_SCREENSHOT_TILE_GAP: f32 = 10.0;
+const INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
+const INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
+const INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.2;
+const MAX_INSTANCE_SCREENSHOTS: usize = 120;
+const MAX_INSTANCE_LOG_LINES: usize = 12_000;
+const INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
+
+fn instance_screen_state_id(instance_id: &str) -> egui::Id {
+    egui::Id::new(("instance_screen_state", instance_id))
+}
+
+pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&str>) -> bool {
+    let Some(instance_id) = selected_instance_id else {
+        return false;
+    };
+    let state_id = instance_screen_state_id(instance_id);
+    let mut handled = false;
+    ctx.data_mut(|data| {
+        let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
+            return;
+        };
+        if state.screenshot_viewer.take().is_some() {
+            data.insert_temp(state_id, state);
+            handled = true;
+            return;
+        }
+        if state.show_export_vtmpack_modal {
+            state.show_export_vtmpack_modal = false;
+            data.insert_temp(state_id, state);
+            handled = true;
+            return;
+        }
+        if state.show_settings_modal {
+            state.show_settings_modal = false;
+            data.insert_temp(state_id, state);
+            handled = true;
+        }
+    });
+    handled
+}
 
 pub fn render(
     ui: &mut Ui,
@@ -135,7 +187,7 @@ pub fn render(
         return output;
     };
 
-    let state_id = ui.make_persistent_id(("instance_screen_state", instance_id));
+    let state_id = instance_screen_state_id(instance_id);
     let mut state = ui
         .ctx()
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
@@ -218,19 +270,922 @@ pub fn render(
         instances,
         config,
     );
+    ui.add_space(10.0);
+    render_instance_tab_row(ui, &mut state.active_tab);
+    ui.add_space(12.0);
 
-    render_installed_content_section(
-        ui,
-        text_ui,
-        instance_id,
-        instance_root_path.as_path(),
-        &content_download_policy,
-        &mut state,
-        &mut output,
-    );
+    match state.active_tab {
+        InstanceScreenTab::Content => {
+            render_installed_content_section(
+                ui,
+                text_ui,
+                instance_id,
+                instance_root_path.as_path(),
+                &content_download_policy,
+                &mut state,
+                &mut output,
+            );
+        }
+        InstanceScreenTab::ScreenshotGallery => {
+            let should_scan = state
+                .last_screenshot_scan_at
+                .is_none_or(|last| last.elapsed() >= INSTANCE_SCREENSHOT_SCAN_INTERVAL);
+            if should_scan {
+                refresh_instance_screenshots(&mut state, instance_root_path.as_path());
+            }
+            if state.screenshot_viewer.as_ref().is_some_and(|viewer| {
+                !state.screenshots.iter().any(|screenshot| {
+                    screenshot_key(screenshot.path.as_path()) == viewer.screenshot_key
+                })
+            }) {
+                state.screenshot_viewer = None;
+            }
+            render_instance_screenshot_gallery(ui, text_ui, &mut state);
+        }
+        InstanceScreenTab::Logs => {
+            let should_scan = state
+                .last_log_scan_at
+                .is_none_or(|last| last.elapsed() >= INSTANCE_LOG_SCAN_INTERVAL);
+            if should_scan {
+                refresh_instance_logs(&mut state, instance_root_path.as_path());
+            }
+            sync_selected_instance_log(&mut state);
+            render_instance_logs_tab(ui, text_ui, &mut state);
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
+    }
+
+    render_instance_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state);
 
     ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
     output
+}
+
+fn render_instance_tab_row(ui: &mut Ui, active_tab: &mut InstanceScreenTab) {
+    let item_spacing = 8.0;
+    let width =
+        ((ui.available_width() - item_spacing * 2.0) / 3.0).clamp(96.0, INSTANCE_TAB_MAX_WIDTH);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = item_spacing;
+        for tab in InstanceScreenTab::ALL {
+            let selected = *active_tab == tab;
+            let button =
+                egui::Button::new(egui::RichText::new(tab.label()).size(15.0).strong().color(
+                    if selected {
+                        ui.visuals().widgets.active.fg_stroke.color
+                    } else {
+                        ui.visuals().text_color()
+                    },
+                ))
+                .min_size(egui::vec2(width, INSTANCE_TABS_HEIGHT))
+                .fill(if selected {
+                    ui.visuals().selection.bg_fill
+                } else {
+                    ui.visuals().widgets.inactive.bg_fill
+                })
+                .stroke(if selected {
+                    ui.visuals().selection.stroke
+                } else {
+                    ui.visuals().widgets.inactive.bg_stroke
+                })
+                .corner_radius(egui::CornerRadius::same(10));
+            if ui.add(button).clicked() {
+                *active_tab = tab;
+            }
+        }
+    });
+}
+
+fn render_instance_screenshot_gallery(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
+) {
+    let title_style = LabelOptions {
+        font_size: 18.0,
+        line_height: 24.0,
+        weight: 700,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    };
+    let body_style = LabelOptions {
+        color: ui.visuals().weak_text_color(),
+        wrap: true,
+        ..LabelOptions::default()
+    };
+    let _ = text_ui.label(
+        ui,
+        "instance_screenshot_gallery_title",
+        "Screenshot Gallery",
+        &title_style,
+    );
+    let summary = if state.screenshots.is_empty() {
+        "No screenshots found for this instance.".to_owned()
+    } else {
+        format!(
+            "{} screenshots found for this instance.",
+            state.screenshots.len()
+        )
+    };
+    let _ = text_ui.label(
+        ui,
+        "instance_screenshot_gallery_summary",
+        summary.as_str(),
+        &body_style,
+    );
+    ui.add_space(8.0);
+
+    if state.screenshots.is_empty() {
+        return;
+    }
+
+    let available_width = ui.available_width().max(1.0);
+    let column_count: usize = if available_width >= 980.0 {
+        3
+    } else if available_width >= 620.0 {
+        2
+    } else {
+        1
+    };
+    let column_width = ((available_width
+        - INSTANCE_SCREENSHOT_TILE_GAP * (column_count.saturating_sub(1) as f32))
+        / column_count as f32)
+        .max(180.0);
+    let assignments =
+        build_instance_screenshot_mosaic(&state.screenshots, column_count, column_width);
+
+    let mut open_key = None;
+    egui::ScrollArea::vertical()
+        .id_salt("instance_screenshot_gallery_scroll")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.columns(column_count, |columns| {
+                for (column_ui, items) in columns.iter_mut().zip(assignments.iter()) {
+                    column_ui.spacing_mut().item_spacing.y = INSTANCE_SCREENSHOT_TILE_GAP;
+                    for &(index, tile_height) in items {
+                        if render_instance_screenshot_tile(
+                            column_ui,
+                            &state.screenshots[index],
+                            tile_height,
+                        ) {
+                            open_key =
+                                Some(screenshot_key(state.screenshots[index].path.as_path()));
+                        }
+                    }
+                }
+            });
+        });
+
+    if let Some(screenshot_key) = open_key {
+        state.screenshot_viewer = Some(InstanceScreenshotViewerState {
+            screenshot_key,
+            zoom: INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
+            pan_uv: egui::Vec2::ZERO,
+        });
+    }
+}
+
+fn build_instance_screenshot_mosaic(
+    screenshots: &[InstanceScreenshotEntry],
+    column_count: usize,
+    column_width: f32,
+) -> Vec<Vec<(usize, f32)>> {
+    let mut assignments = vec![Vec::new(); column_count];
+    let mut heights = vec![0.0; column_count];
+    for (index, screenshot) in screenshots.iter().enumerate() {
+        let tile_height = instance_screenshot_tile_height(screenshot, column_width, index);
+        let column_index = heights
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| {
+                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        assignments[column_index].push((index, tile_height));
+        heights[column_index] += tile_height + INSTANCE_SCREENSHOT_TILE_GAP;
+    }
+    assignments
+}
+
+fn instance_screenshot_tile_height(
+    screenshot: &InstanceScreenshotEntry,
+    column_width: f32,
+    _index: usize,
+) -> f32 {
+    column_width / screenshot_aspect_ratio(screenshot).max(0.01)
+}
+
+fn render_instance_screenshot_tile(
+    ui: &mut Ui,
+    screenshot: &InstanceScreenshotEntry,
+    tile_height: f32,
+) -> bool {
+    let width = ui.available_width().max(1.0);
+    let tile_size = egui::vec2(width, tile_height);
+    let (rect, _) = ui.allocate_exact_size(tile_size, egui::Sense::hover());
+    let image_response = ui.put(
+        rect,
+        egui::Image::from_bytes(
+            screenshot_uri(screenshot.path.as_path(), screenshot.modified_at_ms),
+            Arc::clone(&screenshot.bytes),
+        )
+        .fit_to_exact_size(rect.size())
+        .corner_radius(egui::CornerRadius::same(14))
+        .sense(egui::Sense::click()),
+    );
+    let tile_hovered = ui.rect_contains_pointer(rect);
+    let copy_clicked = if tile_hovered {
+        render_instance_screenshot_copy_button(ui, rect, "instance_gallery", screenshot)
+    } else {
+        false
+    };
+    let stroke = if tile_hovered {
+        ui.visuals().widgets.hovered.bg_stroke
+    } else {
+        ui.visuals().widgets.inactive.bg_stroke
+    };
+    ui.painter().rect_stroke(
+        rect,
+        egui::CornerRadius::same(14),
+        stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let label_bg_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.min.x + 10.0, rect.max.y - 34.0),
+        egui::pos2(rect.max.x - 10.0, rect.max.y - 10.0),
+    );
+    ui.painter().rect_filled(
+        label_bg_rect,
+        egui::CornerRadius::same(8),
+        egui::Color32::from_rgba_premultiplied(6, 9, 14, 185),
+    );
+    ui.painter().text(
+        egui::pos2(label_bg_rect.min.x + 8.0, label_bg_rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        format!(
+            "{} | {}",
+            screenshot.file_name,
+            format_time_ago(screenshot.modified_at_ms, current_time_millis())
+        ),
+        egui::TextStyle::Body.resolve(ui.style()),
+        egui::Color32::WHITE,
+    );
+
+    image_response
+        .on_hover_text(format!(
+            "{}\n{}x{}\n{}",
+            screenshot.file_name,
+            screenshot.width,
+            screenshot.height,
+            screenshot.path.display()
+        ))
+        .clicked()
+        && !copy_clicked
+}
+
+fn render_instance_screenshot_viewer_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
+) {
+    let Some(selected_screenshot_key) = state
+        .screenshot_viewer
+        .as_ref()
+        .map(|viewer| viewer.screenshot_key.clone())
+    else {
+        return;
+    };
+    let Some(screenshot) = state
+        .screenshots
+        .iter()
+        .find(|entry| screenshot_key(entry.path.as_path()) == selected_screenshot_key)
+        .cloned()
+    else {
+        state.screenshot_viewer = None;
+        return;
+    };
+    let viewer_state = state
+        .screenshot_viewer
+        .as_mut()
+        .expect("viewer state exists while rendering instance screenshot viewer");
+
+    let viewport_rect = ctx.input(|i| i.content_rect());
+    let modal_width = (viewport_rect.width() * 0.92).max(320.0);
+    let modal_height = (viewport_rect.height() * 0.9).max(280.0);
+    let modal_pos = egui::pos2(
+        (viewport_rect.center().x - modal_width * 0.5)
+            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
+        (viewport_rect.center().y - modal_height * 0.5)
+            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
+    );
+    let mut open = true;
+    let mut close_requested = false;
+    modal::show_scrim(ctx, "instance_screenshot_viewer_scrim", viewport_rect);
+
+    egui::Window::new("Instance Screenshot Viewer")
+        .id(egui::Id::new("instance_screenshot_viewer_window"))
+        .order(egui::Order::Foreground)
+        .open(&mut open)
+        .fixed_pos(modal_pos)
+        .fixed_size(egui::vec2(modal_width, modal_height))
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .title_bar(false)
+        .hscroll(false)
+        .vscroll(false)
+        .constrain(true)
+        .constrain_to(viewport_rect)
+        .frame(modal::window_frame(ctx))
+        .show(ctx, |ui| {
+            let title_style = LabelOptions {
+                font_size: 24.0,
+                line_height: 28.0,
+                weight: 700,
+                color: ui.visuals().text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let body_style = LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: false,
+                ..LabelOptions::default()
+            };
+
+            ui.horizontal(|ui| {
+                ui.vertical(|ui| {
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_screenshot_viewer_title",
+                        screenshot.file_name.as_str(),
+                        &title_style,
+                    );
+                    let details = format!(
+                        "{}x{} | {}",
+                        screenshot.width,
+                        screenshot.height,
+                        format_time_ago(screenshot.modified_at_ms, current_time_millis())
+                    );
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_screenshot_viewer_details",
+                        details.as_str(),
+                        &body_style,
+                    );
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Close").clicked() {
+                        close_requested = true;
+                    }
+                    if ui.button("Copy").clicked() {
+                        copy_instance_screenshot_to_clipboard(
+                            ui.ctx(),
+                            screenshot.file_name.as_str(),
+                            screenshot.bytes.as_ref(),
+                        );
+                    }
+                    if ui.button("Reset").clicked() {
+                        viewer_state.zoom = INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM;
+                        viewer_state.pan_uv = egui::Vec2::ZERO;
+                    }
+                    if ui.button("+").clicked() {
+                        viewer_state.zoom = adjust_instance_screenshot_zoom(viewer_state.zoom, 1.0);
+                        clamp_instance_screenshot_pan(viewer_state);
+                    }
+                    if ui.button("-").clicked() {
+                        viewer_state.zoom =
+                            adjust_instance_screenshot_zoom(viewer_state.zoom, -1.0);
+                        clamp_instance_screenshot_pan(viewer_state);
+                    }
+                });
+            });
+            ui.add_space(12.0);
+
+            let canvas_size = ui.available_size().max(egui::vec2(1.0, 1.0));
+            let (canvas_rect, response) = ui.allocate_exact_size(canvas_size, egui::Sense::drag());
+            ui.painter().rect_filled(
+                canvas_rect,
+                egui::CornerRadius::same(12),
+                ui.visuals().widgets.noninteractive.bg_fill,
+            );
+
+            let image_rect = instance_fit_rect_to_aspect(
+                canvas_rect.shrink(8.0),
+                screenshot_aspect_ratio(&screenshot),
+            );
+            if response.hovered() {
+                let scroll_delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
+                if scroll_delta.abs() > 0.0 {
+                    viewer_state.zoom =
+                        adjust_instance_screenshot_zoom(viewer_state.zoom, scroll_delta.signum());
+                    clamp_instance_screenshot_pan(viewer_state);
+                    ui.ctx().request_repaint();
+                }
+            }
+            if response.dragged() && viewer_state.zoom > INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM {
+                let visible_fraction =
+                    1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
+                let delta = ui.ctx().input(|input| input.pointer.delta());
+                viewer_state.pan_uv.x -= delta.x / image_rect.width().max(1.0) * visible_fraction;
+                viewer_state.pan_uv.y -= delta.y / image_rect.height().max(1.0) * visible_fraction;
+                clamp_instance_screenshot_pan(viewer_state);
+                ui.ctx().request_repaint();
+            }
+
+            egui::Image::from_bytes(
+                screenshot_uri(screenshot.path.as_path(), screenshot.modified_at_ms),
+                Arc::clone(&screenshot.bytes),
+            )
+            .fit_to_exact_size(image_rect.size())
+            .maintain_aspect_ratio(false)
+            .uv(instance_viewer_uv_rect(viewer_state))
+            .paint_at(ui, image_rect);
+            ui.painter().rect_stroke(
+                image_rect,
+                egui::CornerRadius::same(12),
+                ui.visuals().widgets.inactive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+        });
+
+    if !open || close_requested {
+        state.screenshot_viewer = None;
+    }
+}
+
+fn render_instance_screenshot_copy_button(
+    ui: &mut Ui,
+    tile_rect: egui::Rect,
+    scope: &str,
+    screenshot: &InstanceScreenshotEntry,
+) -> bool {
+    let button_rect = egui::Rect::from_min_size(
+        tile_rect.min + egui::vec2(8.0, 8.0),
+        egui::vec2(
+            INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE,
+            INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE,
+        ),
+    );
+    let themed_svg = apply_color_to_svg(assets::COPY_SVG, ui.visuals().text_color());
+    let uri = format!(
+        "bytes://instance/screenshot-copy/{scope}-{}.svg",
+        screenshot_key(screenshot.path.as_path())
+    );
+    let response = ui.interact(
+        button_rect,
+        ui.id().with((
+            "instance_screenshot_copy_button",
+            scope,
+            screenshot_key(screenshot.path.as_path()),
+        )),
+        egui::Sense::click(),
+    );
+    let fill = if response.is_pointer_button_down_on() {
+        ui.visuals().widgets.active.bg_fill
+    } else if response.hovered() {
+        ui.visuals().widgets.hovered.bg_fill
+    } else {
+        egui::Color32::from_rgba_premultiplied(12, 16, 24, 210)
+    };
+    ui.painter()
+        .rect_filled(button_rect, egui::CornerRadius::same(8), fill);
+    ui.painter().rect_stroke(
+        button_rect,
+        egui::CornerRadius::same(8),
+        ui.visuals().widgets.inactive.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+    let icon_rect = egui::Rect::from_center_size(button_rect.center(), egui::vec2(14.0, 14.0));
+    egui::Image::from_bytes(uri, themed_svg)
+        .fit_to_exact_size(icon_rect.size())
+        .paint_at(ui, icon_rect);
+    if response.clicked() {
+        copy_instance_screenshot_to_clipboard(
+            ui.ctx(),
+            screenshot.file_name.as_str(),
+            screenshot.bytes.as_ref(),
+        );
+        return true;
+    }
+    let _ = response.on_hover_text("Copy image to clipboard");
+    false
+}
+
+fn copy_instance_screenshot_to_clipboard(ctx: &egui::Context, label: &str, bytes: &[u8]) {
+    match decode_clipboard_color_image(bytes) {
+        Ok(image) => {
+            ctx.copy_image(image);
+            notification::info!("instance/screenshots", "Copied '{}' to clipboard.", label);
+        }
+        Err(err) => {
+            notification::error!(
+                "instance/screenshots",
+                "Failed to copy '{}' to clipboard: {}",
+                label,
+                err
+            );
+        }
+    }
+}
+
+fn render_instance_logs_tab(ui: &mut Ui, text_ui: &mut TextUi, state: &mut InstanceScreenState) {
+    let title_style = LabelOptions {
+        font_size: 18.0,
+        line_height: 24.0,
+        weight: 700,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    };
+    let body_style = LabelOptions {
+        color: ui.visuals().weak_text_color(),
+        wrap: true,
+        ..LabelOptions::default()
+    };
+    let _ = text_ui.label(ui, "instance_logs_title", "Logs", &title_style);
+    let _ = text_ui.label(
+        ui,
+        "instance_logs_summary",
+        "Select a log file to view it with the same highlighting rules as the live console.",
+        &body_style,
+    );
+    ui.add_space(8.0);
+
+    if state.logs.is_empty() {
+        let _ = text_ui.label(
+            ui,
+            "instance_logs_empty",
+            "No log files found under this instance's logs folder.",
+            &body_style,
+        );
+        return;
+    }
+
+    let full_size = ui.available_size().max(egui::vec2(1.0, 1.0));
+    let sidebar_width = (full_size.x * 0.28).clamp(220.0, 320.0);
+    let logs_snapshot = state.logs.clone();
+    ui.horizontal(|ui| {
+        ui.allocate_ui_with_layout(
+            egui::vec2(sidebar_width, full_size.y),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("instance_logs_file_list")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for log in &logs_snapshot {
+                            let selected = state.selected_log_path.as_ref() == Some(&log.path);
+                            let mut label = log.file_name.clone();
+                            if log.size_bytes > 0 {
+                                label.push_str(&format!(
+                                    "\n{} | {}",
+                                    format_log_file_size(log.size_bytes),
+                                    format_time_ago(log.modified_at_ms, current_time_millis())
+                                ));
+                            }
+                            let response = ui.add_sized(
+                                egui::vec2(ui.available_width(), 44.0),
+                                egui::Button::new(egui::RichText::new(label).color(if selected {
+                                    ui.visuals().selection.stroke.color
+                                } else {
+                                    ui.visuals().text_color()
+                                }))
+                                .selected(selected)
+                                .fill(if selected {
+                                    ui.visuals().selection.bg_fill
+                                } else {
+                                    ui.visuals().widgets.inactive.bg_fill
+                                })
+                                .stroke(if selected {
+                                    ui.visuals().selection.stroke
+                                } else {
+                                    ui.visuals().widgets.inactive.bg_stroke
+                                })
+                                .corner_radius(egui::CornerRadius::same(8)),
+                            );
+                            if response.clicked() {
+                                state.selected_log_path = Some(log.path.clone());
+                                load_selected_instance_log(state);
+                            }
+                            ui.add_space(6.0);
+                        }
+                    });
+            },
+        );
+        ui.add_space(12.0);
+        ui.allocate_ui_with_layout(
+            egui::vec2((full_size.x - sidebar_width - 12.0).max(1.0), full_size.y),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                if let Some(selected_log_path) = state.selected_log_path.as_ref() {
+                    let log_name = selected_log_path
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .unwrap_or("Log");
+                    let _ =
+                        text_ui.label(ui, "instance_logs_selected_name", log_name, &title_style);
+                    let mut details = selected_log_path.display().to_string();
+                    if state.loaded_log_truncated {
+                        details
+                            .push_str(&format!(" | showing last {} lines", MAX_INSTANCE_LOG_LINES));
+                    }
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_logs_selected_path",
+                        details.as_str(),
+                        &body_style,
+                    );
+                    ui.add_space(8.0);
+                    if let Some(error) = state.loaded_log_error.as_deref() {
+                        let _ = text_ui.label(
+                            ui,
+                            "instance_logs_error",
+                            error,
+                            &LabelOptions {
+                                color: ui.visuals().error_fg_color,
+                                wrap: true,
+                                ..LabelOptions::default()
+                            },
+                        );
+                        return;
+                    }
+                    console_screen::render_log_buffer(
+                        ui,
+                        text_ui,
+                        ("instance_log_viewer", selected_log_path),
+                        &state.loaded_log_lines,
+                        "Log is empty.",
+                        false,
+                    );
+                } else {
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_logs_no_selection",
+                        "Select a log file from the left to view it.",
+                        &body_style,
+                    );
+                }
+            },
+        );
+    });
+}
+
+fn refresh_instance_screenshots(state: &mut InstanceScreenState, instance_root: &Path) {
+    state.screenshots = collect_instance_screenshots(instance_root);
+    state.last_screenshot_scan_at = Some(Instant::now());
+}
+
+fn collect_instance_screenshots(instance_root: &Path) -> Vec<InstanceScreenshotEntry> {
+    let screenshots_dir = instance_root.join("screenshots");
+    let Ok(entries) = fs::read_dir(screenshots_dir) else {
+        return Vec::new();
+    };
+    let mut screenshots = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() || !is_supported_screenshot_path(path.as_path()) {
+            continue;
+        }
+        let Ok((width, height)) = image::image_dimensions(path.as_path()) else {
+            continue;
+        };
+        if width == 0 || height == 0 {
+            continue;
+        }
+        let Ok(bytes) = fs::read(path.as_path()) else {
+            continue;
+        };
+        screenshots.push(InstanceScreenshotEntry {
+            file_name: entry.file_name().to_string_lossy().to_string(),
+            modified_at_ms: modified_millis(path.as_path()),
+            path,
+            bytes: bytes.into(),
+            width,
+            height,
+        });
+    }
+    screenshots.sort_by(|a, b| {
+        b.modified_at_ms
+            .unwrap_or(0)
+            .cmp(&a.modified_at_ms.unwrap_or(0))
+            .then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    screenshots.truncate(MAX_INSTANCE_SCREENSHOTS);
+    screenshots
+}
+
+fn refresh_instance_logs(state: &mut InstanceScreenState, instance_root: &Path) {
+    state.logs = collect_instance_logs(instance_root);
+    if state
+        .selected_log_path
+        .as_ref()
+        .is_some_and(|selected| !state.logs.iter().any(|entry| entry.path == *selected))
+    {
+        state.selected_log_path = None;
+    }
+    state.last_log_scan_at = Some(Instant::now());
+}
+
+fn collect_instance_logs(instance_root: &Path) -> Vec<InstanceLogEntry> {
+    let logs_dir = instance_root.join("logs");
+    let Ok(entries) = fs::read_dir(logs_dir) else {
+        return Vec::new();
+    };
+    let mut logs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        logs.push(InstanceLogEntry {
+            file_name: entry.file_name().to_string_lossy().to_string(),
+            modified_at_ms: modified_millis(path.as_path()),
+            path,
+            size_bytes: metadata.len(),
+        });
+    }
+    logs.sort_by(|a, b| {
+        b.modified_at_ms
+            .unwrap_or(0)
+            .cmp(&a.modified_at_ms.unwrap_or(0))
+            .then_with(|| a.file_name.cmp(&b.file_name))
+    });
+    logs
+}
+
+fn sync_selected_instance_log(state: &mut InstanceScreenState) {
+    if state.selected_log_path.is_none() {
+        state.selected_log_path = state.logs.first().map(|entry| entry.path.clone());
+    }
+    let Some(selected_log_path) = state.selected_log_path.as_ref() else {
+        state.loaded_log_path = None;
+        state.loaded_log_lines.clear();
+        state.loaded_log_error = None;
+        state.loaded_log_modified_at_ms = None;
+        state.loaded_log_truncated = false;
+        return;
+    };
+    let current_modified = state
+        .logs
+        .iter()
+        .find(|entry| &entry.path == selected_log_path)
+        .and_then(|entry| entry.modified_at_ms);
+    if state.loaded_log_path.as_ref() != Some(selected_log_path)
+        || state.loaded_log_modified_at_ms != current_modified
+    {
+        load_selected_instance_log(state);
+    }
+}
+
+fn load_selected_instance_log(state: &mut InstanceScreenState) {
+    let Some(selected_log_path) = state.selected_log_path.clone() else {
+        state.loaded_log_path = None;
+        state.loaded_log_lines.clear();
+        state.loaded_log_error = None;
+        state.loaded_log_modified_at_ms = None;
+        state.loaded_log_truncated = false;
+        return;
+    };
+    match read_instance_log_lines(selected_log_path.as_path()) {
+        Ok((lines, truncated)) => {
+            state.loaded_log_path = Some(selected_log_path.clone());
+            state.loaded_log_modified_at_ms = modified_millis(selected_log_path.as_path());
+            state.loaded_log_lines = lines;
+            state.loaded_log_error = None;
+            state.loaded_log_truncated = truncated;
+        }
+        Err(err) => {
+            state.loaded_log_path = Some(selected_log_path.clone());
+            state.loaded_log_modified_at_ms = modified_millis(selected_log_path.as_path());
+            state.loaded_log_lines.clear();
+            state.loaded_log_error = Some(err);
+            state.loaded_log_truncated = false;
+        }
+    }
+}
+
+fn read_instance_log_lines(path: &Path) -> Result<(Vec<String>, bool), String> {
+    let bytes =
+        fs::read(path).map_err(|err| format!("Failed to read '{}': {err}", path.display()))?;
+    let decoded = if path
+        .extension()
+        .and_then(OsStr::to_str)
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("gz"))
+    {
+        let mut decoder = GzDecoder::new(bytes.as_slice());
+        let mut output = Vec::new();
+        decoder
+            .read_to_end(&mut output)
+            .map_err(|err| format!("Failed to decompress '{}': {err}", path.display()))?;
+        output
+    } else {
+        bytes
+    };
+    let text = String::from_utf8_lossy(&decoded);
+    let total_lines = text.lines().count();
+    let truncated = total_lines > MAX_INSTANCE_LOG_LINES;
+    let lines = text
+        .lines()
+        .skip(total_lines.saturating_sub(MAX_INSTANCE_LOG_LINES))
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Ok((lines, truncated))
+}
+
+fn is_supported_screenshot_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(OsStr::to_str)
+            .map(|extension| extension.to_ascii_lowercase()),
+        Some(extension)
+            if matches!(
+                extension.as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
+            )
+    )
+}
+
+fn screenshot_aspect_ratio(screenshot: &InstanceScreenshotEntry) -> f32 {
+    screenshot.width as f32 / screenshot.height.max(1) as f32
+}
+
+fn screenshot_key(path: &Path) -> String {
+    path.to_string_lossy().to_string()
+}
+
+fn screenshot_uri(path: &Path, modified_at_ms: Option<u64>) -> String {
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    modified_at_ms.hash(&mut hasher);
+    format!("bytes://instance/screenshot/{}.png", hasher.finish())
+}
+
+fn instance_fit_rect_to_aspect(rect: egui::Rect, aspect_ratio: f32) -> egui::Rect {
+    let safe_aspect = aspect_ratio.max(0.01);
+    let rect_aspect = rect.width() / rect.height().max(1.0);
+    if rect_aspect > safe_aspect {
+        let width = rect.height() * safe_aspect;
+        let x = rect.center().x - width * 0.5;
+        egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(width, rect.height()))
+    } else {
+        let height = rect.width() / safe_aspect;
+        let y = rect.center().y - height * 0.5;
+        egui::Rect::from_min_size(egui::pos2(rect.min.x, y), egui::vec2(rect.width(), height))
+    }
+}
+
+fn adjust_instance_screenshot_zoom(current_zoom: f32, direction: f32) -> f32 {
+    (current_zoom + direction * INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP).clamp(
+        INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
+        INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
+    )
+}
+
+fn clamp_instance_screenshot_pan(viewer_state: &mut InstanceScreenshotViewerState) {
+    let visible_fraction = 1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
+    let max_offset = (1.0 - visible_fraction) * 0.5;
+    viewer_state.pan_uv.x = viewer_state.pan_uv.x.clamp(-max_offset, max_offset);
+    viewer_state.pan_uv.y = viewer_state.pan_uv.y.clamp(-max_offset, max_offset);
+}
+
+fn instance_viewer_uv_rect(viewer_state: &InstanceScreenshotViewerState) -> egui::Rect {
+    let visible_fraction = 1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
+    let half = visible_fraction * 0.5;
+    let center = egui::pos2(0.5 + viewer_state.pan_uv.x, 0.5 + viewer_state.pan_uv.y);
+    egui::Rect::from_min_max(
+        egui::pos2(center.x - half, center.y - half),
+        egui::pos2(center.x + half, center.y + half),
+    )
+}
+
+fn format_log_file_size(size_bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * 1024.0;
+    let size = size_bytes as f64;
+    if size >= MIB {
+        format!("{:.1} MiB", size / MIB)
+    } else if size >= KIB {
+        format!("{:.1} KiB", size / KIB)
+    } else {
+        format!("{size_bytes} B")
+    }
+}
+
+fn decode_clipboard_color_image(bytes: &[u8]) -> Result<egui::ColorImage, String> {
+    let rgba = image::load_from_memory(bytes)
+        .map_err(|err| err.to_string())?
+        .to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        size,
+        rgba.as_raw(),
+    ))
 }
 
 fn render_instance_settings_modal(
@@ -1404,6 +2359,49 @@ fn render_export_vtmpack_modal(
     }
 
     state.show_export_vtmpack_modal = open;
+}
+
+fn modified_millis(path: &Path) -> Option<u64> {
+    let metadata = fs::metadata(path).ok()?;
+    let modified = metadata.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(duration.as_millis() as u64)
+}
+
+fn current_time_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn format_time_ago(timestamp_ms: Option<u64>, now_ms: u64) -> String {
+    let Some(timestamp_ms) = timestamp_ms else {
+        return "unknown".to_owned();
+    };
+    let elapsed_ms = now_ms.saturating_sub(timestamp_ms);
+    let elapsed_seconds = elapsed_ms / 1_000;
+    if elapsed_seconds < 60 {
+        return "just now".to_owned();
+    }
+    let elapsed_minutes = elapsed_seconds / 60;
+    if elapsed_minutes < 60 {
+        return format!("{elapsed_minutes}m ago");
+    }
+    let elapsed_hours = elapsed_minutes / 60;
+    if elapsed_hours < 24 {
+        return format!("{elapsed_hours}h ago");
+    }
+    let elapsed_days = elapsed_hours / 24;
+    if elapsed_days < 30 {
+        return format!("{elapsed_days}d ago");
+    }
+    let elapsed_months = elapsed_days / 30;
+    if elapsed_months < 12 {
+        return format!("{elapsed_months}mo ago");
+    }
+    let elapsed_years = elapsed_days / 365;
+    format!("{elapsed_years}y ago")
 }
 
 fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {

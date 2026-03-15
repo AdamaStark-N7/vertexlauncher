@@ -28,6 +28,7 @@ pub const MINUS_SVG: &[u8] = include_bytes!("minus.svg");
 pub const PLUS_SVG: &[u8] = include_bytes!("plus.svg");
 pub const PLAY_SVG: &[u8] = include_bytes!("play.svg");
 pub const REFRESH_SVG: &[u8] = include_bytes!("refresh.svg");
+pub const RESTORE_SVG: &[u8] = include_bytes!("restore.svg");
 pub const SETTINGS_SVG: &[u8] = include_bytes!("settings.svg");
 pub const SHARE_SVG: &[u8] = include_bytes!("share.svg");
 pub const SHOPPING_CART_SVG: &[u8] = include_bytes!("shopping-cart.svg");

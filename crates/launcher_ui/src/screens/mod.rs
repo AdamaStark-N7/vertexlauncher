@@ -99,6 +99,19 @@ pub(crate) fn peek_launch_intent(ctx: &egui::Context) -> Option<PendingLaunchInt
     ctx.data_mut(|data| data.get_temp::<PendingLaunchIntent>(id))
 }
 
+pub fn handle_escape(
+    ctx: &egui::Context,
+    screen: AppScreen,
+    selected_instance_id: Option<&str>,
+) -> bool {
+    match screen {
+        AppScreen::Home => home::handle_escape(ctx),
+        AppScreen::Library => library::handle_escape(ctx),
+        AppScreen::Instance => instance::handle_escape(ctx, selected_instance_id),
+        _ => false,
+    }
+}
+
 pub fn render(
     ui: &mut Ui,
     screen: AppScreen,

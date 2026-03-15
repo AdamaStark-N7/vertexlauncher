@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::Instant;
 
@@ -19,6 +20,51 @@ pub(super) struct InstalledContentEntryUiCache {
     pub(super) description_source: String,
     pub(super) description_width_bucket: u32,
     pub(super) truncated_description: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum InstanceScreenTab {
+    #[default]
+    Content,
+    ScreenshotGallery,
+    Logs,
+}
+
+impl InstanceScreenTab {
+    pub(super) const ALL: [Self; 3] = [Self::Content, Self::ScreenshotGallery, Self::Logs];
+
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::Content => "Content",
+            Self::ScreenshotGallery => "Screenshot Gallery",
+            Self::Logs => "Logs",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct InstanceScreenshotEntry {
+    pub(super) path: PathBuf,
+    pub(super) file_name: String,
+    pub(super) bytes: Arc<[u8]>,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) modified_at_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct InstanceScreenshotViewerState {
+    pub(super) screenshot_key: String,
+    pub(super) zoom: f32,
+    pub(super) pan_uv: egui::Vec2,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct InstanceLogEntry {
+    pub(super) path: PathBuf,
+    pub(super) file_name: String,
+    pub(super) modified_at_ms: Option<u64>,
+    pub(super) size_bytes: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +134,18 @@ pub(super) struct InstanceScreenState {
     pub(super) runtime_last_notification_at: Option<Instant>,
     pub(super) runtime_prepare_instance_root: Option<String>,
     pub(super) runtime_prepare_user_key: Option<String>,
+    pub(super) active_tab: InstanceScreenTab,
+    pub(super) screenshots: Vec<InstanceScreenshotEntry>,
+    pub(super) last_screenshot_scan_at: Option<Instant>,
+    pub(super) screenshot_viewer: Option<InstanceScreenshotViewerState>,
+    pub(super) logs: Vec<InstanceLogEntry>,
+    pub(super) last_log_scan_at: Option<Instant>,
+    pub(super) selected_log_path: Option<PathBuf>,
+    pub(super) loaded_log_path: Option<PathBuf>,
+    pub(super) loaded_log_modified_at_ms: Option<u64>,
+    pub(super) loaded_log_lines: Vec<String>,
+    pub(super) loaded_log_error: Option<String>,
+    pub(super) loaded_log_truncated: bool,
     pub(super) show_settings_modal: bool,
     pub(super) show_export_vtmpack_modal: bool,
     pub(super) export_vtmpack_options: VtmpackExportOptions,
@@ -167,6 +225,18 @@ impl InstanceScreenState {
             runtime_last_notification_at: None,
             runtime_prepare_instance_root: None,
             runtime_prepare_user_key: None,
+            active_tab: InstanceScreenTab::Content,
+            screenshots: Vec::new(),
+            last_screenshot_scan_at: None,
+            screenshot_viewer: None,
+            logs: Vec::new(),
+            last_log_scan_at: None,
+            selected_log_path: None,
+            loaded_log_path: None,
+            loaded_log_modified_at_ms: None,
+            loaded_log_lines: Vec::new(),
+            loaded_log_error: None,
+            loaded_log_truncated: false,
             show_settings_modal: false,
             show_export_vtmpack_modal: false,
             export_vtmpack_options: VtmpackExportOptions::default(),
