@@ -5175,15 +5175,37 @@ fn draw_cape_tile(
     let (rect, response) =
         ui.allocate_exact_size(egui::vec2(tile_width, CAPE_TILE_HEIGHT), Sense::click());
 
+    let hover_t = ui
+        .ctx()
+        .animate_bool(response.id.with("cape_tile_hover"), response.hovered());
+    let press_t = ui.ctx().animate_bool(
+        response.id.with("cape_tile_press"),
+        response.is_pointer_button_down_on(),
+    );
+    let selected_t = ui
+        .ctx()
+        .animate_bool(response.id.with("cape_tile_selected"), selected);
+
     let fill = if selected {
-        ui.visuals().selection.bg_fill.gamma_multiply(0.3)
+        ui.visuals()
+            .selection
+            .bg_fill
+            .gamma_multiply(0.24 + hover_t * 0.06 + press_t * 0.04)
     } else {
-        ui.visuals().widgets.inactive.bg_fill
+        ui.visuals()
+            .widgets
+            .inactive
+            .bg_fill
+            .gamma_multiply(1.0 + hover_t * 0.08 + press_t * 0.04)
     };
     let stroke = if selected {
-        ui.visuals().selection.stroke
+        let mut stroke = ui.visuals().selection.stroke;
+        stroke.width += hover_t * 0.5;
+        stroke
     } else {
-        ui.visuals().widgets.inactive.bg_stroke
+        let mut stroke = ui.visuals().widgets.inactive.bg_stroke;
+        stroke.color = stroke.color.gamma_multiply(1.0 + hover_t * 0.18);
+        stroke
     };
 
     ui.painter().rect(
@@ -5192,6 +5214,14 @@ fn draw_cape_tile(
         fill,
         stroke,
         egui::StrokeKind::Middle,
+    );
+    paint_cape_tile_highlight(
+        ui,
+        rect,
+        response.hover_pos().or(response.interact_pointer_pos()),
+        hover_t,
+        press_t,
+        selected_t,
     );
 
     let preview_rect = Rect::from_min_size(
@@ -5305,6 +5335,115 @@ fn draw_cape_tile(
     });
 
     response.clicked()
+}
+
+fn paint_cape_tile_highlight(
+    ui: &Ui,
+    rect: Rect,
+    pointer_pos: Option<Pos2>,
+    hover_t: f32,
+    press_t: f32,
+    selected_t: f32,
+) {
+    let emphasis = (hover_t * 0.95 + press_t * 0.85 + selected_t * 0.55).clamp(0.0, 1.0);
+    if emphasis <= 0.01 {
+        return;
+    }
+
+    let selection = ui.visuals().selection.bg_fill;
+    let glow_rect = rect.shrink2(egui::vec2(1.0, 1.0));
+    let glow_center = pointer_pos.unwrap_or_else(|| {
+        egui::pos2(
+            rect.center().x,
+            egui::lerp(
+                rect.top() + 28.0..=rect.center().y,
+                selected_t.max(hover_t * 0.35),
+            ),
+        )
+    });
+    let glow_center = egui::pos2(
+        glow_center
+            .x
+            .clamp(glow_rect.left() + 4.0, glow_rect.right() - 4.0),
+        glow_center
+            .y
+            .clamp(glow_rect.top() + 4.0, glow_rect.bottom() - 4.0),
+    );
+    let glow_radius = rect.width().max(rect.height()) * egui::lerp(0.34..=0.58, emphasis);
+    let center_alpha = (32.0 + hover_t * 34.0 + press_t * 22.0 + selected_t * 10.0) / 255.0;
+    let ring_specs = [
+        (0.0, center_alpha),
+        (0.32, center_alpha * 0.52),
+        (0.68, center_alpha * 0.16),
+        (1.0, 0.0),
+    ];
+
+    let mut mesh = egui::epaint::Mesh::default();
+    let center_idx = mesh.vertices.len() as u32;
+    let center_color: Color32 = egui::Rgba::from(selection).multiply(center_alpha).into();
+    mesh.colored_vertex(glow_center, center_color);
+
+    let segments = 40usize;
+    let mut previous_ring = Vec::with_capacity(segments);
+    for (ring_index, (radius_t, alpha)) in ring_specs.iter().enumerate().skip(1) {
+        let color: Color32 = egui::Rgba::from(selection).multiply(*alpha).into();
+        let mut current_ring = Vec::with_capacity(segments);
+        for segment in 0..segments {
+            let angle = std::f32::consts::TAU * (segment as f32 / segments as f32);
+            let unit_x = angle.cos();
+            let unit_y = angle.sin();
+            let vertex = egui::pos2(
+                glow_center.x + unit_x * glow_radius * *radius_t,
+                glow_center.y + unit_y * glow_radius * *radius_t,
+            );
+            let vertex_idx = mesh.vertices.len() as u32;
+            mesh.colored_vertex(vertex, color);
+            current_ring.push(vertex_idx);
+        }
+
+        if ring_index == 1 {
+            for segment in 0..segments {
+                let next = (segment + 1) % segments;
+                mesh.add_triangle(center_idx, current_ring[segment], current_ring[next]);
+            }
+        } else {
+            for segment in 0..segments {
+                let next = (segment + 1) % segments;
+                mesh.add_triangle(
+                    previous_ring[segment],
+                    previous_ring[next],
+                    current_ring[next],
+                );
+                mesh.add_triangle(
+                    previous_ring[segment],
+                    current_ring[next],
+                    current_ring[segment],
+                );
+            }
+        }
+
+        previous_ring = current_ring;
+    }
+
+    ui.painter()
+        .with_clip_rect(glow_rect)
+        .add(egui::Shape::mesh(mesh));
+
+    let sheen_rect = Rect::from_min_max(
+        glow_rect.min + egui::vec2(0.0, 1.0),
+        egui::pos2(glow_rect.max.x, glow_rect.top() + glow_rect.height() * 0.34),
+    );
+    let sheen_alpha = (14.0 * emphasis) / 255.0;
+    ui.painter().rect_filled(
+        sheen_rect,
+        CornerRadius {
+            nw: 10,
+            ne: 10,
+            sw: 18,
+            se: 18,
+        },
+        egui::Rgba::from_white_alpha(sheen_alpha),
+    );
 }
 
 #[derive(Clone, Debug, Default)]
