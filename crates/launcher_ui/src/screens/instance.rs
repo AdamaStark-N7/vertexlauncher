@@ -89,6 +89,18 @@ const MAX_INSTANCE_SCREENSHOTS: usize = 120;
 const MAX_INSTANCE_LOG_LINES: usize = 12_000;
 const INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
 
+#[derive(Clone, Copy, Debug, Default)]
+struct InstanceScreenshotTileAction {
+    open_viewer: bool,
+    request_delete: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InstanceScreenshotOverlayAction {
+    Copy,
+    Delete,
+}
+
 fn instance_screen_state_id(instance_id: &str) -> egui::Id {
     egui::Id::new(("instance_screen_state", instance_id))
 }
@@ -103,6 +115,11 @@ pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&s
         let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
             return;
         };
+        if state.pending_delete_screenshot_key.take().is_some() {
+            data.insert_temp(state_id, state);
+            handled = true;
+            return;
+        }
         if state.screenshot_viewer.take().is_some() {
             data.insert_temp(state_id, state);
             handled = true;
@@ -300,6 +317,18 @@ pub fn render(
             }) {
                 state.screenshot_viewer = None;
             }
+            if state
+                .pending_delete_screenshot_key
+                .as_ref()
+                .is_some_and(|pending| {
+                    !state
+                        .screenshots
+                        .iter()
+                        .any(|screenshot| screenshot_key(screenshot.path.as_path()) == *pending)
+                })
+            {
+                state.pending_delete_screenshot_key = None;
+            }
             render_instance_screenshot_gallery(ui, text_ui, &mut state);
         }
         InstanceScreenTab::Logs => {
@@ -316,6 +345,12 @@ pub fn render(
     }
 
     render_instance_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state);
+    render_instance_delete_screenshot_modal(
+        ui.ctx(),
+        text_ui,
+        &mut state,
+        instance_root_path.as_path(),
+    );
 
     ui.ctx().data_mut(|d| d.insert_temp(state_id, state));
     output
@@ -416,6 +451,7 @@ fn render_instance_screenshot_gallery(
         build_instance_screenshot_mosaic(&state.screenshots, column_count, column_width);
 
     let mut open_key = None;
+    let mut delete_key = None;
     egui::ScrollArea::vertical()
         .id_salt("instance_screenshot_gallery_scroll")
         .auto_shrink([false, false])
@@ -424,12 +460,17 @@ fn render_instance_screenshot_gallery(
                 for (column_ui, items) in columns.iter_mut().zip(assignments.iter()) {
                     column_ui.spacing_mut().item_spacing.y = INSTANCE_SCREENSHOT_TILE_GAP;
                     for &(index, tile_height) in items {
-                        if render_instance_screenshot_tile(
+                        let action = render_instance_screenshot_tile(
                             column_ui,
                             &state.screenshots[index],
                             tile_height,
-                        ) {
+                        );
+                        if action.open_viewer {
                             open_key =
+                                Some(screenshot_key(state.screenshots[index].path.as_path()));
+                        }
+                        if action.request_delete {
+                            delete_key =
                                 Some(screenshot_key(state.screenshots[index].path.as_path()));
                         }
                     }
@@ -443,6 +484,9 @@ fn render_instance_screenshot_gallery(
             zoom: INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
             pan_uv: egui::Vec2::ZERO,
         });
+    }
+    if let Some(screenshot_key) = delete_key {
+        state.pending_delete_screenshot_key = Some(screenshot_key);
     }
 }
 
@@ -481,7 +525,7 @@ fn render_instance_screenshot_tile(
     ui: &mut Ui,
     screenshot: &InstanceScreenshotEntry,
     tile_height: f32,
-) -> bool {
+) -> InstanceScreenshotTileAction {
     let width = ui.available_width().max(1.0);
     let tile_size = egui::vec2(width, tile_height);
     let (rect, _) = ui.allocate_exact_size(tile_size, egui::Sense::hover());
@@ -496,11 +540,20 @@ fn render_instance_screenshot_tile(
         .sense(egui::Sense::click()),
     );
     let tile_hovered = ui.rect_contains_pointer(rect);
-    let copy_clicked = if tile_hovered {
-        render_instance_screenshot_copy_button(ui, rect, "instance_gallery", screenshot)
-    } else {
-        false
-    };
+    let mut overlay_clicked = false;
+    let mut action = InstanceScreenshotTileAction::default();
+    if tile_hovered {
+        match render_instance_screenshot_overlay_action(ui, rect, "instance_gallery", screenshot) {
+            Some(InstanceScreenshotOverlayAction::Copy) => {
+                overlay_clicked = true;
+            }
+            Some(InstanceScreenshotOverlayAction::Delete) => {
+                overlay_clicked = true;
+                action.request_delete = true;
+            }
+            None => {}
+        }
+    }
     let stroke = if tile_hovered {
         ui.visuals().widgets.hovered.bg_stroke
     } else {
@@ -534,7 +587,7 @@ fn render_instance_screenshot_tile(
         egui::Color32::WHITE,
     );
 
-    image_response
+    action.open_viewer = image_response
         .on_hover_text(format!(
             "{}\n{}x{}\n{}",
             screenshot.file_name,
@@ -543,7 +596,8 @@ fn render_instance_screenshot_tile(
             screenshot.path.display()
         ))
         .clicked()
-        && !copy_clicked
+        && !overlay_clicked;
+    action
 }
 
 fn render_instance_screenshot_viewer_modal(
@@ -583,6 +637,7 @@ fn render_instance_screenshot_viewer_modal(
     );
     let mut open = true;
     let mut close_requested = false;
+    let mut delete_requested = false;
     modal::show_scrim(ctx, "instance_screenshot_viewer_scrim", viewport_rect);
 
     egui::Window::new("Instance Screenshot Viewer")
@@ -639,6 +694,9 @@ fn render_instance_screenshot_viewer_modal(
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Close").clicked() {
                         close_requested = true;
+                    }
+                    if ui.button("Delete").clicked() {
+                        delete_requested = true;
                     }
                     if ui.button("Copy").clicked() {
                         copy_instance_screenshot_to_clipboard(
@@ -711,36 +769,233 @@ fn render_instance_screenshot_viewer_modal(
             );
         });
 
+    if delete_requested {
+        state.pending_delete_screenshot_key = Some(selected_screenshot_key);
+    }
     if !open || close_requested {
         state.screenshot_viewer = None;
     }
 }
 
-fn render_instance_screenshot_copy_button(
+fn render_instance_delete_screenshot_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
+    instance_root: &Path,
+) {
+    let Some(pending_screenshot_key) = state.pending_delete_screenshot_key.clone() else {
+        return;
+    };
+    let Some(screenshot) = state
+        .screenshots
+        .iter()
+        .find(|entry| screenshot_key(entry.path.as_path()) == pending_screenshot_key)
+        .cloned()
+    else {
+        state.pending_delete_screenshot_key = None;
+        return;
+    };
+
+    let viewport_rect = ctx.input(|input| input.content_rect());
+    let modal_size = egui::vec2(viewport_rect.width().min(520.0), 250.0);
+    let modal_pos = egui::pos2(
+        (viewport_rect.center().x - modal_size.x * 0.5)
+            .clamp(viewport_rect.left(), viewport_rect.right() - modal_size.x),
+        (viewport_rect.center().y - modal_size.y * 0.5)
+            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_size.y),
+    );
+    let danger = ctx.style().visuals.error_fg_color;
+    let mut cancel_requested = false;
+    let mut delete_requested = false;
+    modal::show_scrim(ctx, "instance_delete_screenshot_modal_scrim", viewport_rect);
+
+    egui::Window::new("Delete Instance Screenshot")
+        .id(egui::Id::new("instance_delete_screenshot_modal"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(modal_pos)
+        .fixed_size(modal_size)
+        .title_bar(false)
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .constrain(true)
+        .constrain_to(viewport_rect)
+        .frame(modal::window_frame(ctx))
+        .show(ctx, |ui| {
+            let heading_style = LabelOptions {
+                font_size: 28.0,
+                line_height: 32.0,
+                weight: 700,
+                color: danger,
+                wrap: false,
+                ..LabelOptions::default()
+            };
+            let body_style = LabelOptions {
+                color: ui.visuals().text_color(),
+                wrap: true,
+                ..LabelOptions::default()
+            };
+            let muted_style = LabelOptions {
+                color: ui.visuals().weak_text_color(),
+                wrap: true,
+                ..LabelOptions::default()
+            };
+
+            let path_label = screenshot.path.display().to_string();
+            let _ = text_ui.label(
+                ui,
+                ("instance_delete_screenshot_heading", path_label.clone()),
+                "Delete Screenshot?",
+                &heading_style,
+            );
+            let _ = text_ui.label(
+                ui,
+                ("instance_delete_screenshot_body", path_label.clone()),
+                &format!(
+                    "Delete \"{}\" from disk? This permanently removes the screenshot.",
+                    screenshot.file_name
+                ),
+                &body_style,
+            );
+            let _ = text_ui.label(
+                ui,
+                ("instance_delete_screenshot_root", path_label.clone()),
+                &format!("Instance root: {}", instance_root.display()),
+                &muted_style,
+            );
+            let _ = text_ui.label(
+                ui,
+                ("instance_delete_screenshot_path", path_label),
+                &format!("Path: {}", screenshot.path.display()),
+                &muted_style,
+            );
+
+            ui.add_space(16.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let delete_button =
+                    egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
+                        .fill(danger.gamma_multiply(0.84))
+                        .stroke(egui::Stroke::new(1.0, danger))
+                        .min_size(egui::vec2(120.0, 34.0))
+                        .corner_radius(egui::CornerRadius::same(8));
+                let cancel_button = egui::Button::new("Cancel")
+                    .min_size(egui::vec2(120.0, 34.0))
+                    .corner_radius(egui::CornerRadius::same(8));
+                if ui.add(delete_button).clicked() {
+                    delete_requested = true;
+                }
+                if ui.add(cancel_button).clicked() {
+                    cancel_requested = true;
+                }
+            });
+        });
+
+    if cancel_requested {
+        state.pending_delete_screenshot_key = None;
+        return;
+    }
+
+    if delete_requested {
+        match fs::remove_file(screenshot.path.as_path()) {
+            Ok(()) => {
+                if state
+                    .screenshot_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.screenshot_key == pending_screenshot_key)
+                {
+                    state.screenshot_viewer = None;
+                }
+                state.pending_delete_screenshot_key = None;
+                refresh_instance_screenshots(state, instance_root);
+                notification::info!(
+                    "instance/screenshots",
+                    "Deleted '{}' from disk.",
+                    screenshot.file_name
+                );
+            }
+            Err(err) => {
+                state.pending_delete_screenshot_key = None;
+                notification::error!(
+                    "instance/screenshots",
+                    "Failed to delete '{}': {}",
+                    screenshot.file_name,
+                    err
+                );
+            }
+        }
+    }
+}
+
+fn render_instance_screenshot_overlay_action(
     ui: &mut Ui,
     tile_rect: egui::Rect,
     scope: &str,
     screenshot: &InstanceScreenshotEntry,
+) -> Option<InstanceScreenshotOverlayAction> {
+    let screenshot_key = screenshot_key(screenshot.path.as_path());
+    if render_instance_screenshot_overlay_button(
+        ui,
+        tile_rect,
+        scope,
+        screenshot_key.as_str(),
+        "instance_screenshot_copy_button",
+        assets::COPY_SVG,
+        ui.visuals().text_color(),
+        "Copy image to clipboard",
+        8.0,
+    ) {
+        copy_instance_screenshot_to_clipboard(
+            ui.ctx(),
+            screenshot.file_name.as_str(),
+            screenshot.bytes.as_ref(),
+        );
+        return Some(InstanceScreenshotOverlayAction::Copy);
+    }
+    if render_instance_screenshot_overlay_button(
+        ui,
+        tile_rect,
+        scope,
+        screenshot_key.as_str(),
+        "instance_screenshot_delete_button",
+        assets::TRASH_X_SVG,
+        ui.visuals().error_fg_color,
+        "Delete screenshot",
+        8.0 + INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE + 6.0,
+    ) {
+        return Some(InstanceScreenshotOverlayAction::Delete);
+    }
+    None
+}
+
+fn render_instance_screenshot_overlay_button(
+    ui: &mut Ui,
+    tile_rect: egui::Rect,
+    scope: &str,
+    screenshot_key: &str,
+    id_source: &str,
+    icon_svg: &[u8],
+    icon_color: egui::Color32,
+    tooltip: &str,
+    x_offset: f32,
 ) -> bool {
     let button_rect = egui::Rect::from_min_size(
-        tile_rect.min + egui::vec2(8.0, 8.0),
+        tile_rect.min + egui::vec2(x_offset, 8.0),
         egui::vec2(
             INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE,
             INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE,
         ),
     );
-    let themed_svg = apply_color_to_svg(assets::COPY_SVG, ui.visuals().text_color());
-    let uri = format!(
-        "bytes://instance/screenshot-copy/{scope}-{}.svg",
-        screenshot_key(screenshot.path.as_path())
+    let themed_svg = apply_color_to_svg(icon_svg, icon_color);
+    let icon_color_key = format!(
+        "{:02x}{:02x}{:02x}",
+        icon_color.r(),
+        icon_color.g(),
+        icon_color.b()
     );
+    let uri = format!("bytes://instance/{id_source}/{scope}-{screenshot_key}-{icon_color_key}.svg");
     let response = ui.interact(
         button_rect,
-        ui.id().with((
-            "instance_screenshot_copy_button",
-            scope,
-            screenshot_key(screenshot.path.as_path()),
-        )),
+        ui.id().with((id_source, scope, screenshot_key)),
         egui::Sense::click(),
     );
     let fill = if response.is_pointer_button_down_on() {
@@ -762,16 +1017,9 @@ fn render_instance_screenshot_copy_button(
     egui::Image::from_bytes(uri, themed_svg)
         .fit_to_exact_size(icon_rect.size())
         .paint_at(ui, icon_rect);
-    if response.clicked() {
-        copy_instance_screenshot_to_clipboard(
-            ui.ctx(),
-            screenshot.file_name.as_str(),
-            screenshot.bytes.as_ref(),
-        );
-        return true;
-    }
-    let _ = response.on_hover_text("Copy image to clipboard");
-    false
+    let clicked = response.clicked();
+    let _ = response.on_hover_text(tooltip);
+    clicked
 }
 
 fn copy_instance_screenshot_to_clipboard(ctx: &egui::Context, label: &str, bytes: &[u8]) {
