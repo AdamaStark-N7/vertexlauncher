@@ -334,29 +334,32 @@ fn render_ui_font_settings(
             if options.is_empty() {
                 return;
             }
-            if !options.contains(value) {
-                *value = options[0];
+            let selected_option_index = options
+                .iter()
+                .position(|option| option.matches(value))
+                .unwrap_or(0);
+            if options[selected_option_index] != *value {
+                *value = options[selected_option_index].clone();
             }
-            let option_labels: Vec<&str> = options
+            let option_labels: Vec<String> = options
                 .iter()
                 .map(|option| option.settings_label())
                 .collect();
-            let mut selected_index = options
-                .iter()
-                .position(|option| *option == *value)
-                .unwrap_or(0);
-            let response = settings_widgets::dropdown_row(
+            let option_label_refs: Vec<&str> =
+                option_labels.iter().map(|label| label.as_str()).collect();
+            let mut selected_index = selected_option_index;
+            let response = settings_widgets::searchable_dropdown_row(
                 text_ui,
                 ui,
                 setting.id,
                 setting.label,
                 setting.info_tooltip,
                 &mut selected_index,
-                &option_labels,
+                &option_label_refs,
             );
             if response.changed() {
-                if let Some(next_value) = options.get(selected_index).copied() {
-                    *value = next_value;
+                if let Some(next_value) = options.get(selected_index) {
+                    *value = next_value.clone();
                 }
             }
         });

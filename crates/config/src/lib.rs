@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::io::{Error as IOError, Write};
 use std::path::Path;
 
@@ -30,63 +30,11 @@ pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN: i32 = 2;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX: i32 = 16;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP: i32 = 1;
 
-const MAPLE_FONT_FAMILIES: &[&str] = &["Maple Mono NF", "Maple Mono", "Maple Mono Normal"];
-const JETBRAINS_FONT_FAMILIES: &[&str] = &[
-    "JetBrains Mono",
-    "JetBrainsMono",
-    "JetBrainsMono Nerd Font",
-    "JetBrainsMono Nerd Font Mono",
-    "JetBrainsMono NF",
-    "JetBrainsMono NFM",
-];
-const FIRA_FONT_FAMILIES: &[&str] = &[
-    "Fira Code",
-    "FiraCode",
-    "FiraCode Nerd Font",
-    "FiraCode Nerd Font Mono",
-    "FiraCode NF",
-    "FiraCode NFM",
-];
-const CASCADIA_FONT_FAMILIES: &[&str] = &[
-    "Cascadia Code",
-    "Cascadia Mono",
-    "CaskaydiaCove Nerd Font",
-    "CaskaydiaCove Nerd Font Mono",
-    "CaskaydiaMono Nerd Font",
-    "CaskaydiaMono Nerd Font Mono",
-];
-const IOSEVKA_FONT_FAMILIES: &[&str] = &[
-    "Iosevka",
-    "Iosevka Term",
-    "Iosevka Nerd Font",
-    "Iosevka Nerd Font Mono",
-    "Iosevka NFM",
-    "IosevkaTerm Nerd Font",
-    "IosevkaTerm Nerd Font Mono",
-    "IosevkaTerm NFM",
-];
-
-const UI_FONT_OPTIONS: &[UiFontFamily] = &[
-    UiFontFamily::MapleMonoNf,
-    UiFontFamily::JetBrainsMono,
-    UiFontFamily::FiraCode,
-    UiFontFamily::CascadiaCode,
-    UiFontFamily::Iosevka,
-];
-
-const UI_FONT_SYSTEM_OPTIONS: &[UiFontFamily] = &[
-    UiFontFamily::JetBrainsMono,
-    UiFontFamily::FiraCode,
-    UiFontFamily::CascadiaCode,
-    UiFontFamily::Iosevka,
-];
-
-const UI_FONT_OPTION_LABELS: &[&str] = &[
-    "Maple Mono NF (Included default)",
-    "JetBrains Mono",
-    "Fira Code",
-    "Cascadia Code",
-    "Iosevka",
+const INCLUDED_DEFAULT_UI_FONT_FAMILY: &str = "Maple Mono NF";
+const MAPLE_FONT_FAMILIES: &[&str] = &[
+    INCLUDED_DEFAULT_UI_FONT_FAMILY,
+    "Maple Mono",
+    "Maple Mono Normal",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -144,56 +92,104 @@ impl ConfigFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UiFontFamily {
-    MapleMonoNf,
-    JetBrainsMono,
-    FiraCode,
-    CascadiaCode,
-    Iosevka,
-}
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct UiFontFamily(String);
 
 impl UiFontFamily {
+    /// Creates the bundled Maple Mono family selection.
+    pub fn included_default() -> Self {
+        Self(INCLUDED_DEFAULT_UI_FONT_FAMILY.to_owned())
+    }
+
+    /// Creates a font family from a discovered or configured family name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(normalize_ui_font_family_name(name.into()))
+    }
+
     /// Returns whether this font family is shipped with the launcher.
-    pub fn is_included_default(self) -> bool {
-        matches!(self, UiFontFamily::MapleMonoNf)
+    pub fn is_included_default(&self) -> bool {
+        self.matches_name(INCLUDED_DEFAULT_UI_FONT_FAMILY)
     }
 
     /// Short display label.
-    pub fn label(self) -> &'static str {
-        match self {
-            UiFontFamily::MapleMonoNf => "Maple Mono NF",
-            UiFontFamily::JetBrainsMono => "JetBrains Mono",
-            UiFontFamily::FiraCode => "Fira Code",
-            UiFontFamily::CascadiaCode => "Cascadia Code",
-            UiFontFamily::Iosevka => "Iosevka",
-        }
+    pub fn label(&self) -> &str {
+        &self.0
     }
 
     /// Settings-facing label including default marker when applicable.
-    pub fn settings_label(self) -> &'static str {
-        match self {
-            UiFontFamily::MapleMonoNf => "Maple Mono NF (Included default)",
-            _ => self.label(),
+    pub fn settings_label(&self) -> String {
+        if self.is_included_default() {
+            format!("{} (Included default)", self.label())
+        } else {
+            self.label().to_owned()
         }
     }
 
-    /// Family aliases used when probing system fonts.
-    pub fn query_families(self) -> &'static [&'static str] {
-        match self {
-            UiFontFamily::MapleMonoNf => MAPLE_FONT_FAMILIES,
-            UiFontFamily::JetBrainsMono => JETBRAINS_FONT_FAMILIES,
-            UiFontFamily::FiraCode => FIRA_FONT_FAMILIES,
-            UiFontFamily::CascadiaCode => CASCADIA_FONT_FAMILIES,
-            UiFontFamily::Iosevka => IOSEVKA_FONT_FAMILIES,
+    /// Font family candidates used when applying the selected face.
+    pub fn query_families(&self) -> Vec<&str> {
+        if self.is_included_default() {
+            MAPLE_FONT_FAMILIES.to_vec()
+        } else {
+            vec![self.label()]
         }
     }
 
-    /// System-installed options excluding bundled defaults.
-    pub fn system_options() -> &'static [UiFontFamily] {
-        UI_FONT_SYSTEM_OPTIONS
+    /// Case-insensitive match used when reconciling discovered font families.
+    pub fn matches(&self, other: &Self) -> bool {
+        normalized_ui_font_family_key(self.label()) == normalized_ui_font_family_key(other.label())
     }
+
+    /// Case-insensitive match against a raw family name.
+    pub fn matches_name(&self, other: &str) -> bool {
+        normalized_ui_font_family_key(self.label()) == normalized_ui_font_family_key(other)
+    }
+
+    /// Normalizes the stored family name in place.
+    pub fn normalize(&mut self) {
+        self.0 = normalize_ui_font_family_name(std::mem::take(&mut self.0));
+    }
+}
+
+impl Serialize for UiFontFamily {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.label())
+    }
+}
+
+impl<'de> Deserialize<'de> for UiFontFamily {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(Self::new(raw))
+    }
+}
+
+fn normalize_ui_font_family_name(name: String) -> String {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return INCLUDED_DEFAULT_UI_FONT_FAMILY.to_owned();
+    }
+
+    match trimmed {
+        "maple_mono_nf" => INCLUDED_DEFAULT_UI_FONT_FAMILY.to_owned(),
+        "jetbrains_mono" => "JetBrains Mono".to_owned(),
+        "fira_code" => "Fira Code".to_owned(),
+        "cascadia_code" => "Cascadia Code".to_owned(),
+        "iosevka" => "Iosevka".to_owned(),
+        _ if trimmed.eq_ignore_ascii_case(INCLUDED_DEFAULT_UI_FONT_FAMILY) => {
+            INCLUDED_DEFAULT_UI_FONT_FAMILY.to_owned()
+        }
+        _ => trimmed.to_owned(),
+    }
+}
+
+fn normalized_ui_font_family_key(name: &str) -> String {
+    name.trim().to_lowercase()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -354,8 +350,6 @@ pub struct DropdownSettingSpec {
     pub id: DropdownSettingId,
     pub label: &'static str,
     pub info_tooltip: Option<&'static str>,
-    pub options: &'static [UiFontFamily],
-    pub option_labels: &'static [&'static str],
 }
 
 impl DropdownSettingId {
@@ -366,8 +360,6 @@ impl DropdownSettingId {
                 id: DropdownSettingId::UiFontFamily,
                 label: "UI Font",
                 info_tooltip: Some("Select the primary font used by the launcher UI."),
-                options: UI_FONT_OPTIONS,
-                option_labels: UI_FONT_OPTION_LABELS,
             },
         }
     }
@@ -571,7 +563,7 @@ impl Config {
 
     /// Returns currently selected UI font family.
     pub fn ui_font_family(&self) -> UiFontFamily {
-        self.ui_font_family
+        self.ui_font_family.clone()
     }
 
     /// Returns configured skin preview anti-aliasing mode.
@@ -852,6 +844,7 @@ impl Config {
 
     /// Normalizes all config values into launcher-supported ranges/defaults.
     pub fn normalize(&mut self) {
+        self.ui_font_family.normalize();
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
         self.skin_preview_motion_blur_amount = self.skin_preview_motion_blur_amount.clamp(
             SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
@@ -1210,7 +1203,7 @@ impl Default for Config {
             open_type_features_enabled: true,
             open_type_features_to_enable: String::new(),
             notification_expiry_bars_empty_left: false,
-            ui_font_family: UiFontFamily::MapleMonoNf,
+            ui_font_family: UiFontFamily::included_default(),
             skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
             skin_preview_msaa_samples: 4,
             skin_preview_motion_blur_enabled: false,
@@ -1439,5 +1432,23 @@ pub fn load_config() -> LoadConfigResult {
                 default_format: ConfigFormat::Json,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_font_family_deserializes_legacy_enum_value() {
+        let family: UiFontFamily = serde_json::from_str("\"jetbrains_mono\"").unwrap();
+        assert_eq!(family.label(), "JetBrains Mono");
+    }
+
+    #[test]
+    fn ui_font_family_serializes_as_plain_family_name() {
+        let family = UiFontFamily::new("Cascadia Code");
+        let serialized = serde_json::to_string(&family).unwrap();
+        assert_eq!(serialized, "\"Cascadia Code\"");
     }
 }

@@ -6,7 +6,10 @@
 //! - Queries faces using CSS-like parameters.
 //! - Extracts owned bytes for a matched face (plus face index for TTC/OTC).
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 pub use fontdb::ID as FaceId;
 
@@ -146,6 +149,27 @@ impl FontCatalog {
         out
     }
 
+    /// Return a deduplicated list of family names suitable for UI selectors.
+    ///
+    /// `fontdb` stores multiple faces per family and may expose localized names.
+    /// For the selector we prefer the primary family name from each face and
+    /// collapse duplicates case-insensitively.
+    pub fn deduplicated_family_names(&self) -> Vec<String> {
+        let mut out = BTreeMap::new();
+        for face in self.db.faces() {
+            let Some((name, _lang)) = face.families.first() else {
+                continue;
+            };
+            let trimmed = name.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            out.entry(normalized_family_key(trimmed))
+                .or_insert_with(|| trimmed.to_owned());
+        }
+        out.into_values().collect()
+    }
+
     /// Return the best-matching face id for the given spec.
     pub fn query(&self, spec: &FontSpec<'_>) -> Result<FaceId, FontError> {
         let families: Vec<fontdb::Family<'_>> = spec
@@ -208,6 +232,11 @@ impl FontCatalog {
         &mut self.db
     }
 }
+
+fn normalized_family_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
 pub mod egui_integration {
     use egui::{FontData, FontDefinitions, FontFamily, FontId, TextStyle};
     use std::sync::Arc;

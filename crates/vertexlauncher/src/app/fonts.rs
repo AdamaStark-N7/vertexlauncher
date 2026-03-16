@@ -1,12 +1,13 @@
 use config::{Config, DropdownSettingId, UiFontFamily};
 use eframe::egui;
 use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
+use std::hash::{Hash, Hasher};
 use textui::TextUi;
 
 const MAPLE_MONO_NF_REGULAR_TTF: &[u8] =
     include_bytes!("../included_fonts/MapleMono-NF-Regular.ttf");
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct AppliedFontSignature {
     family: UiFontFamily,
     size: f32,
@@ -55,10 +56,16 @@ impl FontController {
     pub fn ensure_selected_font_is_available(&self, config: &mut Config) {
         let available_ui_fonts = &self.available_ui_fonts;
         config.for_each_dropdown_mut(|setting, value| {
-            if matches!(setting.id, DropdownSettingId::UiFontFamily)
-                && !available_ui_fonts.contains(value)
-            {
-                *value = UiFontFamily::MapleMonoNf;
+            if setting.id != DropdownSettingId::UiFontFamily {
+                return;
+            }
+
+            if let Some(matching_font) = matching_available_font(available_ui_fonts, value) {
+                if matching_font != value {
+                    *value = matching_font.clone();
+                }
+            } else {
+                *value = UiFontFamily::included_default();
             }
         });
     }
@@ -75,20 +82,29 @@ impl FontController {
             weight: config.ui_font_weight(),
         };
 
-        if self.applied_font_signature != Some(desired_font) {
-            let mut applied_family = desired_font.family;
+        if self.applied_font_signature.as_ref() != Some(&desired_font) {
+            let should_register_text_font = self
+                .applied_font_signature
+                .as_ref()
+                .is_none_or(|previous| !previous.family.matches(&desired_font.family));
+            let mut applied_family = desired_font.family.clone();
             if desired_font.family.is_included_default() {
                 install_included_maple_font(ctx, desired_font.size);
             } else {
-                let spec = FontSpec::new(desired_font.family.query_families())
+                let family_candidates = desired_font.family.query_families();
+                let spec = FontSpec::new(&family_candidates)
                     .weight(Weight(desired_font.weight.clamp(100, 900) as u16))
                     .slant(Slant::Upright)
                     .stretch(Stretch::Normal);
 
                 if let Ok((bytes, _face_index)) = self.font_catalog.query_bytes(&spec) {
+                    if should_register_text_font {
+                        text_ui.register_font_data(bytes.clone());
+                    }
+                    let font_key = font_key(&desired_font.family);
                     fontloader::egui_integration::install_font_as_primary(
                         ctx,
-                        font_key(desired_font.family),
+                        &font_key,
                         bytes,
                         desired_font.size,
                     );
@@ -99,7 +115,7 @@ impl FontController {
                         "configured UI font not available; falling back to included default"
                     );
                     install_included_maple_font(ctx, desired_font.size);
-                    applied_family = UiFontFamily::MapleMonoNf;
+                    applied_family = UiFontFamily::included_default();
                 }
             }
 
@@ -108,7 +124,7 @@ impl FontController {
         }
 
         let desired_text = AppliedTextSignature {
-            family: self.effective_ui_font_family,
+            family: self.effective_ui_font_family.clone(),
             size: config.ui_font_size(),
             weight: config.ui_font_weight(),
             open_type_features_enabled: config.open_type_features_enabled(),
@@ -119,52 +135,77 @@ impl FontController {
             return;
         }
 
-        text_ui.apply_typography(
-            self.effective_ui_font_family.query_families(),
-            desired_text.size,
-            desired_text.weight,
-        );
+        let family_candidates = self.effective_ui_font_family.query_families();
+        text_ui.apply_typography(&family_candidates, desired_text.size, desired_text.weight);
         text_ui.apply_open_type_features(
             desired_text.open_type_features_enabled,
             &desired_text.open_type_features_to_enable,
-            self.effective_ui_font_family.query_families(),
+            &family_candidates,
         );
         self.applied_text_signature = Some(desired_text);
     }
 }
 
 fn install_included_maple_font(ctx: &egui::Context, size_pt: f32) {
+    let font_key = font_key(&UiFontFamily::included_default());
     fontloader::egui_integration::install_font_as_primary(
         ctx,
-        font_key(UiFontFamily::MapleMonoNf),
+        &font_key,
         MAPLE_MONO_NF_REGULAR_TTF.to_vec(),
         size_pt,
     );
 }
 
 fn detect_available_ui_fonts(font_catalog: &FontCatalog) -> Vec<UiFontFamily> {
-    let mut available = vec![UiFontFamily::MapleMonoNf];
+    let mut available = vec![UiFontFamily::included_default()];
 
-    for candidate in UiFontFamily::system_options() {
-        let spec = FontSpec::new(candidate.query_families())
-            .weight(Weight::REGULAR)
-            .slant(Slant::Upright)
-            .stretch(Stretch::Normal);
-
-        if font_catalog.query(&spec).is_ok() {
-            available.push(*candidate);
+    for family_name in font_catalog.deduplicated_family_names() {
+        let family = UiFontFamily::new(family_name);
+        if family.is_included_default()
+            || available.iter().any(|existing| existing.matches(&family))
+        {
+            continue;
         }
+        available.push(family);
     }
 
     available
 }
 
-fn font_key(family: UiFontFamily) -> &'static str {
-    match family {
-        UiFontFamily::MapleMonoNf => "ui_font_maple_mono_nf",
-        UiFontFamily::JetBrainsMono => "ui_font_jetbrains_mono",
-        UiFontFamily::FiraCode => "ui_font_fira_code",
-        UiFontFamily::CascadiaCode => "ui_font_cascadia_code",
-        UiFontFamily::Iosevka => "ui_font_iosevka",
+fn matching_available_font<'a>(
+    available_ui_fonts: &'a [UiFontFamily],
+    desired_font: &UiFontFamily,
+) -> Option<&'a UiFontFamily> {
+    available_ui_fonts
+        .iter()
+        .find(|candidate| candidate.matches(desired_font))
+}
+
+fn font_key(family: &UiFontFamily) -> String {
+    if family.is_included_default() {
+        return "ui_font_maple_mono_nf".to_owned();
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    family.hash(&mut hasher);
+    let hash = hasher.finish();
+    let sanitized = family
+        .label()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_owned();
+
+    if sanitized.is_empty() {
+        format!("ui_font_system_{hash:016x}")
+    } else {
+        format!("ui_font_system_{sanitized}_{hash:016x}")
     }
 }

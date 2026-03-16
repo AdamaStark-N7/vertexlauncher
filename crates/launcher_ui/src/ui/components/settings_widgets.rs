@@ -40,6 +40,11 @@ struct U128InputState {
     last_valid: u128,
 }
 
+#[derive(Clone, Debug, Default)]
+struct SearchableDropdownState {
+    query: String,
+}
+
 pub fn toggle_row(
     text_ui: &mut TextUi,
     ui: &mut Ui,
@@ -125,6 +130,84 @@ pub fn dropdown_row(
                 ui.add_space(metrics.right_padding);
                 ui.push_id(id_source, |ui| {
                     dropdown(text_ui, ui, selected_index, options, metrics)
+                })
+                .inner
+            })
+            .inner;
+
+        dropdown_response.union(label_response)
+    })
+    .inner
+}
+
+pub fn searchable_dropdown_row(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    label: &str,
+    info_tooltip: Option<&str>,
+    selected_index: &mut usize,
+    options: &[&str],
+) -> Response {
+    let metrics = control_metrics(ui);
+    let label_options = row_label_options(ui);
+    let compact_layout = ui.available_width() < 460.0;
+
+    if compact_layout {
+        return ui
+            .vertical(|ui| {
+                let label_response = text_ui.label(
+                    ui,
+                    ("searchable_dropdown_label", label),
+                    label,
+                    &label_options,
+                );
+
+                if info_tooltip.is_some() {
+                    ui.add_space(4.0);
+                    info_hint(
+                        text_ui,
+                        ui,
+                        ("searchable_dropdown_info", label),
+                        info_tooltip,
+                    );
+                }
+
+                let mut compact_metrics = metrics;
+                compact_metrics.dropdown_width = ui.available_width().max(1.0);
+                let dropdown_response = ui.push_id(id_source, |ui| {
+                    searchable_dropdown(text_ui, ui, selected_index, options, compact_metrics)
+                });
+
+                label_response.union(dropdown_response.inner)
+            })
+            .inner;
+    }
+
+    ui.horizontal(|ui| {
+        let label_response = text_ui.label(
+            ui,
+            ("searchable_dropdown_label", label),
+            label,
+            &label_options,
+        );
+
+        if info_tooltip.is_some() {
+            ui.add_space(6.0);
+            info_hint(
+                text_ui,
+                ui,
+                ("searchable_dropdown_info", label),
+                info_tooltip,
+            );
+        }
+
+        let dropdown_response = ui
+            .with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                ui.add_space(metrics.right_padding);
+                ui.push_id(id_source, |ui| {
+                    searchable_dropdown(text_ui, ui, selected_index, options, metrics)
                 })
                 .inner
             })
@@ -1103,6 +1186,344 @@ fn dropdown(
     }
 
     response
+}
+
+fn searchable_dropdown(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    selected_index: &mut usize,
+    options: &[&str],
+    metrics: ControlMetrics,
+) -> Response {
+    let open_id = ui.id().with("settings_searchable_dropdown_open");
+    let state_id = ui.id().with("settings_searchable_dropdown_state");
+    let input_id = ui.id().with("settings_searchable_dropdown_input");
+    let was_open = egui::Popup::is_id_open(ui.ctx(), open_id);
+
+    let mut state = ui
+        .ctx()
+        .data_mut(|data| data.get_temp::<SearchableDropdownState>(state_id))
+        .unwrap_or_default();
+    if !was_open {
+        state.query.clear();
+    }
+
+    let mut label_style = row_label_options(ui);
+    label_style.wrap = false;
+
+    let selected_text_raw = options.get(*selected_index).copied().unwrap_or("Select...");
+    let selected_text = text_helpers::truncate_single_line_text_with_ellipsis(
+        text_ui,
+        ui,
+        selected_text_raw,
+        dropdown_text_budget(metrics),
+        &label_style,
+    );
+    let option_text_width = options.iter().fold(0.0_f32, |max_width, option| {
+        max_width.max(text_ui.measure_text_size(ui, option, &label_style).x)
+    });
+    let popup_button_width = (option_text_width + 16.0)
+        .ceil()
+        .max(metrics.dropdown_width)
+        .max(metrics.control_height * 2.0);
+    let popup_width = popup_button_width + 4.0;
+
+    let (button_rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(metrics.dropdown_width, metrics.control_height),
+        Sense::click(),
+    );
+
+    let mut interacted = ui.style().interact(&response);
+    let mut text_color = interacted.text_color();
+
+    let popup_response = egui::Popup::menu(&response)
+        .id(open_id)
+        .align(egui::RectAlign::BOTTOM_START)
+        .align_alternatives(&[
+            egui::RectAlign::TOP_START,
+            egui::RectAlign::BOTTOM_END,
+            egui::RectAlign::TOP_END,
+        ])
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            let mut clip_rect = ui.clip_rect();
+            clip_rect.min.y = clip_rect.min.y.max(ui.ctx().available_rect().top());
+            ui.set_clip_rect(clip_rect);
+            ui.set_width(popup_width);
+
+            let mut popup_changed = false;
+            let mut search_label_style = row_label_options(ui);
+            search_label_style.font_size = 14.0;
+            search_label_style.line_height = 18.0;
+            search_label_style.color = ui.visuals().weak_text_color();
+            let _ = text_ui.label(
+                ui,
+                ("searchable_dropdown_hint", open_id),
+                "Type to search",
+                &search_label_style,
+            );
+            ui.add_space(4.0);
+
+            let mut search_input_options = text_input_options(ui, metrics);
+            search_input_options.desired_width = Some(popup_button_width);
+            search_input_options.min_width = popup_button_width;
+            let search_response =
+                text_ui.singleline_input(ui, input_id, &mut state.query, &search_input_options);
+            if !was_open {
+                search_response.request_focus();
+            }
+            ui.add_space(6.0);
+
+            let filtered_indices = searchable_dropdown_matches(options, &state.query);
+            if search_response.has_focus()
+                && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                && let Some(&match_index) = filtered_indices.first()
+            {
+                *selected_index = match_index;
+                popup_changed = true;
+                egui::Popup::close_id(ui.ctx(), open_id);
+            }
+
+            let button_options = ButtonOptions {
+                min_size: egui::vec2(popup_button_width, metrics.control_height),
+                corner_radius: 4,
+                padding: egui::vec2(8.0, 4.0),
+                text_color: ui.visuals().text_color(),
+                fill: ui.visuals().widgets.inactive.bg_fill,
+                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
+                fill_active: ui.visuals().widgets.active.bg_fill,
+                fill_selected: ui.visuals().widgets.active.bg_fill,
+                stroke: ui.visuals().widgets.inactive.bg_stroke,
+                ..ButtonOptions::default()
+            };
+
+            let max_popup_height = (ui.ctx().available_rect().height() * 0.58)
+                .clamp(metrics.control_height * 4.0, metrics.control_height * 14.0);
+            let row_height = metrics.control_height + ui.spacing().item_spacing.y;
+
+            if filtered_indices.is_empty() {
+                let mut empty_style = row_label_options(ui);
+                empty_style.font_size = 15.0;
+                empty_style.line_height = 20.0;
+                empty_style.color = ui.visuals().weak_text_color();
+                let _ = text_ui.label(
+                    ui,
+                    ("searchable_dropdown_empty", open_id),
+                    "No matches found.",
+                    &empty_style,
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt(("settings_searchable_dropdown_scroll", open_id))
+                    .max_height(max_popup_height)
+                    .auto_shrink([false, false])
+                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .show_rows(ui, row_height, filtered_indices.len(), |ui, row_range| {
+                        for filtered_index in row_range {
+                            let option_index = filtered_indices[filtered_index];
+                            let option = options[option_index];
+                            let option_response = text_ui.selectable_button(
+                                ui,
+                                ("searchable_dropdown_option", option_index),
+                                option,
+                                *selected_index == option_index,
+                                &button_options,
+                            );
+                            if option_response.clicked() {
+                                *selected_index = option_index;
+                                popup_changed = true;
+                                egui::Popup::close_id(ui.ctx(), open_id);
+                            }
+                        }
+                    });
+            }
+
+            if popup_changed {
+                state.query.clear();
+                ui.ctx().request_repaint();
+            }
+
+            popup_changed
+        });
+
+    let is_open = egui::Popup::is_id_open(ui.ctx(), open_id);
+    if is_open {
+        interacted = &ui.visuals().widgets.open;
+        text_color = interacted.text_color();
+    } else {
+        state.query.clear();
+    }
+
+    ui.painter().rect(
+        button_rect,
+        6.0,
+        interacted.bg_fill,
+        interacted.bg_stroke,
+        egui::StrokeKind::Inside,
+    );
+
+    let icon_bytes = if is_open {
+        assets::CHEVRON_UP_SVG
+    } else {
+        assets::CHEVRON_DOWN_SVG
+    };
+    let icon = themed_svg_image(
+        "settings-searchable-dropdown-chevron",
+        icon_bytes,
+        metrics.icon_size,
+        text_color,
+    )
+    .fit_to_exact_size(egui::vec2(metrics.icon_size, metrics.icon_size));
+    let icon_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            button_rect.right() - metrics.icon_size - 8.0,
+            button_rect.center().y - metrics.icon_size * 0.5,
+        ),
+        egui::vec2(metrics.icon_size, metrics.icon_size),
+    );
+    ui.put(icon_rect, icon);
+
+    label_style.color = text_color;
+    let parent_clip_rect = ui.clip_rect();
+    let text_rect = egui::Rect::from_min_max(
+        egui::pos2(button_rect.left() + 8.0, button_rect.top()),
+        egui::pos2(icon_rect.left() - 6.0, button_rect.bottom()),
+    );
+    ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
+        ui.set_clip_rect(text_rect.intersect(parent_clip_rect));
+        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+            let _ = text_ui.label(
+                ui,
+                "searchable_dropdown_selected_text",
+                &selected_text,
+                &label_style,
+            );
+        });
+    });
+    if popup_response
+        .as_ref()
+        .map(|inner| inner.inner)
+        .unwrap_or(false)
+    {
+        response.mark_changed();
+    }
+
+    ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
+    response
+}
+
+fn searchable_dropdown_matches(options: &[&str], query: &str) -> Vec<usize> {
+    let query = query.trim();
+    if query.is_empty() {
+        return (0..options.len()).collect();
+    }
+
+    let mut matches = options
+        .iter()
+        .enumerate()
+        .filter_map(|(index, option)| fuzzy_match_score(query, option).map(|score| (index, score)))
+        .collect::<Vec<_>>();
+
+    matches.sort_by(|(left_index, left_score), (right_index, right_score)| {
+        right_score
+            .category
+            .cmp(&left_score.category)
+            .then_with(|| right_score.score.cmp(&left_score.score))
+            .then_with(|| left_score.start.cmp(&right_score.start))
+            .then_with(|| left_index.cmp(right_index))
+    });
+
+    matches.into_iter().map(|(index, _score)| index).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FuzzyMatchScore {
+    category: i32,
+    score: i32,
+    start: usize,
+}
+
+fn fuzzy_match_score(query: &str, candidate: &str) -> Option<FuzzyMatchScore> {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return Some(FuzzyMatchScore {
+            category: 0,
+            score: 0,
+            start: 0,
+        });
+    }
+
+    let normalized_candidate = candidate.trim().to_lowercase();
+    if normalized_candidate.is_empty() {
+        return None;
+    }
+
+    if normalized_candidate == normalized_query {
+        return Some(FuzzyMatchScore {
+            category: 3,
+            score: i32::MAX,
+            start: 0,
+        });
+    }
+
+    if let Some(start) = normalized_candidate.find(&normalized_query) {
+        return Some(FuzzyMatchScore {
+            category: 2,
+            score: 10_000 - start as i32,
+            start,
+        });
+    }
+
+    let query_chars = normalized_query.chars().collect::<Vec<_>>();
+    let candidate_chars = normalized_candidate.chars().collect::<Vec<_>>();
+    let mut query_index = 0;
+    let mut first_match_start = None;
+    let mut previous_match_index = None;
+    let mut score = 0_i32;
+
+    for (candidate_index, candidate_char) in candidate_chars.iter().enumerate() {
+        if query_index >= query_chars.len() {
+            break;
+        }
+
+        if *candidate_char != query_chars[query_index] {
+            continue;
+        }
+
+        if first_match_start.is_none() {
+            first_match_start = Some(candidate_index);
+            score += 120;
+        }
+
+        if previous_match_index == Some(candidate_index.saturating_sub(1)) {
+            score += 45;
+        } else {
+            score += 18;
+        }
+
+        if candidate_index == 0
+            || !candidate_chars[candidate_index.saturating_sub(1)].is_alphanumeric()
+        {
+            score += 22;
+        }
+
+        previous_match_index = Some(candidate_index);
+        query_index += 1;
+    }
+
+    if query_index != query_chars.len() {
+        return None;
+    }
+
+    let start = first_match_start.unwrap_or(usize::MAX);
+    score -= start as i32;
+    score -= ((candidate_chars.len().saturating_sub(query_chars.len())) as i32) / 4;
+
+    Some(FuzzyMatchScore {
+        category: 1,
+        score,
+        start,
+    })
 }
 
 fn sanitize_float_text(text: &mut String, allow_negative: bool) {
