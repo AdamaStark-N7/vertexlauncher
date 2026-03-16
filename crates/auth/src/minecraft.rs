@@ -14,7 +14,7 @@ use crate::constants::{
 use crate::error::{AuthError, map_http_error, prefix_auth_error};
 use crate::types::{
     CachedAccount, MinecraftCapeState, MinecraftProfileState, MinecraftSkinState,
-    MinecraftSkinVariant,
+    MinecraftSkinVariant, RefreshTokenState,
 };
 use crate::util::{UreqResponseExt, encode_base64, unix_now_secs};
 
@@ -380,6 +380,11 @@ fn build_cached_account(
         minecraft_profile,
         minecraft_access_token: Some(minecraft_access_token.to_owned()),
         microsoft_refresh_token: microsoft_refresh_token.map(str::to_owned),
+        refresh_token_state: if microsoft_refresh_token.is_some() {
+            RefreshTokenState::Present
+        } else {
+            RefreshTokenState::Missing
+        },
         xuid: None,
         user_type: Some("msa".to_owned()),
         avatar_png_base64: None,

@@ -14,6 +14,7 @@ mod util;
 use std::sync::mpsc;
 
 use tokio::runtime::Handle;
+use types::RefreshTokenState;
 
 pub use constants::{BUILTIN_MICROSOFT_CLIENT_ID, BUILTIN_MICROSOFT_TENANT};
 pub use error::AuthError;
@@ -162,17 +163,37 @@ where
     let mut any_updated = false;
 
     for account in &mut state.accounts {
-        let Some(refresh_token) = account
+        let refresh_token = match account
             .microsoft_refresh_token
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        else {
-            tracing::info!(
-                target: "vertexlauncher/auth/renew",
-                "Skipping token renewal: no Microsoft refresh token cached."
-            );
-            continue;
+        {
+            Some(token) => token,
+            None => match account.refresh_token_state {
+                RefreshTokenState::Unavailable => {
+                    let error = "Microsoft refresh token could not be loaded from secure storage."
+                        .to_owned();
+                    on_event(CachedAccountRenewalEvent::Failed {
+                        profile_id: account.minecraft_profile.id.clone(),
+                        display_name: account.minecraft_profile.name.clone(),
+                        error: error.clone(),
+                    });
+                    tracing::warn!(
+                        target: "vertexlauncher/auth/renew",
+                        profile_id = %account.minecraft_profile.id,
+                        "secure storage was unavailable while loading the refresh token; skipping renewal"
+                    );
+                    continue;
+                }
+                _ => {
+                    tracing::info!(
+                        target: "vertexlauncher/auth/renew",
+                        "Skipping token renewal: no Microsoft refresh token cached."
+                    );
+                    continue;
+                }
+            },
         };
 
         on_event(CachedAccountRenewalEvent::Started {

@@ -77,6 +77,15 @@ pub struct MinecraftProfileState {
 }
 
 /// Cached account record used by launcher UI/auth state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum RefreshTokenState {
+    #[default]
+    Unknown,
+    Missing,
+    Present,
+    Unavailable,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedAccount {
     pub minecraft_profile: MinecraftProfileState,
@@ -84,6 +93,8 @@ pub struct CachedAccount {
     pub minecraft_access_token: Option<String>,
     #[serde(default)]
     pub microsoft_refresh_token: Option<String>,
+    #[serde(skip, default)]
+    pub(crate) refresh_token_state: RefreshTokenState,
     #[serde(default)]
     pub xuid: Option<String>,
     #[serde(default)]

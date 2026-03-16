@@ -1,6 +1,8 @@
-use std::sync::{LazyLock, Mutex};
-#[cfg(target_os = "windows")]
-use std::{thread, time::Duration};
+use std::{
+    sync::{LazyLock, Mutex},
+    thread,
+    time::Duration,
+};
 
 use keyring::{Entry, Error as KeyringError};
 
@@ -10,12 +12,17 @@ const ACCOUNTS_STATE_SERVICE: &str = "vertexlauncher.accounts_state.v1";
 const ACCOUNTS_STATE_ACCOUNT: &str = "cached_accounts";
 const REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token.v2";
 const LEGACY_REFRESH_TOKEN_SERVICE: &str = "vertexlauncher.microsoft_refresh_token";
-#[cfg(target_os = "windows")]
-const WINDOWS_REFRESH_TOKEN_VERIFY_ATTEMPTS: usize = 3;
-#[cfg(target_os = "windows")]
-const WINDOWS_REFRESH_TOKEN_VERIFY_RETRY_DELAY: Duration = Duration::from_millis(15);
+const SECURE_STORE_RETRY_ATTEMPTS: usize = 5;
+const SECURE_STORE_RETRY_DELAY: Duration = Duration::from_millis(75);
+const REFRESH_TOKEN_VERIFY_ATTEMPTS: usize = 5;
 
 static SECURE_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+pub(crate) enum RefreshTokenLoadResult {
+    Present(String),
+    Missing,
+    Unavailable,
+}
 
 fn accounts_state_entry() -> Result<Entry, AuthError> {
     Entry::new(ACCOUNTS_STATE_SERVICE, ACCOUNTS_STATE_ACCOUNT).map_err(|err| {
@@ -39,7 +46,7 @@ pub(crate) fn load_accounts_state() -> Result<Option<String>, AuthError> {
 
 fn load_accounts_state_unlocked() -> Result<Option<String>, AuthError> {
     let entry = accounts_state_entry()?;
-    match entry.get_password() {
+    match retry_keyring_operation(|| entry.get_password()) {
         Ok(value) => Ok(Some(value)),
         Err(KeyringError::NoEntry) => Ok(None),
         Err(err) if is_unavailable_secure_storage_error(&err) => {
@@ -71,7 +78,7 @@ pub(crate) fn delete_accounts_state() -> Result<(), AuthError> {
 
 fn delete_accounts_state_unlocked() -> Result<(), AuthError> {
     let entry = accounts_state_entry()?;
-    match entry.delete_credential() {
+    match retry_keyring_operation(|| entry.delete_credential()) {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(err) if is_unavailable_secure_storage_error(&err) => {
             tracing::warn!(
@@ -87,14 +94,14 @@ fn delete_accounts_state_unlocked() -> Result<(), AuthError> {
     }
 }
 
-pub(crate) fn load_refresh_token(profile_id: &str) -> Result<Option<String>, AuthError> {
+pub(crate) fn load_refresh_token(profile_id: &str) -> Result<RefreshTokenLoadResult, AuthError> {
     with_secure_store_lock(|| load_refresh_token_unlocked(profile_id))
 }
 
-fn load_refresh_token_unlocked(profile_id: &str) -> Result<Option<String>, AuthError> {
+fn load_refresh_token_unlocked(profile_id: &str) -> Result<RefreshTokenLoadResult, AuthError> {
     let entry = refresh_token_entry(REFRESH_TOKEN_SERVICE, profile_id)?;
-    match entry.get_password() {
-        Ok(value) => Ok(Some(value)),
+    match retry_keyring_operation(|| entry.get_password()) {
+        Ok(value) => Ok(RefreshTokenLoadResult::Present(value)),
         Err(KeyringError::NoEntry) => load_legacy_refresh_token_unlocked(profile_id),
         Err(err) if is_unavailable_secure_storage_error(&err) => {
             tracing::warn!(
@@ -103,7 +110,7 @@ fn load_refresh_token_unlocked(profile_id: &str) -> Result<Option<String>, AuthE
                 error = %err,
                 "secure storage unavailable while loading refresh token; continuing without a persisted token"
             );
-            Ok(None)
+            Ok(RefreshTokenLoadResult::Unavailable)
         }
         Err(err) if is_corrupt_secure_storage_error(&err) => {
             tracing::warn!(
@@ -127,7 +134,7 @@ pub(crate) fn store_refresh_token(profile_id: &str, refresh_token: &str) -> Resu
 
 fn store_refresh_token_unlocked(profile_id: &str, refresh_token: &str) -> Result<(), AuthError> {
     let entry = refresh_token_entry(REFRESH_TOKEN_SERVICE, profile_id)?;
-    entry.set_password(refresh_token).map_err(|err| {
+    retry_keyring_operation(|| entry.set_password(refresh_token)).map_err(|err| {
         AuthError::SecureStorage(format!(
             "Failed to store refresh token for profile '{profile_id}': {err}",
         ))
@@ -145,14 +152,16 @@ pub(crate) fn delete_refresh_token(profile_id: &str) -> Result<(), AuthError> {
     })
 }
 
-fn load_legacy_refresh_token_unlocked(profile_id: &str) -> Result<Option<String>, AuthError> {
+fn load_legacy_refresh_token_unlocked(
+    profile_id: &str,
+) -> Result<RefreshTokenLoadResult, AuthError> {
     let legacy_entry = refresh_token_entry(LEGACY_REFRESH_TOKEN_SERVICE, profile_id)?;
-    match legacy_entry.get_password() {
+    match retry_keyring_operation(|| legacy_entry.get_password()) {
         Ok(value) => {
             store_refresh_token_unlocked(profile_id, &value)?;
-            Ok(Some(value))
+            Ok(RefreshTokenLoadResult::Present(value))
         }
-        Err(KeyringError::NoEntry) => Ok(None),
+        Err(KeyringError::NoEntry) => Ok(RefreshTokenLoadResult::Missing),
         Err(err) if is_unavailable_secure_storage_error(&err) => {
             tracing::warn!(
                 target: "vertexlauncher/auth/secret_store",
@@ -160,7 +169,7 @@ fn load_legacy_refresh_token_unlocked(profile_id: &str) -> Result<Option<String>
                 error = %err,
                 "secure storage unavailable while loading legacy refresh token; continuing without a persisted token"
             );
-            Ok(None)
+            Ok(RefreshTokenLoadResult::Unavailable)
         }
         Err(err) if is_corrupt_secure_storage_error(&err) => {
             tracing::warn!(
@@ -171,7 +180,7 @@ fn load_legacy_refresh_token_unlocked(profile_id: &str) -> Result<Option<String>
             );
             let _ =
                 delete_refresh_token_for_service_unlocked(LEGACY_REFRESH_TOKEN_SERVICE, profile_id);
-            Ok(None)
+            Ok(RefreshTokenLoadResult::Missing)
         }
         Err(err) => Err(AuthError::SecureStorage(format!(
             "Failed to load refresh token for profile '{profile_id}' from legacy secure storage: {err}",
@@ -184,7 +193,7 @@ fn delete_refresh_token_for_service_unlocked(
     profile_id: &str,
 ) -> Result<(), AuthError> {
     let entry = refresh_token_entry(service, profile_id)?;
-    match entry.delete_credential() {
+    match retry_keyring_operation(|| entry.delete_credential()) {
         Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
         Err(err) if is_unavailable_secure_storage_error(&err) => {
             tracing::warn!(
@@ -207,7 +216,7 @@ fn verify_refresh_token_round_trip_unlocked(
 ) -> Result<(), AuthError> {
     for attempt in 0..refresh_token_verify_attempts() {
         let entry = refresh_token_entry(REFRESH_TOKEN_SERVICE, profile_id)?;
-        match entry.get_password() {
+        match retry_keyring_operation(|| entry.get_password()) {
             Ok(stored) if stored == refresh_token => return Ok(()),
             Ok(_) | Err(KeyringError::NoEntry) if attempt + 1 < refresh_token_verify_attempts() => {
                 sleep_before_refresh_token_retry();
@@ -245,6 +254,25 @@ fn with_secure_store_lock<T>(
     operation()
 }
 
+fn retry_keyring_operation<T>(
+    mut operation: impl FnMut() -> Result<T, KeyringError>,
+) -> Result<T, KeyringError> {
+    for attempt in 0..SECURE_STORE_RETRY_ATTEMPTS {
+        match operation() {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if attempt + 1 < SECURE_STORE_RETRY_ATTEMPTS
+                    && should_retry_secure_storage_operation(&err) =>
+            {
+                thread::sleep(SECURE_STORE_RETRY_DELAY);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+
+    unreachable!("retry loop must return before exhausting attempts")
+}
+
 fn is_corrupt_secure_storage_error(err: &KeyringError) -> bool {
     let error_text = err.to_string();
     matches!(err, KeyringError::BadEncoding(_))
@@ -252,40 +280,42 @@ fn is_corrupt_secure_storage_error(err: &KeyringError) -> bool {
         || error_text.contains("Unpad Error")
 }
 
-#[cfg(target_os = "windows")]
 fn is_unavailable_secure_storage_error(err: &KeyringError) -> bool {
-    matches!(err, KeyringError::NoStorageAccess(_))
+    matches!(err, KeyringError::NoStorageAccess(_)) || is_retryable_platform_storage_error(err)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn is_unavailable_secure_storage_error(_err: &KeyringError) -> bool {
-    false
+fn is_retryable_platform_storage_error(err: &KeyringError) -> bool {
+    let KeyringError::PlatformFailure(inner) = err else {
+        return false;
+    };
+
+    let lowered = inner.to_string().to_ascii_lowercase();
+    lowered.contains("dbus error")
+        || lowered.contains("can't find session")
+        || lowered.contains("secret service")
+        || lowered.contains("org.freedesktop.secrets")
+        || lowered.contains("no such object path")
+        || lowered.contains("no such interface")
+        || lowered.contains("keychain")
+        || lowered.contains("errsecnotavailable")
+        || lowered.contains("errsecreadonly")
+        || lowered.contains("errsecnosuchkeychain")
+        || lowered.contains("errsecinvalidkeychain")
+        || lowered.contains("windows error_no_such_logon_session")
 }
 
-#[cfg(target_os = "windows")]
 fn refresh_token_verify_attempts() -> usize {
-    WINDOWS_REFRESH_TOKEN_VERIFY_ATTEMPTS
+    REFRESH_TOKEN_VERIFY_ATTEMPTS
 }
 
-#[cfg(not(target_os = "windows"))]
-fn refresh_token_verify_attempts() -> usize {
-    1
+fn should_retry_secure_storage_operation(err: &KeyringError) -> bool {
+    is_unavailable_secure_storage_error(err)
 }
 
-#[cfg(target_os = "windows")]
 fn should_retry_refresh_token_verification(err: &KeyringError) -> bool {
-    matches!(err, KeyringError::PlatformFailure(_))
+    should_retry_secure_storage_operation(err)
 }
 
-#[cfg(not(target_os = "windows"))]
-fn should_retry_refresh_token_verification(_err: &KeyringError) -> bool {
-    false
-}
-
-#[cfg(target_os = "windows")]
 fn sleep_before_refresh_token_retry() {
-    thread::sleep(WINDOWS_REFRESH_TOKEN_VERIFY_RETRY_DELAY);
+    thread::sleep(SECURE_STORE_RETRY_DELAY);
 }
-
-#[cfg(not(target_os = "windows"))]
-fn sleep_before_refresh_token_retry() {}

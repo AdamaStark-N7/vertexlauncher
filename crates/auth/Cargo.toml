@@ -25,4 +25,4 @@ keyring = { version = "*", default-features = false, features = ["windows-native
 keyring = { version = "*", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "*", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust"] }
+keyring = { version = "*", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }

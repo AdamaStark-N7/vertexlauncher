@@ -4,8 +4,8 @@ use zeroize::Zeroizing;
 
 use crate::constants::{ACCOUNT_CACHE_APP_DIR, ACCOUNT_CACHE_FILENAME, LEGACY_ACCOUNT_CACHE_PATH};
 use crate::error::AuthError;
-use crate::secret_store;
-use crate::types::{CachedAccount, CachedAccountsState};
+use crate::secret_store::{self, RefreshTokenLoadResult};
+use crate::types::{CachedAccount, CachedAccountsState, RefreshTokenState};
 
 enum AccountsStateLocation {
     Disk,
@@ -307,6 +307,7 @@ fn finalize_loaded_accounts(
         let profile_id = account.minecraft_profile.id.trim();
         if profile_id.is_empty() {
             account.microsoft_refresh_token = None;
+            account.refresh_token_state = RefreshTokenState::Missing;
             continue;
         }
 
@@ -320,9 +321,20 @@ fn finalize_loaded_accounts(
             migrated_plaintext_token = true;
         }
 
-        account.microsoft_refresh_token = secret_store::load_refresh_token(profile_id)?
-            .map(Zeroizing::new)
-            .map(|token| token.to_string());
+        match secret_store::load_refresh_token(profile_id)? {
+            RefreshTokenLoadResult::Present(token) => {
+                account.microsoft_refresh_token = Some(Zeroizing::new(token).to_string());
+                account.refresh_token_state = RefreshTokenState::Present;
+            }
+            RefreshTokenLoadResult::Missing => {
+                account.microsoft_refresh_token = None;
+                account.refresh_token_state = RefreshTokenState::Missing;
+            }
+            RefreshTokenLoadResult::Unavailable => {
+                account.microsoft_refresh_token = None;
+                account.refresh_token_state = RefreshTokenState::Unavailable;
+            }
+        }
     }
 
     if migrated_plaintext_token {
@@ -336,27 +348,63 @@ fn persist_refresh_token(account: &mut CachedAccount) -> Result<(), AuthError> {
     let profile_id = account.minecraft_profile.id.trim();
     if profile_id.is_empty() {
         account.microsoft_refresh_token = None;
+        account.refresh_token_state = RefreshTokenState::Missing;
         return Ok(());
     }
 
-    match account
-        .microsoft_refresh_token
-        .as_deref()
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-    {
-        Some(token) => secret_store::store_refresh_token(profile_id, token)?,
-        None => secret_store::delete_refresh_token(profile_id)?,
+    match refresh_token_persist_action(account) {
+        RefreshTokenPersistAction::Store(token) => {
+            secret_store::store_refresh_token(profile_id, token)?;
+            account.refresh_token_state = RefreshTokenState::Present;
+        }
+        RefreshTokenPersistAction::Delete => {
+            secret_store::delete_refresh_token(profile_id)?;
+            account.refresh_token_state = RefreshTokenState::Missing;
+        }
+        RefreshTokenPersistAction::Preserve => {
+            tracing::warn!(
+                target: "vertexlauncher/auth/cache",
+                profile_id,
+                "skipping refresh-token write-back because its secure-storage state is unavailable"
+            );
+        }
     }
 
     Ok(())
 }
 
+enum RefreshTokenPersistAction<'a> {
+    Store(&'a str),
+    Delete,
+    Preserve,
+}
+
+fn refresh_token_persist_action(account: &CachedAccount) -> RefreshTokenPersistAction<'_> {
+    if let Some(token) = account
+        .microsoft_refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        return RefreshTokenPersistAction::Store(token);
+    }
+
+    match account.refresh_token_state {
+        RefreshTokenState::Present | RefreshTokenState::Missing => {
+            RefreshTokenPersistAction::Delete
+        }
+        RefreshTokenState::Unavailable | RefreshTokenState::Unknown => {
+            RefreshTokenPersistAction::Preserve
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::sanitize_cached_profile;
+    use super::{RefreshTokenPersistAction, refresh_token_persist_action, sanitize_cached_profile};
     use crate::types::{
         CachedAccount, MinecraftCapeState, MinecraftProfileState, MinecraftSkinState,
+        RefreshTokenState,
     };
 
     #[test]
@@ -383,6 +431,7 @@ mod tests {
             },
             minecraft_access_token: Some("minecraft-access-token".to_owned()),
             microsoft_refresh_token: Some("microsoft-refresh-token".to_owned()),
+            refresh_token_state: RefreshTokenState::Present,
             xuid: Some("xuid-value".to_owned()),
             user_type: Some("msa".to_owned()),
             avatar_png_base64: Some("avatar-bytes".to_owned()),
@@ -408,5 +457,30 @@ mod tests {
                 .texture_png_base64
                 .is_none()
         );
+    }
+
+    #[test]
+    fn preserves_refresh_token_when_secure_store_state_is_unavailable() {
+        let account = CachedAccount {
+            minecraft_profile: MinecraftProfileState {
+                id: "profile-id".to_owned(),
+                name: "Player".to_owned(),
+                skins: Vec::new(),
+                capes: Vec::new(),
+            },
+            minecraft_access_token: None,
+            microsoft_refresh_token: None,
+            refresh_token_state: RefreshTokenState::Unavailable,
+            xuid: None,
+            user_type: Some("msa".to_owned()),
+            avatar_png_base64: None,
+            avatar_source_skin_url: None,
+            cached_at_unix_secs: 123,
+        };
+
+        assert!(matches!(
+            refresh_token_persist_action(&account),
+            RefreshTokenPersistAction::Preserve
+        ));
     }
 }
