@@ -1,4 +1,9 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+#[cfg(all(target_os = "windows", target_env = "gnu"))]
+compile_error!(
+    "Windows GNU builds are not supported for Vertex Launcher. \
+Use the MSVC target (for example: x86_64-pc-windows-msvc) so WebView2 loader libraries are statically linked."
+);
 
 mod app;
 

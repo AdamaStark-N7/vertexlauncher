@@ -42,7 +42,9 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
                     instance_descriptor: eframe::egui_wgpu::wgpu::InstanceDescriptor {
-                        backends: eframe::egui_wgpu::wgpu::Backends::VULKAN,
+                        backends: eframe::egui_wgpu::wgpu::Backends::VULKAN
+                            | eframe::egui_wgpu::wgpu::Backends::METAL
+                            | eframe::egui_wgpu::wgpu::Backends::DX12,
                         ..Default::default()
                     },
                     power_preference: startup_power_preference,

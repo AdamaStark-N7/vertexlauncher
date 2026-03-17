@@ -1,4 +1,7 @@
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{
+    Deserialize, Deserializer, Serialize, Serializer,
+    de::{self, Visitor},
+};
 use std::io::{Error as IOError, Write};
 use std::path::Path;
 
@@ -167,6 +170,85 @@ impl<'de> Deserialize<'de> for UiFontFamily {
         let raw = String::deserialize(deserializer)?;
         Ok(Self::new(raw))
     }
+}
+
+fn serialize_toml_safe_u128<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    if *value <= i64::MAX as u128 {
+        serializer.serialize_i64(*value as i64)
+    } else {
+        serializer.serialize_str(&value.to_string())
+    }
+}
+
+fn deserialize_toml_safe_u128<'de, D>(deserializer: D) -> Result<u128, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct U128Visitor;
+
+    impl<'de> Visitor<'de> for U128Visitor {
+        type Value = u128;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a non-negative integer or decimal string")
+        }
+
+        fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value as u128)
+        }
+
+        fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(value)
+        }
+
+        fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value < 0 {
+                return Err(E::custom("expected non-negative integer"));
+            }
+            Ok(value as u128)
+        }
+
+        fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            if value < 0 {
+                return Err(E::custom("expected non-negative integer"));
+            }
+            Ok(value as u128)
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            value
+                .trim()
+                .parse::<u128>()
+                .map_err(|_| E::custom("expected decimal string for u128 value"))
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            self.visit_str(&value)
+        }
+    }
+
+    deserializer.deserialize_any(U128Visitor)
 }
 
 fn normalize_ui_font_family_name(name: String) -> String {
@@ -537,6 +619,10 @@ pub struct Config {
     ui_font_weight: i32,
     include_snapshots_and_betas: bool,
     force_java_21_minimum: bool,
+    #[serde(
+        serialize_with = "serialize_toml_safe_u128",
+        deserialize_with = "deserialize_toml_safe_u128"
+    )]
     default_instance_max_memory_mib: u128,
     default_instance_cli_args: String,
     minecraft_installations_root: String,
@@ -1450,5 +1536,33 @@ mod tests {
         let family = UiFontFamily::new("Cascadia Code");
         let serialized = serde_json::to_string(&family).unwrap();
         assert_eq!(serialized, "\"Cascadia Code\"");
+    }
+
+    #[test]
+    fn config_toml_serializes_u128_memory_field_as_integer() {
+        let config = Config::default();
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(serialized.contains("default_instance_max_memory_mib = 4096"));
+    }
+
+    #[test]
+    fn config_toml_serializes_large_u128_memory_field_as_string() {
+        let value = i64::MAX as u128 + 1;
+        let mut config = Config::default();
+        config.default_instance_max_memory_mib = value;
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        assert!(
+            serialized.contains(format!("default_instance_max_memory_mib = \"{value}\"").as_str())
+        );
+    }
+
+    #[test]
+    fn config_toml_deserializes_string_u128_memory_field() {
+        let value = i64::MAX as u128 + 1;
+        let serialized = format!("default_instance_max_memory_mib = \"{value}\"");
+
+        let config: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(config.default_instance_max_memory_mib, value);
     }
 }

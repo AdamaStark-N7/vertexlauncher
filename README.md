@@ -11,6 +11,7 @@ On the right side of our GitHub page, we provide release builds for download. Ea
 if you choose to build from source, you will need to have a couple of things installed:
 - Rust toolchain (stable)
     - **[NOTE]**: This requires a C/C++ linker to be installed. You can get this from the Visual Studio Community installer by checking `Build Desktop Applications in C++` and installing Visual Studio.
+    - **Windows builds must use the MSVC target** (for example `x86_64-pc-windows-msvc`). `windows-gnu` builds are not supported for release artifacts.
 - Cargo (Rust package manager)
 - Git (for cloning the repository)
 
@@ -41,9 +42,17 @@ If your distro ships `4.0` instead of `4.1`, use:
 - `libjavascriptcoregtk-4.0-dev`
 
 once you have everything installed, clone the repository, open a shell inside the root of the repo, and trigger a build with:
+
+Linux/macOS:
 ```sh
 cargo build --release
 ```
+
+Windows (MSVC):
+```sh
+cargo build --release --target x86_64-pc-windows-msvc
+```
+
 this should produce a release build of the application which should appear in the `target/release` directory. this binary is compiled to bundle everything it needs within itself, so you can move it around wherever you like and it should work without any issues.
 
 On Wayland, the desktop app ID is `vertexlauncher`, this will allow you to set an icon and other desktop integration features, a copy of the svg icon we use is included in the repository to help. 
