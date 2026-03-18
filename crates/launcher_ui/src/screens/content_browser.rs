@@ -778,7 +778,7 @@ fn render_controls(
             egui::ComboBox::from_id_salt(("content_browser_minecraft_version", instance_id))
                 .width(column_width)
                 .selected_text(format!(
-                    "Minecraft: {}",
+                    "Version: {}",
                     selected_minecraft_version_label(
                         state.minecraft_version_filter.as_str(),
                         &state.available_game_versions,
@@ -801,7 +801,7 @@ fn render_controls(
 
             egui::ComboBox::from_id_salt(("content_browser_scope", instance_id))
                 .width(column_width)
-                .selected_text(format!("Content: {}", state.content_scope.label()))
+                .selected_text(format!("Type: {}", state.content_scope.label()))
                 .show_ui(&mut cols[1], |ui| {
                     for scope in ContentScope::ALL {
                         ui.selectable_value(&mut state.content_scope, scope, scope.label());
@@ -810,7 +810,7 @@ fn render_controls(
 
             egui::ComboBox::from_id_salt(("content_browser_mod_sort", instance_id))
                 .width(column_width)
-                .selected_text(format!("Mods sort: {}", state.mod_sort_mode.label()))
+                .selected_text(format!("Sort: {}", state.mod_sort_mode.label()))
                 .show_ui(&mut cols[2], |ui| {
                     for mode in ModSortMode::ALL {
                         ui.selectable_value(&mut state.mod_sort_mode, mode, mode.label());
@@ -1592,7 +1592,7 @@ fn render_detail_versions_tab(
                     &entry.dedupe_key,
                 ))
                 .selected_text(format!(
-                    "Minecraft: {}",
+                    "Version: {}",
                     selected_detail_minecraft_version_label(state)
                 ))
                 .show_ui(ui, |ui| {
