@@ -13,7 +13,7 @@ use eframe::egui_wgpu::{self, wgpu};
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui};
 use image::{RgbaImage, imageops::FilterType};
 use launcher_runtime as tokio_runtime;
-use textui::{ButtonOptions, TextUi};
+use textui::TextUi;
 
 use super::LaunchAuthContext;
 use crate::{notification, privacy, ui::style};
@@ -156,7 +156,8 @@ fn render_contents(
     }
     ui.add_space(style::SPACE_LG);
 
-    let button_style = neutral_button_style(ui);
+    let button_style =
+        style::neutral_button_with_min_size(ui, egui::vec2(160.0, style::CONTROL_HEIGHT));
 
     ui.horizontal(|ui| {
         if text_ui
@@ -404,7 +405,7 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     };
     let mut button_clicked = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(toggle_rect), |ui| {
-        let mut toggle_style = neutral_button_style(ui);
+        let mut toggle_style = style::neutral_button(ui);
         toggle_style.min_size = toggle_rect.size();
         let response = text_ui.button(
             ui,
@@ -6562,19 +6563,6 @@ fn cape_uv_layout(texture_size: [u32; 2]) -> Option<FaceUvs> {
         front: inner,
         back: outer,
     })
-}
-
-fn neutral_button_style(ui: &Ui) -> ButtonOptions {
-    ButtonOptions {
-        min_size: egui::vec2(160.0, style::CONTROL_HEIGHT),
-        text_color: ui.visuals().text_color(),
-        fill: ui.visuals().widgets.inactive.bg_fill,
-        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-        fill_active: ui.visuals().widgets.active.bg_fill,
-        fill_selected: ui.visuals().selection.bg_fill,
-        stroke: ui.visuals().widgets.inactive.bg_stroke,
-        ..ButtonOptions::default()
-    }
 }
 
 fn _absolute_path_string(path: &PathBuf) -> String {

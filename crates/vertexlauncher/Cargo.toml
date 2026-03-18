@@ -5,6 +5,7 @@ edition = "2024"
 build = "build.rs"
 
 [dependencies]
+app_paths.workspace = true
 eframe.workspace = true
 egui.workspace = true
 egui_extras.workspace = true

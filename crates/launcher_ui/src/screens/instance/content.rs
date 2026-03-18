@@ -30,16 +30,10 @@ pub(super) fn render_installed_content_section(
     poll_content_apply_results(state, instance_root);
     ensure_content_hash_cache_loaded(state, instance_root);
 
-    let add_button_style = ButtonOptions {
-        min_size: egui::vec2((ui.available_width() - 30.0).max(160.0), 34.0),
-        text_color: ui.visuals().text_color(),
-        fill: ui.visuals().widgets.inactive.bg_fill,
-        fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-        fill_active: ui.visuals().widgets.active.bg_fill,
-        fill_selected: ui.visuals().selection.bg_fill,
-        stroke: ui.visuals().widgets.inactive.bg_stroke,
-        ..ButtonOptions::default()
-    };
+    let add_button_style = style::neutral_button_with_min_size(
+        ui,
+        egui::vec2((ui.available_width() - 30.0).max(160.0), 34.0),
+    );
 
     ui.horizontal(|ui| {
         if text_ui
@@ -70,16 +64,10 @@ pub(super) fn render_installed_content_section(
             .width(220.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
             .show(|ui| {
-                let popup_button_style = ButtonOptions {
-                    min_size: egui::vec2(ui.available_width().max(120.0), style::CONTROL_HEIGHT),
-                    text_color: ui.visuals().text_color(),
-                    fill: ui.visuals().widgets.inactive.bg_fill,
-                    fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                    fill_active: ui.visuals().widgets.active.bg_fill,
-                    fill_selected: ui.visuals().selection.bg_fill,
-                    stroke: ui.visuals().widgets.inactive.bg_stroke,
-                    ..ButtonOptions::default()
-                };
+                let popup_button_style = style::neutral_button_with_min_size(
+                    ui,
+                    egui::vec2(ui.available_width().max(120.0), style::CONTROL_HEIGHT),
+                );
                 if text_ui
                     .button(
                         ui,
@@ -1071,7 +1059,7 @@ fn cached_truncated_description(
         return cache_entry.truncated_description.clone();
     }
 
-    let truncated_description = text_helpers::truncate_single_line_text_with_ellipsis(
+    let truncated_description = textui::truncate_single_line_text_with_ellipsis(
         text_ui,
         ui,
         description,

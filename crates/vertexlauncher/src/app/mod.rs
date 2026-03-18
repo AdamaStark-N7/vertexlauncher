@@ -56,6 +56,7 @@ struct VertexApp {
     instance_shortcuts: Vec<ui::sidebar::ProfileShortcut>,
     selected_instance_id: Option<String>,
     instance_store: InstanceStore,
+    content_browser_state: screens::ContentBrowserState,
     show_create_instance_modal: bool,
     create_instance_state: create_instance_modal::CreateInstanceState,
     show_import_instance_modal: bool,
@@ -165,6 +166,7 @@ impl VertexApp {
             instance_shortcuts: Vec::new(),
             selected_instance_id: None,
             instance_store,
+            content_browser_state: screens::ContentBrowserState::default(),
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
             show_import_instance_modal: false,
@@ -849,6 +851,7 @@ impl eframe::App for VertexApp {
                             self.fonts.available_ui_fonts(),
                             self.theme_catalog.themes(),
                             &settings_info,
+                            &mut self.content_browser_state,
                             &mut self.text_ui,
                         );
                     },

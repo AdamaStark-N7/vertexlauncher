@@ -4,7 +4,6 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_THEME_ID: &str = "matrix_oled";
-const THEMES_DIR: &str = "themes";
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Oklch {
@@ -62,11 +61,23 @@ pub struct ThemeCatalog {
 
 impl ThemeCatalog {
     pub fn load() -> Self {
-        let themes_dir = PathBuf::from(THEMES_DIR);
+        let themes_dir = app_paths::themes_dir();
         ensure_themes_dir_and_defaults(&themes_dir);
 
         let fallback = Theme::matrix_oled();
         let mut themes = load_themes_from_dir(&themes_dir);
+        if app_paths::portable_root().is_none() {
+            if let Some(legacy_themes_dir) = app_paths::legacy_themes_dir()
+                && legacy_themes_dir != themes_dir
+            {
+                themes.extend(load_themes_from_dir(&legacy_themes_dir));
+            }
+
+            let legacy_themes_dir = PathBuf::from("themes");
+            if legacy_themes_dir != themes_dir {
+                themes.extend(load_themes_from_dir(&legacy_themes_dir));
+            }
+        }
         let mut seen = HashSet::new();
         themes.retain(|theme| seen.insert(theme.id.clone()));
 

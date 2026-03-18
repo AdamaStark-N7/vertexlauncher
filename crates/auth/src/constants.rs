@@ -20,7 +20,8 @@ pub(crate) const MINECRAFT_PROFILE_CAPE_ACTIVE_URL: &str =
     "https://api.minecraftservices.com/minecraft/profile/capes/active";
 
 pub(crate) const ACCOUNT_CACHE_FILENAME: &str = "account_cache.json";
-pub(crate) const ACCOUNT_CACHE_APP_DIR: &str = "vertex-launcher";
+pub(crate) const ACCOUNT_CACHE_APP_DIR: &str = "vertexlauncher";
+pub(crate) const LEGACY_ACCOUNT_CACHE_APP_DIR: &str = "vertex-launcher";
 pub(crate) const LEGACY_ACCOUNT_CACHE_PATH: &str = "account_cache.json";
 
 /// Built-in Microsoft OAuth client id used when `VERTEX_MSA_CLIENT_ID` is not set.

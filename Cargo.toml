@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/app_paths",
     "crates/auth",
     "crates/config",
     "crates/content_resolver",
@@ -33,6 +34,7 @@ toml = "*"
 serde_json = "*"
 humantime = "*"
 humantime-serde = "*"
+directories = "*"
 egui_extras = { version = "*", features = ["http", "image", "gif", "svg", "chrono", "datepicker", "syntect", "serde"] }
 image = "*"
 cosmic-text = "*"
@@ -46,6 +48,7 @@ url = "*"
 ureq = { version = "3.2.0", features = ["json"] }
 
 # internal crates
+app_paths = { path = "crates/app_paths" }
 auth = { path = "crates/auth" }
 config = { path = "crates/config" }
 content_resolver = { path = "crates/content_resolver" }

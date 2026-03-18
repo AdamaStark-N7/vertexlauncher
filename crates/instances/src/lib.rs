@@ -190,7 +190,7 @@ impl InstanceStore {
 /// Missing files are treated as an empty store. Any present records are
 /// normalized to enforce current defaults.
 pub fn load_store() -> Result<InstanceStore, InstanceError> {
-    let path = store_path();
+    let path = load_store_path();
     tracing::debug!(
         target: "vertexlauncher/instances",
         path = %path.display(),
@@ -595,16 +595,38 @@ pub fn effective_linux_graphics_settings(
     }
 }
 
-/// Returns the path used for persistent instance metadata (`instances.json`).
-///
-/// Uses `VERTEX_CONFIG_LOCATION/instances.json` when set, otherwise
-/// `./instances.json` relative to the current process directory.
+/// Returns the canonical path used when persisting instance metadata.
 #[must_use]
 pub fn store_path() -> PathBuf {
-    match std::env::var("VERTEX_CONFIG_LOCATION") {
-        Ok(dir) => PathBuf::from(dir).join(INSTANCES_FILENAME),
-        Err(_) => PathBuf::from(INSTANCES_FILENAME),
+    app_paths::instances_store_path()
+}
+
+/// Resolves the path used when loading instance metadata, including legacy
+/// storage locations from older launcher builds.
+#[must_use]
+fn load_store_path() -> PathBuf {
+    let default_path = app_paths::instances_store_path();
+    if default_path.exists() {
+        return default_path;
     }
+
+    if app_paths::portable_root().is_some() {
+        return default_path;
+    }
+
+    if let Some(legacy_path) = app_paths::legacy_instances_store_path()
+        && legacy_path != default_path
+        && legacy_path.exists()
+    {
+        return legacy_path;
+    }
+
+    let legacy_path = PathBuf::from(INSTANCES_FILENAME);
+    if legacy_path != default_path && legacy_path.exists() {
+        return legacy_path;
+    }
+
+    default_path
 }
 
 /// Normalizes a record into launcher defaults and sanitized persisted values.

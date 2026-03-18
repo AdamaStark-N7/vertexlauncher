@@ -19,6 +19,8 @@ mod platform_specific;
 mod settings;
 mod skins;
 
+pub use content_browser::ContentBrowserState;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
     Home,
@@ -130,6 +132,7 @@ pub fn render(
     available_ui_fonts: &[UiFontFamily],
     available_themes: &[Theme],
     settings_info: &SettingsInfo,
+    content_browser_state: &mut ContentBrowserState,
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
     let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
@@ -184,6 +187,7 @@ pub fn render(
                 selected_instance_id,
                 instances,
                 config,
+                content_browser_state,
                 reset_content_browser,
             );
             ScreenOutput {

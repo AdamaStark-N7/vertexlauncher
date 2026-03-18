@@ -28,6 +28,7 @@ mod code_block_options;
 mod input_options;
 mod label_options;
 mod markdown_options;
+mod text_helpers;
 mod tooltip_options;
 
 pub use button_options::ButtonOptions;
@@ -35,6 +36,10 @@ pub use code_block_options::CodeBlockOptions;
 pub use input_options::InputOptions;
 pub use label_options::LabelOptions;
 pub use markdown_options::MarkdownOptions;
+pub use text_helpers::{
+    normalize_inline_whitespace, truncate_single_line_text_with_ellipsis,
+    truncate_single_line_text_with_ellipsis_preserving_whitespace,
+};
 pub use tooltip_options::TooltipOptions;
 
 const DEFAULT_OPEN_TYPE_FEATURE_TAGS: &str = "liga, calt";

@@ -325,14 +325,8 @@ fn render_instance_tile(
         ui.vertical(|ui| {
             render_instance_thumbnail(ui, state, instance);
 
-            let name_style = LabelOptions {
-                font_size: 22.0,
-                line_height: 28.0,
-                weight: 700,
-                color: ui.visuals().text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let mut name_style = style::heading(ui, 22.0, 28.0);
+            name_style.wrap = true;
             render_scroll_text_block(
                 ui,
                 ("library_instance_name", instance.id.as_str()),
@@ -341,26 +335,19 @@ fn render_instance_tile(
                 &name_style,
                 TILE_NAME_SCROLL_HEIGHT,
             );
+            let detail_style = style::body(ui);
 
             let _ = text_ui.label(
                 ui,
                 ("library_instance_version", instance.id.as_str()),
                 &format!("Version: {}", instance.game_version),
-                &LabelOptions {
-                    color: ui.visuals().text_color(),
-                    wrap: true,
-                    ..LabelOptions::default()
-                },
+                &detail_style,
             );
             let _ = text_ui.label(
                 ui,
                 ("library_instance_modloader", instance.id.as_str()),
                 &format!("Modloader: {}", instance.modloader),
-                &LabelOptions {
-                    color: ui.visuals().text_color(),
-                    wrap: true,
-                    ..LabelOptions::default()
-                },
+                &detail_style,
             );
 
             let (description, muted) = if let Some(description) = instance
@@ -717,24 +704,9 @@ fn render_delete_instance_modal(
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
 
-            let heading_style = LabelOptions {
-                font_size: 28.0,
-                line_height: 32.0,
-                weight: 700,
-                color: danger,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
-            let muted_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
+            let body_style = style::body(ui);
+            let muted_style = style::muted(ui);
 
             let _ = text_ui.label(
                 ui,

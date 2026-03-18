@@ -40,7 +40,7 @@ use crate::app::tokio_runtime;
 use crate::desktop;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
-    components::{icon_button, remote_tiled_image, settings_widgets, text_helpers},
+    components::{icon_button, remote_tiled_image, settings_widgets},
     modal, style,
 };
 use crate::{assets, console, install_activity, notification, privacy};
@@ -197,14 +197,8 @@ pub fn render(
     account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> InstanceScreenOutput {
     let mut output = InstanceScreenOutput::default();
-    let text_color = ui.visuals().text_color();
-    let body_style = LabelOptions {
-        color: text_color,
-        wrap: true,
-        ..LabelOptions::default()
-    };
-    let mut muted_style = body_style.clone();
-    muted_style.color = ui.visuals().weak_text_color();
+    let body_style = style::body(ui);
+    let muted_style = style::muted(ui);
 
     let Some(instance_id) = selected_instance_id else {
         let _ = text_ui.label(
@@ -429,19 +423,8 @@ fn render_instance_screenshot_gallery(
     text_ui: &mut TextUi,
     state: &mut InstanceScreenState,
 ) {
-    let title_style = LabelOptions {
-        font_size: 18.0,
-        line_height: 24.0,
-        weight: 700,
-        color: ui.visuals().text_color(),
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let body_style = LabelOptions {
-        color: ui.visuals().weak_text_color(),
-        wrap: true,
-        ..LabelOptions::default()
-    };
+    let title_style = style::heading(ui, 18.0, 24.0);
+    let body_style = style::muted(ui);
     let _ = text_ui.label(
         ui,
         "instance_screenshot_gallery_title",
@@ -690,19 +673,8 @@ fn render_instance_screenshot_viewer_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let title_style = LabelOptions {
-                font_size: 24.0,
-                line_height: 28.0,
-                weight: 700,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
+            let title_style = style::heading(ui, 24.0, 28.0);
+            let body_style = style::muted_single_line(ui);
 
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -856,24 +828,9 @@ fn render_instance_delete_screenshot_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let heading_style = LabelOptions {
-                font_size: 28.0,
-                line_height: 32.0,
-                weight: 700,
-                color: danger,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
-            let muted_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
+            let body_style = style::body(ui);
+            let muted_style = style::muted(ui);
 
             let path_label = screenshot.path.display().to_string();
             let _ = text_ui.label(
@@ -1062,19 +1019,8 @@ fn copy_instance_screenshot_to_clipboard(ctx: &egui::Context, label: &str, bytes
 }
 
 fn render_instance_logs_tab(ui: &mut Ui, text_ui: &mut TextUi, state: &mut InstanceScreenState) {
-    let title_style = LabelOptions {
-        font_size: 18.0,
-        line_height: 24.0,
-        weight: 700,
-        color: ui.visuals().text_color(),
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let body_style = LabelOptions {
-        color: ui.visuals().weak_text_color(),
-        wrap: true,
-        ..LabelOptions::default()
-    };
+    let title_style = style::heading(ui, 18.0, 24.0);
+    let body_style = style::muted(ui);
     let _ = text_ui.label(ui, "instance_logs_title", "Logs", &title_style);
     let _ = text_ui.label(
         ui,
@@ -1768,23 +1714,9 @@ fn render_instance_settings_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let text_color = ui.visuals().text_color();
-            let mut muted_style = LabelOptions::default();
-            muted_style.color = ui.visuals().weak_text_color();
-            muted_style.wrap = true;
-            let section_style = LabelOptions {
-                font_size: 22.0,
-                line_height: 26.0,
-                weight: 700,
-                color: text_color,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: text_color,
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let muted_style = style::muted(ui);
+            let section_style = style::heading(ui, 22.0, 26.0);
+            let body_style = style::body(ui);
             let action_button_style = ButtonOptions {
                 min_size: egui::vec2(220.0, 34.0),
                 text_color: ui.visuals().widgets.active.fg_stroke.color,
@@ -1795,26 +1727,10 @@ fn render_instance_settings_modal(
                 stroke: ui.visuals().selection.stroke,
                 ..ButtonOptions::default()
             };
-            let refresh_style = ButtonOptions {
-                min_size: egui::vec2(190.0, 30.0),
-                text_color: ui.visuals().text_color(),
-                fill: ui.visuals().widgets.inactive.bg_fill,
-                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                fill_active: ui.visuals().widgets.active.bg_fill,
-                fill_selected: ui.visuals().selection.bg_fill,
-                stroke: ui.visuals().widgets.inactive.bg_stroke,
-                ..ButtonOptions::default()
-            };
-            let reinstall_button_style = ButtonOptions {
-                min_size: egui::vec2(220.0, 34.0),
-                text_color: ui.visuals().text_color(),
-                fill: ui.visuals().widgets.inactive.bg_fill,
-                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                fill_active: ui.visuals().widgets.active.bg_fill,
-                fill_selected: ui.visuals().selection.bg_fill,
-                stroke: ui.visuals().widgets.inactive.bg_stroke,
-                ..ButtonOptions::default()
-            };
+            let refresh_style =
+                style::neutral_button_with_min_size(ui, egui::vec2(190.0, 30.0));
+            let reinstall_button_style =
+                style::neutral_button_with_min_size(ui, egui::vec2(220.0, 34.0));
 
             egui::ScrollArea::vertical()
                 .id_salt(("instance_settings_modal_scroll", instance_id))
@@ -2775,19 +2691,8 @@ fn render_export_vtmpack_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let title_style = LabelOptions {
-                font_size: 26.0,
-                line_height: 30.0,
-                weight: 700,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let title_style = style::heading(ui, 26.0, 30.0);
+            let body_style = style::muted(ui);
             let _ = text_ui.label(
                 ui,
                 ("instance_export_vtmpack_title", instance_id),

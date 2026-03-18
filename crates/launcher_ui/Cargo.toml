@@ -4,6 +4,7 @@ version = "0.1.5-Alpha"
 edition = "2024"
 
 [dependencies]
+app_paths.workspace = true
 eframe.workspace = true
 egui.workspace = true
 serde.workspace = true

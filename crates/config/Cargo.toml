@@ -4,6 +4,7 @@ version = "0.1.5-Alpha"
 edition = "2024"
 
 [dependencies]
+app_paths.workspace = true
 toml.workspace = true
 serde.workspace = true
 serde_json.workspace = true

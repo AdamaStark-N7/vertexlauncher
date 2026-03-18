@@ -29,10 +29,10 @@ const NEOFORGE_LEGACY_FORGE_METADATA_URL: &str =
 const CACHE_VERSION_CATALOG_RELEASES_FILE: &str = "version_catalog_release_only.json";
 const CACHE_VERSION_CATALOG_ALL_FILE: &str = "version_catalog_with_snapshots.json";
 const CACHE_LOADER_VERSIONS_DIR_NAME: &str = "loader_versions";
-const CACHE_DIR_NAME: &str = "cache";
 const VERSION_CATALOG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 const HTTP_RETRY_ATTEMPTS: u32 = 4;
 const HTTP_RETRY_BASE_DELAY_MS: u64 = 350;
+const MAX_CONTENT_LENGTH_PROBES_PER_BATCH: usize = 32;
 const OPENJDK_USER_AGENT: &str =
     "VertexLauncher-JavaProvisioner/0.1 (+https://github.com/SturdyFool10/vertexlauncher)";
 #[cfg(target_os = "windows")]
@@ -2604,18 +2604,35 @@ fn emit_download_progress(
     });
 }
 
-fn prefetch_batch_total_bytes(tasks: &mut [FileDownloadTask], probe_workers: usize) -> u64 {
+fn prefetch_batch_total_bytes(
+    tasks: &mut [FileDownloadTask],
+    probe_workers: usize,
+    max_probe_count: usize,
+) -> u64 {
     let mut total_known_bytes = 0u64;
     let mut unknown = std::collections::VecDeque::new();
+    let mut skipped_probe_count = 0usize;
     for (index, task) in tasks.iter().enumerate() {
         if let Some(size) = task.expected_size {
             total_known_bytes = total_known_bytes.saturating_add(size);
         } else {
-            unknown.push_back((index, task.url.clone()));
+            if unknown.len() < max_probe_count {
+                unknown.push_back((index, task.url.clone()));
+            } else {
+                skipped_probe_count += 1;
+            }
         }
     }
     if unknown.is_empty() {
         return total_known_bytes;
+    }
+    if skipped_probe_count > 0 {
+        tracing::debug!(
+            target: "vertexlauncher/installation/downloads",
+            probed = unknown.len(),
+            skipped = skipped_probe_count,
+            "Skipping some HEAD size probes to reduce batch startup latency"
+        );
     }
 
     let queue = Arc::new(Mutex::new(unknown));
@@ -2711,7 +2728,9 @@ fn download_files_concurrent(
     let batch_started_at = Instant::now();
     let worker_count = policy.max_concurrent_downloads.clamp(1, 64) as usize;
     let size_probe_workers = worker_count.min(8).max(1);
-    let prefetched_total_bytes = prefetch_batch_total_bytes(&mut tasks, size_probe_workers);
+    let max_size_probes = MAX_CONTENT_LENGTH_PROBES_PER_BATCH.max(size_probe_workers);
+    let prefetched_total_bytes =
+        prefetch_batch_total_bytes(&mut tasks, size_probe_workers, max_size_probes);
     // Prioritize larger files so long-running transfers start earlier.
     tasks.sort_by_key(|task| std::cmp::Reverse(task.expected_size.unwrap_or(0)));
     tracing::info!(
@@ -3414,10 +3433,7 @@ fn verify_modloader_profile(
 }
 
 fn cache_root_dir() -> PathBuf {
-    match std::env::var("VERTEX_CONFIG_LOCATION") {
-        Ok(dir) => PathBuf::from(dir).join(CACHE_DIR_NAME),
-        Err(_) => PathBuf::from(CACHE_DIR_NAME),
-    }
+    app_paths::cache_root()
 }
 
 fn canonicalize_existing_path(path: PathBuf) -> PathBuf {

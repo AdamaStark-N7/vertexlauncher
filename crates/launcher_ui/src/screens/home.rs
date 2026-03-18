@@ -14,7 +14,10 @@ use egui::{Color32, Layout, Ui};
 use flate2::read::GzDecoder;
 use instances::{InstanceStore, instance_root_path, set_server_favorite, set_world_favorite};
 use launcher_runtime as tokio_runtime;
-use textui::{LabelOptions, TextUi};
+use textui::{
+    LabelOptions, TextUi,
+    truncate_single_line_text_with_ellipsis_preserving_whitespace as truncate_for_width,
+};
 
 use crate::{
     assets, notification,
@@ -671,19 +674,8 @@ fn render_home_tab_row(ui: &mut Ui, active_tab: &mut HomeTab) {
 }
 
 fn render_screenshot_gallery(ui: &mut Ui, text_ui: &mut TextUi, state: &mut HomeState) {
-    let title_style = LabelOptions {
-        font_size: 18.0,
-        line_height: 24.0,
-        weight: 700,
-        color: ui.visuals().text_color(),
-        wrap: false,
-        ..LabelOptions::default()
-    };
-    let body_style = LabelOptions {
-        color: ui.visuals().weak_text_color(),
-        wrap: true,
-        ..LabelOptions::default()
-    };
+    let title_style = style::heading(ui, 18.0, 24.0);
+    let body_style = style::muted(ui);
     let _ = text_ui.label(ui, "home_screenshots_title", "Screenshots", &title_style);
     let summary = if state.screenshot_scan_pending && state.screenshots.is_empty() {
         "Loading recent screenshots...".to_owned()
@@ -915,19 +907,8 @@ fn render_screenshot_viewer_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let title_style = LabelOptions {
-                font_size: 24.0,
-                line_height: 28.0,
-                weight: 700,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
+            let title_style = style::heading(ui, 24.0, 28.0);
+            let body_style = style::muted_single_line(ui);
 
             ui.horizontal(|ui| {
                 ui.vertical(|ui| {
@@ -1075,24 +1056,9 @@ fn render_delete_screenshot_modal(
         .constrain_to(viewport_rect)
         .frame(modal::window_frame(ctx))
         .show(ctx, |ui| {
-            let heading_style = LabelOptions {
-                font_size: 28.0,
-                line_height: 32.0,
-                weight: 700,
-                color: danger,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                color: ui.visuals().text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
-            let muted_style = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
+            let body_style = style::body(ui);
+            let muted_style = style::muted(ui);
 
             let _ = text_ui.label(
                 ui,
@@ -1665,18 +1631,18 @@ fn render_world_row(
             };
             let text_max_width = ui.available_width().max(80.0);
             let world_name = truncate_for_width(
-                ui,
                 text_ui,
+                ui,
                 world.world_name.as_str(),
-                &name_label_options,
                 text_max_width,
+                &name_label_options,
             );
             let world_meta = truncate_for_width(
-                ui,
                 text_ui,
+                ui,
                 world_meta_line(world, now_ms).as_str(),
-                &meta_label_options,
                 text_max_width,
+                &meta_label_options,
             );
             ui.vertical(|ui| {
                 ui.set_max_width(text_max_width);
@@ -1799,18 +1765,18 @@ fn render_server_row(
             };
             let text_max_width = (ui.available_width() - SERVER_PING_ICON_SIZE - 8.0).max(80.0);
             let server_name = truncate_for_width(
-                ui,
                 text_ui,
+                ui,
                 server.server_name.as_str(),
-                &name_label_options,
                 text_max_width,
+                &name_label_options,
             );
             let server_meta = truncate_for_width(
-                ui,
                 text_ui,
+                ui,
                 server_meta_full.as_str(),
-                &meta_label_options,
                 text_max_width,
+                &meta_label_options,
             );
             ui.vertical(|ui| {
                 ui.set_max_width(text_max_width);
@@ -2678,55 +2644,6 @@ fn strip_minecraft_format_codes(input: &str) -> String {
         }
         out.push(ch);
     }
-    out
-}
-
-fn truncate_for_width(
-    ui: &Ui,
-    text_ui: &mut TextUi,
-    value: &str,
-    options: &LabelOptions,
-    max_width: f32,
-) -> String {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return String::new();
-    }
-    if text_ui.measure_text_size(ui, trimmed, options).x <= max_width {
-        return trimmed.to_owned();
-    }
-    let ellipsis = "...";
-    if text_ui.measure_text_size(ui, ellipsis, options).x > max_width {
-        return ellipsis.to_owned();
-    }
-    let chars: Vec<char> = trimmed.chars().collect();
-    let mut low = 0usize;
-    let mut high = chars.len();
-    let mut best = 0usize;
-
-    while low <= high {
-        let mid = low + (high - low) / 2;
-        let mut candidate = String::with_capacity(mid + ellipsis.len());
-        for ch in chars.iter().take(mid) {
-            candidate.push(*ch);
-        }
-        candidate.push_str(ellipsis);
-        let width = text_ui.measure_text_size(ui, candidate.as_str(), options).x;
-        if width <= max_width {
-            best = mid;
-            low = mid.saturating_add(1);
-        } else if mid == 0 {
-            break;
-        } else {
-            high = mid - 1;
-        }
-    }
-
-    let mut out = String::with_capacity(best + ellipsis.len());
-    for ch in chars.iter().take(best) {
-        out.push(*ch);
-    }
-    out.push_str(ellipsis);
     out
 }
 

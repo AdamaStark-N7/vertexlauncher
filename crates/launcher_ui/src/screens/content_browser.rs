@@ -22,16 +22,13 @@ use std::{
     thread,
     time::{SystemTime, UNIX_EPOCH},
 };
-use textui::{ButtonOptions, LabelOptions, TextUi};
+use textui::{LabelOptions, TextUi, normalize_inline_whitespace};
 
 use crate::app::tokio_runtime;
 use crate::assets;
 use crate::install_activity;
 use crate::notification;
-use crate::ui::{
-    components::{remote_tiled_image, text_helpers},
-    style,
-};
+use crate::ui::{components::remote_tiled_image, style};
 
 use super::AppScreen;
 
@@ -370,7 +367,7 @@ struct DetailVersionsResult {
 }
 
 #[derive(Clone, Debug)]
-struct ContentBrowserState {
+pub struct ContentBrowserState {
     query_input: String,
     minecraft_version_filter: String,
     content_scope: ContentScope,
@@ -477,23 +474,19 @@ pub fn render(
     selected_instance_id: Option<&str>,
     instances: &InstanceStore,
     config: &Config,
+    state: &mut ContentBrowserState,
     force_reset: bool,
 ) -> ContentBrowserOutput {
     let mut output = ContentBrowserOutput::default();
-    let state_id = ui.make_persistent_id("content_browser_state");
-    let mut state = if force_reset {
-        ContentBrowserState::default()
-    } else {
-        ui.ctx()
-            .data_mut(|data| data.get_temp::<ContentBrowserState>(state_id))
-            .unwrap_or_default()
-    };
+    if force_reset {
+        *state = ContentBrowserState::default();
+    }
 
-    poll_search(&mut state);
-    poll_detail_versions(&mut state);
-    poll_downloads(&mut state);
-    poll_version_catalog(&mut state);
-    poll_identify_results(&mut state);
+    poll_search(state);
+    poll_detail_versions(state);
+    poll_downloads(state);
+    poll_version_catalog(state);
+    poll_identify_results(state);
 
     if state.search_in_flight
         || state.detail_versions_in_flight
@@ -516,7 +509,6 @@ pub fn render(
                 ..LabelOptions::default()
             },
         );
-        ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
         return output;
     };
 
@@ -531,7 +523,6 @@ pub fn render(
                 ..LabelOptions::default()
             },
         );
-        ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
         return output;
     };
 
@@ -568,8 +559,8 @@ pub fn render(
     let instance_root = instance_root_path(&installations_root, instance);
     let game_version = instance.game_version.trim().to_owned();
 
-    request_version_catalog(&mut state);
-    apply_pending_external_detail_open(&mut state);
+    request_version_catalog(state);
+    apply_pending_external_detail_open(state);
 
     let _ = text_ui.label(
         ui,
@@ -592,7 +583,7 @@ pub fn render(
     );
     ui.add_space(style::SPACE_MD);
 
-    maybe_start_queued_download(&mut state, instance.name.as_str(), instance_root.as_path());
+    maybe_start_queued_download(state, instance.name.as_str(), instance_root.as_path());
 
     if let Some(status) = state.status_message.as_deref() {
         let _ = text_ui.label(
@@ -624,7 +615,7 @@ pub fn render(
     match state.current_view {
         ContentBrowserPage::Browse => {
             let manifest = load_content_manifest(instance_root.as_path());
-            render_controls(ui, text_ui, instance.id.as_str(), &mut state);
+            render_controls(ui, text_ui, instance.id.as_str(), state);
 
             if state.auto_populated_instance_id.as_deref() != Some(instance.id.as_str())
                 && !state.search_in_flight
@@ -639,7 +630,7 @@ pub fn render(
                     page: 1,
                 };
                 state.current_page = 1;
-                request_search(&mut state, request);
+                request_search(state, request);
                 state.auto_populated_instance_id = Some(instance.id.clone());
             }
 
@@ -648,7 +639,7 @@ pub fn render(
                 ui,
                 text_ui,
                 instance.id.as_str(),
-                &mut state,
+                state,
                 &manifest,
                 results_height,
             );
@@ -656,10 +647,10 @@ pub fn render(
                 && page != state.current_page
             {
                 state.current_page = page;
-                request_search_for_current_filters(&mut state, false);
+                request_search_for_current_filters(state, false);
             }
             if let Some(entry) = render_outcome.open_entry {
-                open_detail_page(&mut state, &entry);
+                open_detail_page(state, &entry);
             }
         }
         ContentBrowserPage::Detail => {
@@ -668,7 +659,7 @@ pub fn render(
                 text_ui,
                 instance.id.as_str(),
                 instance_root.as_path(),
-                &mut state,
+                state,
             );
         }
     }
@@ -676,15 +667,7 @@ pub fn render(
     ui.add_space(style::SPACE_LG);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = style::SPACE_SM;
-        let button_style = ButtonOptions {
-            text_color: ui.visuals().text_color(),
-            fill: ui.visuals().widgets.inactive.bg_fill,
-            fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-            fill_active: ui.visuals().widgets.active.bg_fill,
-            fill_selected: ui.visuals().selection.bg_fill,
-            stroke: ui.visuals().widgets.inactive.bg_stroke,
-            ..ButtonOptions::default()
-        };
+        let button_style = style::neutral_button(ui);
         if state.current_view == ContentBrowserPage::Detail {
             if text_ui
                 .button(
@@ -710,8 +693,6 @@ pub fn render(
             output.requested_screen = Some(AppScreen::Instance);
         }
     });
-
-    ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
     output
 }
 
@@ -728,15 +709,7 @@ fn render_controls(
         .inner_margin(egui::Margin::same(style::SPACE_XL as i8));
     frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_MD);
-        let button_style = ButtonOptions {
-            text_color: ui.visuals().text_color(),
-            fill: ui.visuals().widgets.inactive.bg_fill,
-            fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-            fill_active: ui.visuals().widgets.active.bg_fill,
-            fill_selected: ui.visuals().selection.bg_fill,
-            stroke: ui.visuals().widgets.inactive.bg_stroke,
-            ..ButtonOptions::default()
-        };
+        let button_style = style::neutral_button(ui);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
             let edit = egui::TextEdit::singleline(&mut state.query_input)
@@ -1016,16 +989,8 @@ fn render_results(
 
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            let pagination_button_style = ButtonOptions {
-                min_size: egui::vec2(72.0, 30.0),
-                text_color: ui.visuals().text_color(),
-                fill: ui.visuals().widgets.inactive.bg_fill,
-                fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                fill_active: ui.visuals().widgets.active.bg_fill,
-                fill_selected: ui.visuals().selection.bg_fill,
-                stroke: ui.visuals().widgets.inactive.bg_stroke,
-                ..ButtonOptions::default()
-            };
+            let pagination_button_style =
+                style::neutral_button_with_min_size(ui, egui::vec2(72.0, 30.0));
             if ui
                 .add_enabled_ui(!state.search_in_flight && state.current_page > 1, |ui| {
                     text_ui.button(
@@ -1519,16 +1484,7 @@ fn render_detail_page(
     ui.add_space(10.0);
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-        let tab_style = ButtonOptions {
-            min_size: egui::vec2(96.0, 30.0),
-            text_color: ui.visuals().text_color(),
-            fill: ui.visuals().widgets.inactive.bg_fill,
-            fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-            fill_active: ui.visuals().widgets.active.bg_fill,
-            fill_selected: ui.visuals().selection.bg_fill,
-            stroke: ui.visuals().widgets.inactive.bg_stroke,
-            ..ButtonOptions::default()
-        };
+        let tab_style = style::neutral_button_with_min_size(ui, egui::vec2(96.0, 30.0));
         for (tab, label) in [
             (ContentDetailTab::Overview, "Overview"),
             (ContentDetailTab::Versions, "Versions"),
@@ -2083,7 +2039,7 @@ fn version_matches_loader(version: &BrowserVersionEntry, loader: BrowserLoader) 
     version
         .loaders
         .iter()
-        .any(|value| normalize_type_key(value).contains(expected))
+        .any(|value| normalize_search_key(value).contains(expected))
 }
 
 fn version_matches_game_version(version: &BrowserVersionEntry, game_version_filter: &str) -> bool {
@@ -2107,7 +2063,7 @@ fn browser_loader_from_modloader(modloader: &str) -> BrowserLoader {
     }
 }
 
-fn normalize_lookup_key(value: &str) -> String {
+fn normalize_search_key(value: &str) -> String {
     let normalized = value
         .chars()
         .map(|ch| {
@@ -2118,25 +2074,11 @@ fn normalize_lookup_key(value: &str) -> String {
             }
         })
         .collect::<String>();
-    text_helpers::normalize_inline_whitespace(normalized.as_str())
-}
-
-fn normalize_type_key(value: &str) -> String {
-    let normalized = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>();
-    text_helpers::normalize_inline_whitespace(normalized.as_str())
+    normalize_inline_whitespace(normalized.as_str())
 }
 
 fn parse_content_type(value: &str) -> Option<BrowserContentType> {
-    let normalized = normalize_type_key(value);
+    let normalized = normalize_search_key(value);
     if normalized.contains("shader") {
         Some(BrowserContentType::Shader)
     } else if normalized.contains("resource pack")
@@ -2275,7 +2217,7 @@ fn browser_entry_from_unified_content(
     let Some(content_type) = parse_content_type(entry.content_type.as_str()) else {
         return Err(format!("Unsupported content type for {}.", entry.name));
     };
-    let name_key = normalize_lookup_key(entry.name.as_str());
+    let name_key = normalize_search_key(entry.name.as_str());
     if name_key.is_empty() {
         return Err("Content entry name cannot be empty.".to_owned());
     }
@@ -3330,7 +3272,7 @@ fn resolve_curseforge_class_ids(
     match client.list_content_classes(MINECRAFT_GAME_ID) {
         Ok(classes) => {
             for class_entry in classes {
-                let normalized = normalize_type_key(class_entry.name.as_str());
+                let normalized = normalize_search_key(class_entry.name.as_str());
                 if normalized.contains("shader") {
                     by_type.insert(BrowserContentType::Shader, class_entry.id);
                 } else if normalized.contains("resource")
@@ -3504,7 +3446,7 @@ fn dedupe_browser_entries(entries: Vec<ProviderSearchEntry>) -> Vec<BrowserProje
             updated_at,
             relevance_rank,
         } = entry;
-        let name_key = normalize_lookup_key(name.as_str());
+        let name_key = normalize_search_key(name.as_str());
         if name_key.is_empty() {
             continue;
         }
@@ -4729,7 +4671,7 @@ fn browser_entry_from_modrinth_dependency_project(
     project: &modrinth::Project,
 ) -> Option<BrowserProjectEntry> {
     let content_type = parse_content_type(project.project_type.as_str())?;
-    let name_key = normalize_lookup_key(project.title.as_str());
+    let name_key = normalize_search_key(project.title.as_str());
     if name_key.is_empty() {
         return None;
     }
@@ -4751,7 +4693,7 @@ fn browser_entry_from_modrinth_dependency_project(
 fn browser_entry_from_curseforge_dependency_project(
     project: &curseforge::Project,
 ) -> Option<BrowserProjectEntry> {
-    let name_key = normalize_lookup_key(project.name.as_str());
+    let name_key = normalize_search_key(project.name.as_str());
     if name_key.is_empty() {
         return None;
     }

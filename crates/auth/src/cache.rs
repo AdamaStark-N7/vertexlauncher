@@ -2,7 +2,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
 
-use crate::constants::{ACCOUNT_CACHE_APP_DIR, ACCOUNT_CACHE_FILENAME, LEGACY_ACCOUNT_CACHE_PATH};
+use crate::constants::{
+    ACCOUNT_CACHE_APP_DIR, ACCOUNT_CACHE_FILENAME, LEGACY_ACCOUNT_CACHE_APP_DIR,
+    LEGACY_ACCOUNT_CACHE_PATH,
+};
 use crate::error::AuthError;
 use crate::secret_store::{self, RefreshTokenLoadResult};
 use crate::types::{CachedAccount, CachedAccountsState, RefreshTokenState};
@@ -71,8 +74,8 @@ pub(crate) fn save_cached_accounts(state: &CachedAccountsState) -> Result<(), Au
     }
     let json = serde_json::to_string(&normalized)?;
     fs_write_string(&path, &json)?;
-    if path != Path::new(LEGACY_ACCOUNT_CACHE_PATH) {
-        remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+    for legacy_path in legacy_account_cache_paths(&path) {
+        remove_legacy_account_cache_file(&legacy_path);
     }
     let _ = secret_store::delete_accounts_state();
 
@@ -93,7 +96,9 @@ pub(crate) fn clear_cached_accounts() -> Result<(), AuthError> {
     let previous_profile_ids = load_cached_profile_ids_from_persisted_storage(&path)?;
 
     remove_legacy_account_cache_file(&path);
-    remove_legacy_account_cache_file(Path::new(LEGACY_ACCOUNT_CACHE_PATH));
+    for legacy_path in legacy_account_cache_paths(&path) {
+        remove_legacy_account_cache_file(&legacy_path);
+    }
     let _ = secret_store::delete_accounts_state();
 
     for profile_id in previous_profile_ids {
@@ -125,21 +130,28 @@ fn account_cache_path() -> PathBuf {
 }
 
 fn default_account_cache_path() -> PathBuf {
+    default_account_cache_dir(ACCOUNT_CACHE_APP_DIR)
+        .map(|dir| dir.join(ACCOUNT_CACHE_FILENAME))
+        .unwrap_or_else(|| PathBuf::from(ACCOUNT_CACHE_APP_DIR).join(ACCOUNT_CACHE_FILENAME))
+}
+
+fn legacy_default_account_cache_path() -> Option<PathBuf> {
+    default_account_cache_dir(LEGACY_ACCOUNT_CACHE_APP_DIR)
+        .map(|dir| dir.join(ACCOUNT_CACHE_FILENAME))
+}
+
+fn default_account_cache_dir(app_dir: &str) -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
         if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
             if !local_app_data.trim().is_empty() {
-                return PathBuf::from(local_app_data)
-                    .join(ACCOUNT_CACHE_APP_DIR)
-                    .join(ACCOUNT_CACHE_FILENAME);
+                return Some(PathBuf::from(local_app_data).join(app_dir));
             }
         }
 
         if let Ok(app_data) = std::env::var("APPDATA") {
             if !app_data.trim().is_empty() {
-                return PathBuf::from(app_data)
-                    .join(ACCOUNT_CACHE_APP_DIR)
-                    .join(ACCOUNT_CACHE_FILENAME);
+                return Some(PathBuf::from(app_data).join(app_dir));
             }
         }
     }
@@ -148,11 +160,12 @@ fn default_account_cache_path() -> PathBuf {
     {
         if let Ok(home) = std::env::var("HOME") {
             if !home.trim().is_empty() {
-                return PathBuf::from(home)
-                    .join("Library")
-                    .join("Application Support")
-                    .join(ACCOUNT_CACHE_APP_DIR)
-                    .join(ACCOUNT_CACHE_FILENAME);
+                return Some(
+                    PathBuf::from(home)
+                        .join("Library")
+                        .join("Application Support")
+                        .join(app_dir),
+                );
             }
         }
     }
@@ -161,24 +174,44 @@ fn default_account_cache_path() -> PathBuf {
     {
         if let Ok(state_home) = std::env::var("XDG_STATE_HOME") {
             if !state_home.trim().is_empty() {
-                return PathBuf::from(state_home)
-                    .join(ACCOUNT_CACHE_APP_DIR)
-                    .join(ACCOUNT_CACHE_FILENAME);
+                return Some(PathBuf::from(state_home).join(app_dir));
             }
         }
 
         if let Ok(home) = std::env::var("HOME") {
             if !home.trim().is_empty() {
-                return PathBuf::from(home)
-                    .join(".local")
-                    .join("state")
-                    .join(ACCOUNT_CACHE_APP_DIR)
-                    .join(ACCOUNT_CACHE_FILENAME);
+                return Some(
+                    PathBuf::from(home)
+                        .join(".local")
+                        .join("state")
+                        .join(app_dir),
+                );
             }
         }
     }
 
-    PathBuf::from(ACCOUNT_CACHE_FILENAME)
+    None
+}
+
+fn legacy_account_cache_paths(active_path: &Path) -> Vec<PathBuf> {
+    if std::env::var("VERTEX_ACCOUNT_CACHE_PATH").is_ok() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+
+    if let Some(legacy_path) = legacy_default_account_cache_path()
+        && legacy_path != active_path
+    {
+        candidates.push(legacy_path);
+    }
+
+    let legacy_cwd_path = PathBuf::from(LEGACY_ACCOUNT_CACHE_PATH);
+    if legacy_cwd_path != active_path && !candidates.iter().any(|path| path == &legacy_cwd_path) {
+        candidates.push(legacy_cwd_path);
+    }
+
+    candidates
 }
 
 fn migrate_secure_accounts_state_to_disk(target_path: &Path) -> Result<(), AuthError> {
@@ -205,11 +238,15 @@ fn migrate_secure_accounts_state_to_disk(target_path: &Path) -> Result<(), AuthE
 fn load_cached_accounts_state_contents(
     path: &Path,
 ) -> Result<Option<(String, AccountsStateLocation)>, AuthError> {
-    let candidate_paths = if path == Path::new(LEGACY_ACCOUNT_CACHE_PATH) {
-        vec![path.to_path_buf()]
-    } else {
-        vec![path.to_path_buf(), PathBuf::from(LEGACY_ACCOUNT_CACHE_PATH)]
-    };
+    let mut candidate_paths = vec![path.to_path_buf()];
+    for legacy_path in legacy_account_cache_paths(path) {
+        if !candidate_paths
+            .iter()
+            .any(|candidate| candidate == &legacy_path)
+        {
+            candidate_paths.push(legacy_path);
+        }
+    }
 
     for candidate in candidate_paths {
         if !candidate.exists() {

@@ -117,12 +117,9 @@ pub fn search_minecraft_content(
     );
     discovered_types.extend(result.discovered_types.iter().cloned());
 
-    result.entries.sort_by(|a, b| {
-        let left = a.name.to_ascii_lowercase();
-        let right = b.name.to_ascii_lowercase();
-        left.cmp(&right)
-            .then_with(|| a.source.label().cmp(b.source.label()))
-    });
+    result
+        .entries
+        .sort_by_cached_key(|entry| (entry.name.to_ascii_lowercase(), entry.source.label()));
     result.discovered_types = discovered_types.into_iter().collect();
     debug!(
         target: "vertexlauncher/modprovider",

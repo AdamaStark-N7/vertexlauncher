@@ -1,14 +1,14 @@
 use std::hash::Hash;
 
 use egui::{self, Align, Layout, Response, Sense, Ui};
-use textui::{ButtonOptions, InputOptions, LabelOptions, TextUi, TooltipOptions};
+use textui::{
+    ButtonOptions, InputOptions, LabelOptions, TextUi, TooltipOptions,
+    truncate_single_line_text_with_ellipsis,
+};
 
 use crate::{
     assets,
-    ui::{
-        components::{icon_button, text_helpers},
-        text_input_theme,
-    },
+    ui::{components::icon_button, text_input_theme},
 };
 
 #[derive(Clone, Copy, Debug)]
@@ -1044,7 +1044,7 @@ fn dropdown(
     label_style.wrap = false;
 
     let selected_text_raw = options.get(*selected_index).copied().unwrap_or("Select...");
-    let selected_text = text_helpers::truncate_single_line_text_with_ellipsis(
+    let selected_text = truncate_single_line_text_with_ellipsis(
         text_ui,
         ui,
         selected_text_raw,
@@ -1212,7 +1212,7 @@ fn searchable_dropdown(
     label_style.wrap = false;
 
     let selected_text_raw = options.get(*selected_index).copied().unwrap_or("Select...");
-    let selected_text = text_helpers::truncate_single_line_text_with_ellipsis(
+    let selected_text = truncate_single_line_text_with_ellipsis(
         text_ui,
         ui,
         selected_text_raw,
@@ -1413,15 +1413,19 @@ fn searchable_dropdown(
 }
 
 fn searchable_dropdown_matches(options: &[&str], query: &str) -> Vec<usize> {
-    let query = query.trim();
-    if query.is_empty() {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
         return (0..options.len()).collect();
     }
+    let query_chars = normalized_query.chars().collect::<Vec<_>>();
 
     let mut matches = options
         .iter()
         .enumerate()
-        .filter_map(|(index, option)| fuzzy_match_score(query, option).map(|score| (index, score)))
+        .filter_map(|(index, option)| {
+            fuzzy_match_score(normalized_query.as_str(), query_chars.as_slice(), option)
+                .map(|score| (index, score))
+        })
         .collect::<Vec<_>>();
 
     matches.sort_by(|(left_index, left_score), (right_index, right_score)| {
@@ -1443,8 +1447,11 @@ struct FuzzyMatchScore {
     start: usize,
 }
 
-fn fuzzy_match_score(query: &str, candidate: &str) -> Option<FuzzyMatchScore> {
-    let normalized_query = query.trim().to_lowercase();
+fn fuzzy_match_score(
+    normalized_query: &str,
+    query_chars: &[char],
+    candidate: &str,
+) -> Option<FuzzyMatchScore> {
     if normalized_query.is_empty() {
         return Some(FuzzyMatchScore {
             category: 0,
@@ -1474,7 +1481,6 @@ fn fuzzy_match_score(query: &str, candidate: &str) -> Option<FuzzyMatchScore> {
         });
     }
 
-    let query_chars = normalized_query.chars().collect::<Vec<_>>();
     let candidate_chars = normalized_candidate.chars().collect::<Vec<_>>();
     let mut query_index = 0;
     let mut first_match_start = None;

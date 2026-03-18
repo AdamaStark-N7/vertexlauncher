@@ -311,12 +311,16 @@ fn render_theme_setting(
         .iter()
         .map(|theme| theme.name.as_str())
         .collect();
+    let theme_tooltip = format!(
+        "Themes are loaded from {} at startup.",
+        app_paths::themes_dir().display()
+    );
     let response = settings_widgets::dropdown_row(
         text_ui,
         ui,
         "theme_selector",
         "Theme",
-        Some("Themes are loaded from the themes/ folder at startup."),
+        Some(theme_tooltip.as_str()),
         &mut selected_theme_index,
         &theme_labels,
     );

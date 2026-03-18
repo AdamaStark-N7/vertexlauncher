@@ -1,3 +1,4 @@
+use app_paths as launcher_paths;
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     de::{self, Visitor},
@@ -14,7 +15,6 @@ pub const UI_FONT_WEIGHT_STEP: i32 = 100;
 pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN: u128 = 512;
 pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_MAX: u128 = 1_048_576;
 pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP: u128 = 256;
-pub const DEFAULT_MINECRAFT_INSTALLATIONS_ROOT: &str = "instances";
 pub const DOWNLOAD_CONCURRENCY_MIN: u32 = 1;
 pub const DOWNLOAD_CONCURRENCY_MAX: u32 = 128;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: u32 = 8;
@@ -848,10 +848,8 @@ impl Config {
     /// Sets root directory for instance installations and normalizes empties.
     pub fn set_minecraft_installations_root(&mut self, path: impl Into<String>) {
         self.minecraft_installations_root = path.into();
-        normalize_required_path(
-            &mut self.minecraft_installations_root,
-            DEFAULT_MINECRAFT_INSTALLATIONS_ROOT,
-        );
+        let default_root = default_minecraft_installations_root();
+        normalize_required_path(&mut self.minecraft_installations_root, &default_root);
     }
 
     /// Returns max concurrent downloads.
@@ -964,10 +962,8 @@ impl Config {
             .clamp(DOWNLOAD_CONCURRENCY_MIN, DOWNLOAD_CONCURRENCY_MAX);
         self.download_speed_limit = self.download_speed_limit.trim().to_owned();
         self.curseforge_api_key = self.curseforge_api_key.trim().to_owned();
-        normalize_required_path(
-            &mut self.minecraft_installations_root,
-            DEFAULT_MINECRAFT_INSTALLATIONS_ROOT,
-        );
+        let default_root = default_minecraft_installations_root();
+        normalize_required_path(&mut self.minecraft_installations_root, &default_root);
         normalize_optional_path(&mut self.java_8_jvm_path);
         normalize_optional_path(&mut self.java_16_jvm_path);
         normalize_optional_path(&mut self.java_17_jvm_path);
@@ -1306,7 +1302,7 @@ impl Default for Config {
             force_java_21_minimum: true,
             default_instance_max_memory_mib: 4096,
             default_instance_cli_args: String::new(),
-            minecraft_installations_root: DEFAULT_MINECRAFT_INSTALLATIONS_ROOT.to_owned(),
+            minecraft_installations_root: default_minecraft_installations_root(),
             download_max_concurrent: DEFAULT_DOWNLOAD_CONCURRENCY,
             download_speed_limit_enabled: false,
             download_speed_limit: String::new(),
@@ -1361,12 +1357,20 @@ pub enum LoadConfigResult {
     Missing { default_format: ConfigFormat },
 }
 
+fn default_minecraft_installations_root() -> String {
+    launcher_paths::installations_root()
+        .to_string_lossy()
+        .into_owned()
+}
+
 fn config_base_path() -> String {
-    let config_path_no_ext = "config";
-    match std::env::var("VERTEX_CONFIG_LOCATION") {
-        Ok(dir) => format!("{dir}/{config_path_no_ext}"),
-        Err(_) => config_path_no_ext.to_string(),
-    }
+    launcher_paths::config_base_path()
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn legacy_cwd_config_base_path() -> &'static str {
+    "config"
 }
 
 fn find_existing_config_path(base: &str) -> Option<String> {
@@ -1377,6 +1381,61 @@ fn find_existing_config_path(base: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+fn resolve_existing_config_path(base: &str) -> Option<String> {
+    if let Some(path) = find_existing_config_path(base) {
+        return Some(path);
+    }
+
+    if launcher_paths::portable_root().is_some() {
+        return None;
+    }
+
+    if let Some(legacy_base) = launcher_paths::legacy_config_base_path() {
+        let legacy_base = legacy_base.to_string_lossy().into_owned();
+        if legacy_base != base
+            && let Some(path) = find_existing_config_path(&legacy_base)
+        {
+            return Some(path);
+        }
+    }
+
+    let legacy_base = legacy_cwd_config_base_path();
+    if legacy_base == base {
+        return None;
+    }
+
+    find_existing_config_path(legacy_base)
+}
+
+fn config_extension_for_path(path: &str) -> &'static str {
+    if path.ends_with(".toml") {
+        ConfigFormat::Toml.extension()
+    } else {
+        ConfigFormat::Json.extension()
+    }
+}
+
+fn preferred_config_save_path(base: &str) -> String {
+    if let Some(path) = find_existing_config_path(base) {
+        return path;
+    }
+
+    if launcher_paths::portable_root().is_none() {
+        if let Some(legacy_base) = launcher_paths::legacy_config_base_path() {
+            let legacy_base = legacy_base.to_string_lossy().into_owned();
+            if let Some(path) = find_existing_config_path(&legacy_base) {
+                return format!("{base}.{}", config_extension_for_path(&path));
+            }
+        }
+
+        if let Some(path) = find_existing_config_path(legacy_cwd_config_base_path()) {
+            return format!("{base}.{}", config_extension_for_path(&path));
+        }
+    }
+
+    format!("{base}.json")
 }
 
 fn parse_config_contents(path: &str, contents: &str) -> Option<Config> {
@@ -1468,7 +1527,7 @@ pub fn save_config(config: &Config) -> Result<(), IOError> {
     normalized.normalize();
 
     let base = config_base_path();
-    let path = find_existing_config_path(&base).unwrap_or_else(|| format!("{base}.json"));
+    let path = preferred_config_save_path(&base);
     construct_new_config(&path, &normalized)?;
     tracing::debug!(
         target: "vertexlauncher/config",
@@ -1484,7 +1543,7 @@ pub fn save_config(config: &Config) -> Result<(), IOError> {
 pub fn load_config() -> LoadConfigResult {
     let base = config_base_path();
 
-    match find_existing_config_path(&base) {
+    match resolve_existing_config_path(&base) {
         Some(path) => {
             tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path, context = "load config");
             let contents = match std::fs::read_to_string(&path) {

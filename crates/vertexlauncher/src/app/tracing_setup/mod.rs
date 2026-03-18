@@ -18,7 +18,7 @@ pub(super) fn init_tracing() -> Option<PathBuf> {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    let log_dir = PathBuf::from("logs");
+    let log_dir = app_paths::logs_dir();
     tracing::debug!(
         target: "vertexlauncher/io",
         op = "create_dir_all",
