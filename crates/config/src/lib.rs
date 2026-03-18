@@ -366,7 +366,7 @@ impl ToggleSettingId {
                 id: ToggleSettingId::WindowBlurEnabled,
                 label: "Enable Window Blur",
                 info_tooltip: Some(
-                    "Enables acrylic (Windows), KDE blur (Linux), and vibrancy (macOS). Requires restart.",
+                    "Enables acrylic (Windows) and KDE blur (Linux). Temporarily disabled on macOS while the launch-safe fallback is in place. Requires restart.",
                 ),
             },
             ToggleSettingId::OpenTypeFeaturesEnabled => ToggleSettingSpec {
@@ -1278,7 +1278,7 @@ impl Default for Config {
         Self {
             low_power_gpu_preferred: true,
             streamer_mode_enabled: false,
-            window_blur_enabled: true,
+            window_blur_enabled: !cfg!(target_os = "macos"),
             linux_set_opengl_driver: false,
             linux_use_zink_driver: false,
             theme_id: "matrix_oled".to_owned(),

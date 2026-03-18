@@ -1,5 +1,6 @@
 use config::Config;
 use eframe::{self, egui};
+use launcher_ui::window_effects;
 use std::sync::Arc;
 
 use super::{app_icon, app_metadata};
@@ -61,6 +62,8 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     };
     let renderer = startup_renderer();
     let hardware_acceleration = startup_hardware_acceleration();
+    let blur_enabled =
+        startup_config.window_blur_enabled() && window_effects::platform_supports_blur();
 
     #[cfg(target_os = "macos")]
     {
@@ -80,7 +83,7 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
             min_inner_size: Some(egui::vec2(900.0, 460.0)),
             resizable: Some(true),
             decorations: Some(false),
-            transparent: Some(startup_config.window_blur_enabled()),
+            transparent: Some(blur_enabled),
             icon: app_icon::egui_icon(),
             ..Default::default()
         },

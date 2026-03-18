@@ -63,13 +63,13 @@ fn render_settings_contents(
             render_theme_setting(ui, text_ui, config, available_themes);
             render_ui_font_settings(ui, text_ui, config, available_ui_fonts);
             render_skin_preview_setting(ui, text_ui, config);
+            render_window_blur_setting(ui, text_ui, config);
             render_selected_toggles(
                 ui,
                 text_ui,
                 config,
                 &[
                     config::ToggleSettingId::StreamerModeEnabled,
-                    config::ToggleSettingId::WindowBlurEnabled,
                     config::ToggleSettingId::OpenTypeFeaturesEnabled,
                     config::ToggleSettingId::NotificationExpiryBarsEmptyLeft,
                     config::ToggleSettingId::SkinPreview3dLayersEnabled,
@@ -520,6 +520,54 @@ fn render_skin_preview_motion_blur_settings(
         config.set_skin_preview_motion_blur_sample_count(sample_count);
     }
     ui.add_space(style::SPACE_MD);
+}
+
+fn render_window_blur_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let setting = config::ToggleSettingId::WindowBlurEnabled.spec();
+
+    #[cfg(target_os = "macos")]
+    {
+        if config.window_blur_enabled() {
+            config.set_window_blur_enabled(false);
+        }
+
+        let mut value = false;
+        let _ = ui.add_enabled_ui(false, |ui| {
+            settings_widgets::toggle_row(
+                text_ui,
+                ui,
+                setting.label,
+                setting.info_tooltip,
+                &mut value,
+            )
+        });
+
+        let note_style = style::muted(ui);
+        let _ = text_ui.label(
+            ui,
+            "window_blur_macos_note",
+            "Temporarily disabled on macOS to keep startup on the stable path.",
+            &note_style,
+        );
+        ui.add_space(style::SPACE_MD);
+        return;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let mut value = config.window_blur_enabled();
+        let response = settings_widgets::toggle_row(
+            text_ui,
+            ui,
+            setting.label,
+            setting.info_tooltip,
+            &mut value,
+        );
+        if response.changed() {
+            config.set_window_blur_enabled(value);
+        }
+        ui.add_space(style::SPACE_MD);
+    }
 }
 
 fn render_selected_toggles(

@@ -1,8 +1,24 @@
 use eframe::CreationContext;
 
+/// Returns whether the current target should opt into native blur effects.
+///
+/// macOS is intentionally excluded for now because the current AppKit-based
+/// implementation is not stable enough to make it part of the default launch path.
+pub const fn platform_supports_blur() -> bool {
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    {
+        true
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+    {
+        false
+    }
+}
+
 /// Applies platform-specific window blur/backdrop effects when enabled.
 pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) -> Result<(), String> {
-    if !blur_enabled {
+    if !blur_enabled || !platform_supports_blur() {
         return Ok(());
     }
 

@@ -82,6 +82,8 @@ impl VertexApp {
             "VertexApp::new entered."
         );
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        #[cfg(target_os = "macos")]
+        app_icon::apply_macos_dock_icon();
 
         let (
             mut config,
@@ -103,33 +105,26 @@ impl VertexApp {
         };
 
         config.normalize();
-        if let Err(error) = window_effects::apply(cc, config.window_blur_enabled()) {
-            config.set_window_blur_enabled(false);
-            cc.egui_ctx
-                .send_viewport_cmd(egui::ViewportCommand::Transparent(false));
-            notification::warn!(
-                "window_blur",
-                "Window blur is unsupported here and has been disabled. Restart may be required to fully apply the change. {error}"
+        #[cfg(target_os = "macos")]
+        if config.window_blur_enabled() {
+            disable_window_blur_for_startup(
+                cc,
+                &mut config,
+                config_loaded_from_disk,
+                "Window blur is temporarily disabled on macOS to keep launcher startup on the stable path.".to_owned(),
+                "macOS safety fallback",
             );
-            if config_loaded_from_disk {
-                let config_to_save = config.clone();
-                let _ = tokio_runtime::spawn(async move {
-                    let result = tokio_runtime::spawn_blocking(move || {
-                        save_config(&config_to_save).map_err(|err| err.to_string())
-                    })
-                    .await
-                    .map_err(|err| {
-                        format!("config save task join error after blur fallback: {err}")
-                    })
-                    .and_then(|inner| inner);
-                    if let Err(save_error) = result {
-                        notification::warn!(
-                            "config",
-                            "Failed to persist disabled blur setting after unsupported platform check: {save_error}"
-                        );
-                    }
-                });
-            }
+        }
+        if let Err(error) = window_effects::apply(cc, effective_window_blur_enabled(&config)) {
+            disable_window_blur_for_startup(
+                cc,
+                &mut config,
+                config_loaded_from_disk,
+                format!(
+                    "Window blur is unsupported here and has been disabled. Restart may be required to fully apply the change. {error}"
+                ),
+                "unsupported platform check",
+            );
         }
 
         let theme_catalog = ui::theme::ThemeCatalog::load();
@@ -302,6 +297,47 @@ fn sleep_precise(duration: Duration) {
         std::hint::spin_loop();
         std::thread::yield_now();
     }
+}
+
+fn effective_window_blur_enabled(config: &Config) -> bool {
+    config.window_blur_enabled() && window_effects::platform_supports_blur()
+}
+
+fn disable_window_blur_for_startup(
+    cc: &eframe::CreationContext<'_>,
+    config: &mut Config,
+    config_loaded_from_disk: bool,
+    message: String,
+    save_context: &'static str,
+) {
+    if !config.window_blur_enabled() {
+        return;
+    }
+
+    config.set_window_blur_enabled(false);
+    cc.egui_ctx
+        .send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+    notification::warn!("window_blur", "{message}");
+
+    if !config_loaded_from_disk {
+        return;
+    }
+
+    let config_to_save = config.clone();
+    let _ = tokio_runtime::spawn(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            save_config(&config_to_save).map_err(|err| err.to_string())
+        })
+        .await
+        .map_err(|err| format!("config save task join error after {save_context}: {err}"))
+        .and_then(|inner| inner);
+        if let Err(save_error) = result {
+            notification::warn!(
+                "config",
+                "Failed to persist disabled blur setting after {save_context}: {save_error}"
+            );
+        }
+    });
 }
 
 fn ensure_config_save_channel(app: &mut VertexApp) {
@@ -655,7 +691,8 @@ impl eframe::App for VertexApp {
         poll_create_instance_result(self);
         poll_import_instance_result(self);
         self.sync_theme_from_config();
-        self.theme.apply(ctx, self.config.window_blur_enabled());
+        self.theme
+            .apply(ctx, effective_window_blur_enabled(&self.config));
         self.auth
             .set_streamer_mode(self.config.streamer_mode_enabled());
         notification::set_streamer_mode(self.config.streamer_mode_enabled());
@@ -1204,8 +1241,6 @@ pub fn run() -> eframe::Result<()> {
         );
     }
     launcher_runtime::init();
-    #[cfg(target_os = "macos")]
-    let _ = launcher_runtime::spawn_blocking(app_icon::apply_macos_dock_icon);
     let config_state = load_config();
     let startup_config = match &config_state {
         LoadConfigResult::Loaded(config) => config.clone(),

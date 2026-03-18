@@ -3,7 +3,6 @@ pub(super) fn run_webview_window(
     auth_request_uri: &str,
     redirect_uri: &str,
 ) -> Result<String, String> {
-    use crate::app::app_icon;
     use std::sync::{Arc, Mutex};
 
     use tao::dpi::LogicalSize;
@@ -32,7 +31,8 @@ pub(super) fn run_webview_window(
     let mut window_builder = WindowBuilder::new()
         .with_title("Microsoft Sign-In")
         .with_inner_size(LogicalSize::new(980.0, 760.0));
-    if let Some(icon) = app_icon::tao_icon() {
+    #[cfg(not(target_os = "macos"))]
+    if let Some(icon) = crate::app::app_icon::tao_icon() {
         window_builder = window_builder.with_window_icon(Some(icon));
     }
 

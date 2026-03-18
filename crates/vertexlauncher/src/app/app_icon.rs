@@ -30,6 +30,7 @@ pub(crate) fn tao_icon() -> Option<tao::window::Icon> {
 pub(crate) fn apply_macos_dock_icon() {
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder};
+    use objc::rc::autoreleasepool;
     use objc::runtime::{Class, Object};
     use objc::{msg_send, sel, sel_impl};
     use std::ffi::c_char;
@@ -61,7 +62,7 @@ pub(crate) fn apply_macos_dock_icon() {
         return;
     }
 
-    unsafe {
+    autoreleasepool(|| unsafe {
         let ns_string = nsstring_from_path(&icon_path);
         if ns_string.is_null() {
             return;
@@ -84,7 +85,7 @@ pub(crate) fn apply_macos_dock_icon() {
             return;
         }
         let _: () = msg_send![app, setApplicationIconImage: image];
-    }
+    });
 
     unsafe fn nsstring_from_path(path: &PathBuf) -> *mut Object {
         let Some(ns_string_class) = Class::get("NSString") else {
