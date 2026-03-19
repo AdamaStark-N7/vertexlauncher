@@ -56,7 +56,9 @@ Basic native builds:
 cargo build --release
 ```
 
-Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that will inherit the host glibc baseline. The release scripts use `cargo zigbuild` for Linux x86-64 and default to a glibc `2.17` floor. Override it with `VERTEX_LINUX_GLIBC_VERSION=<version>` if you need a newer minimum.
+Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that will inherit the host glibc baseline and the host GTK/WebKit stack. The release scripts build Linux x86-64 in a Debian-based container so the binary is linked against a stable distro baseline instead of your rolling host.
+
+The current Linux UI stack still depends on distro WebKitGTK/GTK libraries, so the final glibc floor is constrained by those packages. The x86-64 container helper now prints the highest required glibc symbol version after each build and defaults to enforcing `VERTEX_MAX_GLIBC_VERSION=2.42`, which matches the lower end of current Fedora-derived gaming distros such as Bazzite and Nobara. Override `VERTEX_MAX_GLIBC_VERSION=<version>` if you want a stricter or looser ceiling.
 
 Windows MSVC example:
 
@@ -94,6 +96,29 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1
 ```
 
+## Flatpak
+
+Linux users who need the broadest cross-distro compatibility should use the Flatpak package instead of the raw host-linked binary. The Flatpak package carries its own GNOME runtime, so it does not rely on the host distro's glibc, GTK, Soup, or WebKitGTK stack. That is the packaging path intended for current gaming-oriented distros such as Bazzite, Nobara, CachyOS, and similar systems that already support Flatpak.
+
+To build the Flatpak bundle automatically:
+
+```sh
+bash scripts/build-flatpak.sh
+```
+
+This script will:
+
+- vendor Rust dependencies into `flatpak/vendor`
+- build the app with `flatpak-builder` against the Flatpak runtime instead of host desktop libraries
+- export an arch-specific local Flatpak repo under `flatpak/repo/<arch>`
+- emit distributable bundles under `target/release/io.github.SturdyFool10.VertexLauncher-<arch>.flatpak`
+
+By default the script builds the current Flatpak host architecture. Override `VERTEX_FLATPAK_ARCHES` with a comma-separated list such as `x86_64,aarch64` to request specific arches. Flatpak only allows builds for host-compatible arches, so producing both x86-64 and ARM64 bundles requires running the script on builders that support each architecture.
+
+The release scripts also invoke the Flatpak helper so `build-release-artifacts` / your compile-all flow stages Flatpak bundles alongside the native release artifacts when Flatpak tooling is available.
+
+The Flatpak app id is `io.github.SturdyFool10.VertexLauncher`.
+
 Staged artifacts are written to `target/release` as:
 
 - `vertexlauncher-windowsx86-64.exe`
@@ -105,7 +130,7 @@ Staged artifacts are written to `target/release` as:
 ## Cross-Build Notes
 
 - Windows cross-builds use `cargo xwin` with the `clang` backend and scrub host-specific compiler flags.
-- Linux x86-64 release builds use `cargo zigbuild` with a glibc floor of `2.17` by default, so release binaries do not inherit the builder's host glibc version.
+- Linux x86-64 release builds use a containerized Debian userspace so release binaries do not inherit the builder's host glibc and desktop libraries.
 - Linux ARM64 release builds use a cross sysroot path. The current helper script can assemble that sysroot for release builds.
 - macOS ARM64 release builds require a usable Apple SDK. The scripts detect `SDKROOT`, `DEVELOPER_DIR`, `xcrun`, and `~/.local/share/macos-sdk/MacOSX*.sdk`.
 

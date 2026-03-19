@@ -1,0 +1,41 @@
+app-id: io.github.SturdyFool10.VertexLauncher
+runtime: org.gnome.Platform
+runtime-version: "49"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: vertexlauncher
+separate-locales: false
+finish-args:
+  - --share=network
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.secrets
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  env:
+    CARGO_HOME: /run/build/vertexlauncher/flatpak-cargo
+modules:
+  - name: vertexlauncher
+    buildsystem: simple
+    build-commands:
+      - mkdir -p "${CARGO_HOME}"
+      - printf '[source.crates-io]\nreplace-with = "vendored-sources"\n[source.vendored-sources]\ndirectory = "/run/build/vertexlauncher/flatpak/vendor"\n' > "${CARGO_HOME}/config.toml"
+      - cargo build --offline --release -p vertexlauncher
+      - install -Dm755 target/release/vertexlauncher /app/bin/vertexlauncher
+      - install -Dm644 flatpak/io.github.SturdyFool10.VertexLauncher.desktop /app/share/applications/io.github.SturdyFool10.VertexLauncher.desktop
+      - install -Dm644 flatpak/io.github.SturdyFool10.VertexLauncher.metainfo.xml /app/share/metainfo/io.github.SturdyFool10.VertexLauncher.metainfo.xml
+      - install -Dm644 Vertex.svg /app/share/icons/hicolor/scalable/apps/io.github.SturdyFool10.VertexLauncher.svg
+    sources:
+      - type: dir
+        path: ..
+        skip:
+          - .git
+          - .cache
+          - target
+          - flatpak/build-dir
+          - flatpak/repo
+          - compile-all.txt

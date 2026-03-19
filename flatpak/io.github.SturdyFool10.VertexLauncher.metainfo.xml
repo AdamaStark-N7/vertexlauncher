@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.SturdyFool10.VertexLauncher</id>
+  <name>Vertex Launcher</name>
+  <summary>Native Minecraft launcher written in Rust</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.SturdyFool10">
+    <name>SturdyFool10</name>
+  </developer>
+  <launchable type="desktop-id">io.github.SturdyFool10.VertexLauncher.desktop</launchable>
+  <description>
+    <p>Vertex Launcher is a native Minecraft launcher with Microsoft sign-in, multi-instance management, runtime provisioning, quick-launch flows, and integrated Modrinth and CurseForge browsing.</p>
+  </description>
+  <categories>
+    <category>Game</category>
+    <category>Utility</category>
+  </categories>
+  <url type="homepage">https://github.com/SturdyFool10/vertexlauncher</url>
+  <url type="bugtracker">https://github.com/SturdyFool10/vertexlauncher/issues</url>
+  <provides>
+    <binary>vertexlauncher</binary>
+  </provides>
+</component>

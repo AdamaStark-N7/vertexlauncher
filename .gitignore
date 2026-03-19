@@ -11,3 +11,8 @@ instances.json
 /themes/
 **/*.jar.log
 .cache
+/.flatpak-builder
+/flatpak/build-dir
+/flatpak/repo
+/flatpak/vendor
+/target/release/io.github.SturdyFool10.VertexLauncher*.flatpak

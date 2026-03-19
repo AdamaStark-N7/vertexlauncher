@@ -5,13 +5,12 @@ set -g repo_root (path resolve $script_dir/..)
 
 set -g package vertexlauncher
 set -g release_dir $repo_root/target/release
-set -g linux_glibc_version 2.17
-if set -q VERTEX_LINUX_GLIBC_VERSION
-    set -g linux_glibc_version $VERTEX_LINUX_GLIBC_VERSION
-end
 set -g windows_targets x86_64-pc-windows-msvc aarch64-pc-windows-msvc
 set -g linux_targets x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
 set -g macos_targets aarch64-apple-darwin
+set -g flatpak_app_id io.github.SturdyFool10.VertexLauncher
+set -g flatpak_branch stable
+set -g flatpak_artifact_arches
 set -g build_failures
 set -g staged_artifacts \
     vertexlauncher-windowsx86-64.exe \
@@ -25,7 +24,9 @@ set -g staged_artifacts \
     vertexlauncher-macos-aarch64 \
     vertexlauncher-windows-x86_64.exe \
     vertexlauncher-linux-x86_64 \
-    vertexlauncher-macos-x86_64
+    vertexlauncher-macos-x86_64 \
+    $flatpak_app_id-x86_64.flatpak \
+    $flatpak_app_id-aarch64.flatpak
 
 function require_command
     set -l command_name $argv[1]
@@ -130,15 +131,25 @@ end
 function build_linux_target
     set -l target $argv[1]
     set -l arch $argv[2]
-    set -l build_target $target
+    set -l source_path $repo_root/target/$target/release/$package
     set -l staged_path (artifact_name linux $arch "")
 
     echo "Building Linux $arch release binary..."
     if test $target = x86_64-unknown-linux-gnu
-        set build_target $target.$linux_glibc_version
-    end
+        if test -x $repo_root/scripts/build-linux-x86_64-container.sh
+            if not command -sq podman
+                echo "Skipping Linux $arch: podman is required for the containerized release helper." >&2
+                return 2
+            end
 
-    set -l source_path $repo_root/target/$build_target/release/$package
+            bash $repo_root/scripts/build-linux-x86_64-container.sh
+            or return $status
+
+            copy_artifact $source_path $staged_path
+            echo "  Staged: $staged_path"
+            return 0
+        end
+    end
 
     if test $target = aarch64-unknown-linux-gnu
         if test -x $repo_root/scripts/build-linux-arm64-container.sh
@@ -162,13 +173,8 @@ function build_linux_target
         end
     end
 
-    if test $target = x86_64-unknown-linux-gnu
-        env -u CFLAGS -u CXXFLAGS -u LDFLAGS -u CC -u CXX -u AR -u RANLIB -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            cargo zigbuild --release --target $build_target -p $package
-    else
-        env -u CFLAGS -u CXXFLAGS -u LDFLAGS -u CC -u CXX -u AR -u RANLIB -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
-            cargo zigbuild --release --target $target -p $package
-    end
+    env -u CFLAGS -u CXXFLAGS -u LDFLAGS -u CC -u CXX -u AR -u RANLIB -u RUSTFLAGS -u CARGO_BUILD_RUSTFLAGS \
+        cargo zigbuild --release --target $target -p $package
     or return $status
 
     copy_artifact $source_path $staged_path
@@ -195,6 +201,65 @@ function build_macos_target
 
     copy_artifact $source_path $staged_path
     echo "  Staged: $staged_path"
+end
+
+function flatpak_artifact_name
+    set -l arch $argv[1]
+    printf "%s/%s-%s.flatpak\n" $release_dir $flatpak_app_id $arch
+end
+
+function build_flatpak_artifacts
+    set -l helper $repo_root/scripts/build-flatpak.sh
+
+    if not test -x $helper
+        echo "Skipping Flatpak: missing helper script $helper" >&2
+        return 2
+    end
+
+    if not command -sq bash
+        echo "Skipping Flatpak: bash is required." >&2
+        return 2
+    end
+
+    if not command -sq flatpak
+        echo "Skipping Flatpak: flatpak is required." >&2
+        return 2
+    end
+
+    if not command -sq flatpak-builder
+        echo "Skipping Flatpak: flatpak-builder is required." >&2
+        return 2
+    end
+
+    set -l requested_arches
+    if set -q VERTEX_RELEASE_FLATPAK_ARCHES
+        set requested_arches (string split , -- $VERTEX_RELEASE_FLATPAK_ARCHES)
+    else if set -q VERTEX_FLATPAK_ARCHES
+        set requested_arches (string split , -- $VERTEX_FLATPAK_ARCHES)
+    else
+        set requested_arches (flatpak --default-arch)
+    end
+
+    echo "Building Flatpak release bundle..."
+    env VERTEX_FLATPAK_BRANCH=$flatpak_branch VERTEX_FLATPAK_ARCHES=(string join , $requested_arches) \
+        bash $helper
+    or return $status
+
+    set -g flatpak_artifact_arches
+    for arch in $requested_arches
+        if test -z "$arch"
+            continue
+        end
+
+        set -l artifact_path (flatpak_artifact_name $arch)
+        if not test -f $artifact_path
+            echo "Missing built Flatpak artifact: $artifact_path" >&2
+            return 1
+        end
+
+        set -ga flatpak_artifact_arches $arch
+        echo "  Staged: $artifact_path"
+    end
 end
 
 cd $repo_root; or exit 1
@@ -244,6 +309,9 @@ for target in $macos_targets
     end
 end
 
+build_flatpak_artifacts
+or note_failure "Flatpak build failed."
+
 echo ""
 echo "Artifacts ready:"
 echo "  "(artifact_name windows x86-64 .exe)
@@ -251,6 +319,9 @@ echo "  "(artifact_name windows arm64 .exe)
 echo "  "(artifact_name linux x86-64 "")
 echo "  "(artifact_name linux arm64 "")
 echo "  "(artifact_name macos arm64 "")
+for arch in $flatpak_artifact_arches
+    echo "  "(flatpak_artifact_name $arch)
+end
 
 if test (count $build_failures) -gt 0
     echo ""

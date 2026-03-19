@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Vertex Launcher
+Comment=Native Minecraft launcher written in Rust
+Exec=vertexlauncher
+Icon=io.github.SturdyFool10.VertexLauncher
+Categories=Game;Utility;
+Keywords=Minecraft;Launcher;Modrinth;CurseForge;
+StartupNotify=true
+Terminal=false

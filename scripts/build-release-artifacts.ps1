@@ -5,7 +5,9 @@ $repoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
 
 $package = "vertexlauncher"
 $releaseDir = Join-Path $repoRoot "target/release"
-$linuxGlibcVersion = if ($env:VERTEX_LINUX_GLIBC_VERSION) { $env:VERTEX_LINUX_GLIBC_VERSION } else { "2.17" }
+$flatpakAppId = "io.github.SturdyFool10.VertexLauncher"
+$flatpakBranch = if ($env:VERTEX_RELEASE_FLATPAK_BRANCH) { $env:VERTEX_RELEASE_FLATPAK_BRANCH } elseif ($env:VERTEX_FLATPAK_BRANCH) { $env:VERTEX_FLATPAK_BRANCH } else { "stable" }
+$flatpakArtifactArches = @()
 $crossEnvVars = @("CFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "AR", "RANLIB", "RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")
 $stagedArtifacts = @(
     "vertexlauncher-windowsx86-64.exe",
@@ -19,14 +21,16 @@ $stagedArtifacts = @(
     "vertexlauncher-macos-aarch64",
     "vertexlauncher-windows-x86_64.exe",
     "vertexlauncher-linux-x86_64",
-    "vertexlauncher-macos-x86_64"
+    "vertexlauncher-macos-x86_64",
+    "$flatpakAppId-x86_64.flatpak",
+    "$flatpakAppId-aarch64.flatpak"
 )
 $windowsTargets = @(
     @{ Target = "x86_64-pc-windows-msvc"; Platform = "windows"; Arch = "x86-64"; Extension = ".exe"; Builder = "xwin" },
     @{ Target = "aarch64-pc-windows-msvc"; Platform = "windows"; Arch = "arm64"; Extension = ".exe"; Builder = "xwin" }
 )
 $linuxTargets = @(
-    @{ Target = "x86_64-unknown-linux-gnu"; Platform = "linux"; Arch = "x86-64"; Extension = ""; Builder = "zigbuild" },
+    @{ Target = "x86_64-unknown-linux-gnu"; Platform = "linux"; Arch = "x86-64"; Extension = ""; Builder = "linux-container" },
     @{ Target = "aarch64-unknown-linux-gnu"; Platform = "linux"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
 )
 $macosTargets = @(
@@ -61,12 +65,15 @@ function Get-BuiltArtifactPath {
         [Parameter(Mandatory = $true)][string]$Extension
     )
 
-    $target = $Spec.Target
-    if ($Spec.Target -eq "x86_64-unknown-linux-gnu") {
-        $target = "$($Spec.Target).$linuxGlibcVersion"
-    }
+    Join-Path $repoRoot (Join-Path "target/$($Spec.Target)/release" "$package$Extension")
+}
 
-    Join-Path $repoRoot (Join-Path "target/$target/release" "$package$Extension")
+function Get-FlatpakArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Arch
+    )
+
+    Join-Path $releaseDir "$flatpakAppId-$Arch.flatpak"
 }
 
 function Clear-StagedArtifacts {
@@ -131,12 +138,26 @@ function Invoke-BuildCommand {
         "cargo" {
             & cargo build --release --target $Spec.Target -p $package
         }
+        "linux-container" {
+            $helperScript = Join-Path $repoRoot "scripts/build-linux-x86_64-container.sh"
+            if (-not (Test-Path -LiteralPath $helperScript -PathType Leaf)) {
+                throw "Missing Linux x86-64 container helper: $helperScript"
+            }
+
+            $bash = Get-Command bash -ErrorAction SilentlyContinue
+            if (-not $bash) {
+                throw "Linux x86-64 containerized release builds require bash on PATH."
+            }
+
+            $podman = Get-Command podman -ErrorAction SilentlyContinue
+            if (-not $podman) {
+                throw "Linux x86-64 containerized release builds require podman on PATH."
+            }
+
+            & $bash.Source $helperScript
+        }
         "zigbuild" {
             $savedSdkRoot = $env:SDKROOT
-            $buildTarget = $Spec.Target
-            if ($Spec.Target -eq "x86_64-unknown-linux-gnu") {
-                $buildTarget = "$($Spec.Target).$linuxGlibcVersion"
-            }
             if ($Spec.Target -eq "aarch64-apple-darwin") {
                 $sdkRoot = Resolve-MacOsSdkPath
                 if ($sdkRoot) {
@@ -145,7 +166,7 @@ function Invoke-BuildCommand {
             }
 
             try {
-                & cargo zigbuild --release --target $buildTarget -p $package
+                & cargo zigbuild --release --target $Spec.Target -p $package
             }
             finally {
                 if ($null -eq $savedSdkRoot) {
@@ -220,6 +241,81 @@ function Build-And-StageArtifact {
     Write-Host "  Staged: $stagedArtifact"
 }
 
+function Build-FlatpakArtifacts {
+    $helperScript = Join-Path $repoRoot "scripts/build-flatpak.sh"
+    if (-not (Test-Path -LiteralPath $helperScript -PathType Leaf)) {
+        throw "Missing Flatpak helper: $helperScript"
+    }
+
+    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    if (-not $bash) {
+        throw "Flatpak builds require bash on PATH."
+    }
+
+    if (-not (Get-Command flatpak -ErrorAction SilentlyContinue)) {
+        throw "Flatpak builds require flatpak on PATH."
+    }
+
+    if (-not (Get-Command flatpak-builder -ErrorAction SilentlyContinue)) {
+        throw "Flatpak builds require flatpak-builder on PATH."
+    }
+
+    $requestedArches = if ($env:VERTEX_RELEASE_FLATPAK_ARCHES) {
+        $env:VERTEX_RELEASE_FLATPAK_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
+    }
+    elseif ($env:VERTEX_FLATPAK_ARCHES) {
+        $env:VERTEX_FLATPAK_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
+    }
+    else {
+        @((& flatpak --default-arch).Trim())
+    }
+
+    $requestedArchList = ($requestedArches | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ","
+    $savedFlatpakBranch = $env:VERTEX_FLATPAK_BRANCH
+    $savedFlatpakArches = $env:VERTEX_FLATPAK_ARCHES
+    Write-Host "Building Flatpak release bundle..."
+
+    try {
+        $env:VERTEX_FLATPAK_BRANCH = $flatpakBranch
+        $env:VERTEX_FLATPAK_ARCHES = $requestedArchList
+        & $bash.Source $helperScript
+        if ($LASTEXITCODE -ne 0) {
+            throw "Flatpak helper failed with exit code $LASTEXITCODE"
+        }
+    }
+    finally {
+        if ($null -eq $savedFlatpakBranch) {
+            Remove-Item "Env:VERTEX_FLATPAK_BRANCH" -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item "Env:VERTEX_FLATPAK_BRANCH" $savedFlatpakBranch
+        }
+
+        if ($null -eq $savedFlatpakArches) {
+            Remove-Item "Env:VERTEX_FLATPAK_ARCHES" -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item "Env:VERTEX_FLATPAK_ARCHES" $savedFlatpakArches
+        }
+    }
+
+    $script:flatpakArtifactArches = @()
+    foreach ($arch in $requestedArches) {
+        $normalizedArch = $arch.Trim()
+        if (-not $normalizedArch) {
+            continue
+        }
+
+        $artifactPath = Get-FlatpakArtifactPath -Arch $normalizedArch
+        if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+            throw "Missing built Flatpak artifact: $artifactPath"
+        }
+
+        $script:flatpakArtifactArches += $normalizedArch
+        Write-Host "  Staged: $artifactPath"
+    }
+}
+
 Push-Location $repoRoot
 try {
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
@@ -254,10 +350,20 @@ try {
         }
     }
 
+    try {
+        Build-FlatpakArtifacts
+    }
+    catch {
+        $failures += "flatpak: $($_.Exception.Message)"
+    }
+
     Write-Host ""
     Write-Host "Artifacts ready:"
     foreach ($spec in ($windowsTargets + $linuxTargets + $macosTargets)) {
         Write-Host "  $(Get-StagedArtifactPath -Platform $spec.Platform -Arch $spec.Arch -Extension $spec.Extension)"
+    }
+    foreach ($arch in $flatpakArtifactArches) {
+        Write-Host "  $(Get-FlatpakArtifactPath -Arch $arch)"
     }
 
     if ($failures.Count -gt 0) {
