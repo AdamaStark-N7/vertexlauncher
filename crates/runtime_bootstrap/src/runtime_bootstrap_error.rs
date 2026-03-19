@@ -1,6 +1,6 @@
 use std::fmt;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, thiserror::Error)]
 #[error(
     "failed to build both multi-thread and single-thread Tokio runtimes for {runtime_name}. multi-thread error: {multi_thread_error}; single-thread error: {single_thread_error}"
 )]

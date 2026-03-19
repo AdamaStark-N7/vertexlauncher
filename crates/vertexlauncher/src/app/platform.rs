@@ -1,0 +1,138 @@
+use eframe::{self, egui_wgpu::wgpu};
+
+#[derive(Clone, Copy)]
+pub(crate) struct StartupGraphicsConfig {
+    pub renderer: eframe::Renderer,
+    pub hardware_acceleration: eframe::HardwareAcceleration,
+    pub backends: wgpu::Backends,
+}
+
+pub(crate) fn startup_graphics_config() -> StartupGraphicsConfig {
+    #[cfg(target_os = "macos")]
+    {
+        if !macos_force_wgpu() {
+            return StartupGraphicsConfig {
+                renderer: eframe::Renderer::Glow,
+                hardware_acceleration: eframe::HardwareAcceleration::Preferred,
+                backends: wgpu::Backends::METAL,
+            };
+        }
+    }
+
+    StartupGraphicsConfig {
+        renderer: eframe::Renderer::Wgpu,
+        hardware_acceleration: eframe::HardwareAcceleration::Required,
+        backends: startup_backends(),
+    }
+}
+
+pub(crate) fn log_startup_graphics_choice(config: StartupGraphicsConfig) {
+    #[cfg(target_os = "macos")]
+    {
+        if matches!(config.renderer, eframe::Renderer::Glow) {
+            tracing::warn!(
+                target: "vertexlauncher/app/graphics",
+                "Using Glow renderer on macOS by default to avoid native Metal startup aborts. Set VERTEX_MACOS_WGPU=1 to force wgpu/Metal."
+            );
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = config;
+    }
+}
+
+pub(crate) fn detect_cpu_name() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+
+        return fs::read_to_string("/proc/cpuinfo")
+            .ok()
+            .and_then(|contents| {
+                contents
+                    .lines()
+                    .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
+            })
+            .unwrap_or_else(|| "Unknown".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "Unknown".to_owned());
+    }
+
+    #[allow(unreachable_code)]
+    "Unknown".to_owned()
+}
+
+pub(crate) fn detect_total_memory() -> String {
+    #[cfg(target_os = "linux")]
+    {
+        use std::fs;
+
+        return fs::read_to_string("/proc/meminfo")
+            .ok()
+            .and_then(|contents| {
+                contents.lines().find_map(|line| {
+                    let value = line.strip_prefix("MemTotal:")?.trim();
+                    let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
+                    Some(format_memory_from_bytes(kib.saturating_mul(1024)))
+                })
+            })
+            .unwrap_or_else(|| "Unknown".to_owned());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+        let mut memory_status = MEMORYSTATUSEX {
+            dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
+            ..Default::default()
+        };
+
+        return unsafe {
+            if GlobalMemoryStatusEx(&mut memory_status).is_ok() {
+                format_memory_from_bytes(memory_status.ullTotalPhys)
+            } else {
+                "Unknown".to_owned()
+            }
+        };
+    }
+
+    #[allow(unreachable_code)]
+    "Unknown".to_owned()
+}
+
+#[cfg(target_os = "macos")]
+fn macos_force_wgpu() -> bool {
+    std::env::var("VERTEX_MACOS_WGPU")
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn startup_backends() -> wgpu::Backends {
+    #[cfg(target_os = "macos")]
+    {
+        return wgpu::Backends::METAL;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        return wgpu::Backends::VULKAN | wgpu::Backends::METAL | wgpu::Backends::DX12;
+    }
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux"))]
+fn format_memory_from_bytes(bytes: u64) -> String {
+    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
+    format!("{:.1} GiB", bytes as f64 / GIB)
+}

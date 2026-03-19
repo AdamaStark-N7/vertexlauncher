@@ -179,8 +179,9 @@ impl TextUi {
 
         let (worker_tx, worker_rx) = mpsc::channel::<AsyncRasterWorkerMessage>();
         let (result_tx, result_rx) = mpsc::channel::<AsyncRasterResponse>();
-        let _ =
-            tokio_runtime::spawn_blocking(move || async_raster_worker_loop(worker_rx, result_tx));
+        let _ = tokio_runtime::spawn_blocking_detached(move || {
+            async_raster_worker_loop(worker_rx, result_tx)
+        });
         let (worker_tx, result_rx) = (Some(worker_tx), Some(result_rx));
 
         Self {

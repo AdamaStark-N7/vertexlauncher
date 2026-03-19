@@ -1001,7 +1001,7 @@ fn request_runtime_launch(
         },
     );
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             let mut configured_java = None;
             let java_path = if let Some(path) = java_executable
@@ -1289,7 +1289,7 @@ fn request_instance_delete(
 
     state.delete_in_flight = true;
     state.delete_error = None;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             delete_instance(
                 &mut instances,
@@ -1392,7 +1392,7 @@ fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str
 
     state.thumbnail_in_flight.insert(key.clone());
     let path = PathBuf::from(path);
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let bytes = tokio_runtime::spawn_blocking(move || {
             std::fs::read(path.as_path())
                 .ok()

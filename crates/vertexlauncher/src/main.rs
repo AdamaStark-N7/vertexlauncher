@@ -8,6 +8,8 @@ Use the MSVC target (for example: x86_64-pc-windows-msvc) so WebView2 loader lib
 mod app;
 
 fn main() -> eframe::Result<()> {
+    let _ = app::init_tracing();
+
     match app::maybe_run_webview_helper() {
         Ok(true) => return Ok(()),
         Ok(false) => {}
@@ -43,7 +45,17 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    app::run()
+    match app::run() {
+        Ok(()) => Ok(()),
+        Err(app::RunError::RuntimeBootstrap(err)) => {
+            report_startup_message(
+                format!("Vertex Launcher could not start its background runtime: {err}"),
+                rfd::MessageLevel::Error,
+            );
+            std::process::exit(1);
+        }
+        Err(app::RunError::Ui(err)) => Err(err),
+    }
 }
 
 fn report_startup_message(message: impl Into<String>, level: rfd::MessageLevel) {

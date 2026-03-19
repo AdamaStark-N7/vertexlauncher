@@ -1,6 +1,8 @@
 use launcher_ui::screens::SettingsInfo;
 use std::sync::OnceLock;
 
+use super::platform;
+
 #[derive(Debug, Clone)]
 struct GraphicsInfo {
     gpu: String,
@@ -51,9 +53,9 @@ fn build_base_settings_info() -> SettingsInfo {
     let commit_hash = env!("VERTEX_GIT_COMMIT_HASH");
 
     SettingsInfo {
-        cpu: detect_cpu_name(),
+        cpu: platform::detect_cpu_name(),
         gpu: "Unknown".to_owned(),
-        memory: detect_total_memory(),
+        memory: platform::detect_total_memory(),
         graphics_driver: "Unknown".to_owned(),
         app_version: format!("{version} ({commit_hash})"),
     }
@@ -66,82 +68,4 @@ fn clean_value(value: &str) -> String {
     } else {
         trimmed.to_owned()
     }
-}
-
-#[cfg(target_os = "linux")]
-fn detect_cpu_name() -> String {
-    use std::fs;
-
-    fs::read_to_string("/proc/cpuinfo")
-        .ok()
-        .and_then(|contents| {
-            contents
-                .lines()
-                .find_map(|line| line.strip_prefix("model name\t: ").map(str::to_owned))
-        })
-        .unwrap_or_else(|| "Unknown".to_owned())
-}
-
-#[cfg(target_os = "windows")]
-fn detect_cpu_name() -> String {
-    std::env::var("PROCESSOR_IDENTIFIER").unwrap_or_else(|_| "Unknown".to_owned())
-}
-
-#[cfg(target_os = "macos")]
-fn detect_cpu_name() -> String {
-    "Unknown".to_owned()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn detect_cpu_name() -> String {
-    "Unknown".to_owned()
-}
-
-#[cfg(target_os = "linux")]
-fn detect_total_memory() -> String {
-    use std::fs;
-
-    fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|contents| {
-            contents.lines().find_map(|line| {
-                let value = line.strip_prefix("MemTotal:")?.trim();
-                let kib = value.split_whitespace().next()?.parse::<u64>().ok()?;
-                Some(format_memory_from_bytes(kib.saturating_mul(1024)))
-            })
-        })
-        .unwrap_or_else(|| "Unknown".to_owned())
-}
-
-#[cfg(target_os = "windows")]
-fn detect_total_memory() -> String {
-    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-
-    let mut memory_status = MEMORYSTATUSEX {
-        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
-        ..Default::default()
-    };
-
-    unsafe {
-        if GlobalMemoryStatusEx(&mut memory_status).is_ok() {
-            format_memory_from_bytes(memory_status.ullTotalPhys)
-        } else {
-            "Unknown".to_owned()
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn detect_total_memory() -> String {
-    "Unknown".to_owned()
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn detect_total_memory() -> String {
-    "Unknown".to_owned()
-}
-
-fn format_memory_from_bytes(bytes: u64) -> String {
-    const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-    format!("{:.1} GiB", bytes as f64 / GIB)
 }

@@ -135,7 +135,7 @@ pub fn show(
                     .insert(normalized_url.to_owned(), RemoteImageState::Loading);
                 request_follow_up_repaint = true;
                 let url_owned = normalized_url.to_owned();
-                let _ = tokio_runtime::spawn(async move {
+                let _ = tokio_runtime::spawn_detached(async move {
                     let url_for_worker = url_owned.clone();
                     let result = tokio_runtime::spawn_blocking(move || {
                         fetch_and_tile_remote_image(url_for_worker.as_str())

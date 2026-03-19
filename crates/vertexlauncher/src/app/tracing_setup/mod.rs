@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io,
     path::{Path, PathBuf},
+    sync::Once,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +14,17 @@ use tracing_subscriber::prelude::*;
 
 use crate::app::tracing_setup::app_log_layer::AppLogLayer;
 
+pub(super) type SharedLogWriter = Arc<Mutex<Box<dyn io::Write + Send>>>;
+
+static PANIC_LOG_WRITER: std::sync::OnceLock<SharedLogWriter> = std::sync::OnceLock::new();
+static PANIC_HOOK_INSTALLED: Once = Once::new();
+static ACTIVE_LOG_PATH: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+
 pub(super) fn init_tracing() -> Option<PathBuf> {
+    ACTIVE_LOG_PATH.get_or_init(initialize_tracing).clone()
+}
+
+fn initialize_tracing() -> Option<PathBuf> {
     let started_epoch = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -28,6 +39,7 @@ pub(super) fn init_tracing() -> Option<PathBuf> {
     let _ = std::fs::create_dir_all(&log_dir);
     let log_path = log_dir.join(format!("vertex_{started_epoch}.log"));
     let (writer, active_log_path) = open_log_writer(log_path, &log_dir);
+    install_panic_hook(Arc::clone(&writer));
 
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
@@ -52,7 +64,7 @@ pub(super) fn init_tracing() -> Option<PathBuf> {
 fn open_log_writer(
     primary_log_path: PathBuf,
     log_dir: &Path,
-) -> (Arc<Mutex<Box<dyn io::Write + Send>>>, Option<PathBuf>) {
+) -> (SharedLogWriter, Option<PathBuf>) {
     if let Some(writer) = try_open_log_file(&primary_log_path, "initialize main log file") {
         return (
             Arc::new(Mutex::new(Box::new(writer))),
@@ -78,6 +90,15 @@ fn open_log_writer(
         "Unable to open any log file; falling back to stderr/console logging only."
     );
     (Arc::new(Mutex::new(Box::new(io::sink()))), None)
+}
+
+pub(super) fn write_log_line(writer: &SharedLogWriter, line: &str) {
+    let mut guard = match writer.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    let _ = writeln!(guard, "{line}");
+    let _ = guard.flush();
 }
 
 fn try_open_log_file(path: &Path, context: &str) -> Option<File> {
@@ -121,4 +142,67 @@ pub(super) fn format_module_path(target: &str, file: Option<&str>) -> String {
 
 pub(super) fn should_omit_module_path(target: &str, module_path: &str) -> bool {
     target == "log" || module_path == "log"
+}
+
+fn install_panic_hook(writer: SharedLogWriter) {
+    let _ = PANIC_LOG_WRITER.set(writer);
+    PANIC_HOOK_INSTALLED.call_once(|| {
+        let previous_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |panic_info| {
+            write_panic_record(panic_info);
+            previous_hook(panic_info);
+        }));
+    });
+}
+
+fn write_panic_record(panic_info: &std::panic::PanicHookInfo<'_>) {
+    let Some(writer) = PANIC_LOG_WRITER.get() else {
+        return;
+    };
+
+    let thread = std::thread::current();
+    let thread_name = thread.name().unwrap_or("unnamed");
+    let location = panic_info
+        .location()
+        .map(|location| {
+            format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            )
+        })
+        .unwrap_or_else(|| "unknown".to_owned());
+    let payload = panic_payload_text(panic_info);
+    let backtrace = std::backtrace::Backtrace::force_capture();
+    let (date, time) = current_date_time_parts();
+
+    let summary = format!(
+        "[{date}][{time}][ERROR][panic]: thread={thread_name} location={location} message={payload}"
+    );
+
+    match writer.try_lock() {
+        Ok(mut guard) => {
+            let _ = writeln!(guard, "{summary}");
+            let _ = writeln!(guard, "{backtrace}");
+            let _ = guard.flush();
+        }
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+            let mut guard = poisoned.into_inner();
+            let _ = writeln!(guard, "{summary}");
+            let _ = writeln!(guard, "{backtrace}");
+            let _ = guard.flush();
+        }
+        Err(std::sync::TryLockError::WouldBlock) => {}
+    }
+}
+
+fn panic_payload_text(panic_info: &std::panic::PanicHookInfo<'_>) -> String {
+    if let Some(payload) = panic_info.payload().downcast_ref::<&'static str>() {
+        return (*payload).to_owned();
+    }
+    if let Some(payload) = panic_info.payload().downcast_ref::<String>() {
+        return payload.clone();
+    }
+    "non-string panic payload".to_owned()
 }

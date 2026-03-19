@@ -24,9 +24,17 @@ pub(crate) fn build_http_agent() -> ureq::Agent {
 }
 
 pub(crate) fn wait_for_auth_request_slot(operation: &str) {
-    let mut gate = auth_request_gate()
-        .lock()
-        .expect("auth request gate mutex poisoned");
+    let mut gate = match auth_request_gate().lock() {
+        Ok(gate) => gate,
+        Err(poisoned) => {
+            tracing::warn!(
+                target: "vertexlauncher/auth/rate_limit",
+                operation,
+                "auth request gate mutex was poisoned; recovering lock state"
+            );
+            poisoned.into_inner()
+        }
+    };
     let now = Instant::now();
 
     if let Some(next_allowed_at) = *gate {

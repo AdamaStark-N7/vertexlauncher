@@ -1,5 +1,20 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static TASKBAR_PROGRESS_AVAILABLE: AtomicBool = AtomicBool::new(true);
+
 pub fn set_install_progress(frame: &eframe::Frame, progress_0_to_1: Option<f32>) {
-    platform::set_install_progress(frame, progress_0_to_1);
+    if !TASKBAR_PROGRESS_AVAILABLE.load(Ordering::Relaxed) {
+        return;
+    }
+
+    if let Err(err) = platform::set_install_progress(frame, progress_0_to_1) {
+        TASKBAR_PROGRESS_AVAILABLE.store(false, Ordering::Relaxed);
+        tracing::error!(
+            target: "vertexlauncher/platform/taskbar_progress",
+            error = %err,
+            "platform taskbar progress integration failed; disabling it for the rest of the session"
+        );
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -15,12 +30,12 @@ mod platform {
     };
     use windows::Win32::UI::Shell::{ITaskbarList4, TBPF_NOPROGRESS, TBPF_NORMAL, TaskbarList};
 
-    pub fn set_install_progress(frame: &Frame, progress_0_to_1: Option<f32>) {
+    pub fn set_install_progress(frame: &Frame, progress_0_to_1: Option<f32>) -> Result<(), String> {
         let Ok(window_handle) = frame.window_handle() else {
-            return;
+            return Ok(());
         };
         let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
-            return;
+            return Ok(());
         };
         let hwnd = HWND(handle.hwnd.get() as *mut c_void);
 
@@ -43,6 +58,7 @@ mod platform {
                 }
             }
         });
+        Ok(())
     }
 
     thread_local! {
@@ -72,11 +88,15 @@ mod platform {
     type UnitySetProgress = unsafe extern "C" fn(*mut c_void, f64) -> c_int;
     type UnitySetProgressVisible = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
 
-    pub fn set_install_progress(_frame: &Frame, progress_0_to_1: Option<f32>) {
+    pub fn set_install_progress(
+        _frame: &Frame,
+        progress_0_to_1: Option<f32>,
+    ) -> Result<(), String> {
         let Some(unity) = unity_taskbar() else {
-            return;
+            return Ok(());
         };
         unity.set(progress_0_to_1);
+        Ok(())
     }
 
     struct UnityTaskbar {
@@ -174,5 +194,10 @@ mod platform {
 mod platform {
     use eframe::Frame;
 
-    pub fn set_install_progress(_frame: &Frame, _progress_0_to_1: Option<f32>) {}
+    pub fn set_install_progress(
+        _frame: &Frame,
+        _progress_0_to_1: Option<f32>,
+    ) -> Result<(), String> {
+        Ok(())
+    }
 }

@@ -1167,7 +1167,7 @@ fn request_content_metadata_lookup_batch(
     let loader = loader.trim().to_owned();
     let work_items_for_failure = work_items.clone();
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = match tokio_runtime::spawn_blocking(move || {
             resolve_installed_content_lookup_batch(
                 work_items.as_slice(),
@@ -1544,7 +1544,7 @@ fn request_content_update(
         format!("Updating {}...", project_name),
     );
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             crate::screens::content_browser::update_installed_content_to_version(
                 instance_root.as_path(),
@@ -1616,7 +1616,7 @@ fn request_content_delete(
         "starting installed content delete"
     );
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             let delete_result = if path.is_dir() {
                 std::fs::remove_dir_all(path.as_path())
@@ -1693,7 +1693,7 @@ fn request_bulk_content_update(
         format!("{operation_label}..."),
     );
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             update_all_installed_content(
                 instance_root.as_path(),

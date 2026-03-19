@@ -248,29 +248,38 @@ fn verify_refresh_token_round_trip_unlocked(
 fn with_secure_store_lock<T>(
     operation: impl FnOnce() -> Result<T, AuthError>,
 ) -> Result<T, AuthError> {
-    let _guard = SECURE_STORE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _guard = match SECURE_STORE_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!(
+                target: "vertexlauncher/auth/secret_store",
+                "secure storage lock was poisoned; recovering lock state"
+            );
+            poisoned.into_inner()
+        }
+    };
     operation()
 }
 
 fn retry_keyring_operation<T>(
     mut operation: impl FnMut() -> Result<T, KeyringError>,
 ) -> Result<T, KeyringError> {
-    for attempt in 0..SECURE_STORE_RETRY_ATTEMPTS {
+    let retry_attempts = SECURE_STORE_RETRY_ATTEMPTS.max(1);
+    let mut last_err = None;
+    for attempt in 0..retry_attempts {
         match operation() {
             Ok(value) => return Ok(value),
             Err(err)
-                if attempt + 1 < SECURE_STORE_RETRY_ATTEMPTS
-                    && should_retry_secure_storage_operation(&err) =>
+                if attempt + 1 < retry_attempts && should_retry_secure_storage_operation(&err) =>
             {
+                last_err = Some(err);
                 thread::sleep(SECURE_STORE_RETRY_DELAY);
             }
             Err(err) => return Err(err),
         }
     }
 
-    unreachable!("retry loop must return before exhausting attempts")
+    Err(last_err.unwrap_or(KeyringError::NoEntry))
 }
 
 fn is_corrupt_secure_storage_error(err: &KeyringError) -> bool {

@@ -447,7 +447,7 @@ fn request_screenshot_delete(
     };
 
     state.delete_screenshot_in_flight = true;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fs::remove_file(path.as_path()).map_err(|err| err.to_string())
         })
@@ -2094,7 +2094,7 @@ fn refresh_home_state(
 
     state.latest_requested_activity_scan_id = request_id;
     state.activity_scan_pending = true;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let scanned_instance_count = request.scanned_instance_count;
         let outcome = tokio_runtime::spawn_blocking(move || HomeActivityScanResult {
             request_id,
@@ -2140,7 +2140,7 @@ fn refresh_screenshot_state(
     state.latest_requested_screenshot_scan_id = request_id;
     state.screenshot_scan_pending = true;
     let scanned_instance_count = request.scanned_instance_count;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let outcome = tokio_runtime::spawn_blocking(move || {
             let screenshots = collect_screenshots_from_request(&request);
             ScreenshotScanResult {
@@ -2366,7 +2366,7 @@ fn queue_server_pings(state: &mut HomeState) {
         state.server_ping_in_flight.insert(address.clone());
         let worker_address = address.clone();
         let result_tx = result_tx.clone();
-        let _ = tokio_runtime::spawn(async move {
+        let _ = tokio_runtime::spawn_detached(async move {
             let ping_outcome = tokio_runtime::spawn_blocking(move || {
                 query_server_snapshot(worker_address.as_str())
             })

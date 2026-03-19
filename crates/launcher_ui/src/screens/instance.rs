@@ -51,6 +51,7 @@ mod installed_content_cache;
 mod installed_entry_render_result;
 mod instance_screen_output;
 mod instance_screen_state;
+mod platform;
 mod runtime;
 mod runtime_prepare_operation;
 mod runtime_prepare_outcome;
@@ -65,11 +66,15 @@ use instance_screen_state::{
     InstalledContentEntryUiCache, InstanceLogEntry, InstanceScreenState, InstanceScreenTab,
     InstanceScreenshotEntry, InstanceScreenshotViewerState,
 };
+use platform::{
+    effective_linux_graphics_settings_for_state, linux_instance_driver_settings_for_save,
+    render_platform_specific_instance_settings_section,
+};
 use runtime::*;
 use runtime_prepare_operation::RuntimePrepareOperation;
 use runtime_prepare_outcome::RuntimePrepareOutcome;
 
-use super::{console as console_screen, platform_specific::current_platform_specific_section};
+use super::{console as console_screen, platform as screen_platform};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -109,41 +114,6 @@ enum InstanceScreenshotOverlayAction {
 
 fn instance_screen_state_id(instance_id: &str) -> egui::Id {
     egui::Id::new(("instance_screen_state", instance_id))
-}
-
-#[cfg(target_os = "linux")]
-fn effective_linux_graphics_settings_for_state(
-    state: &InstanceScreenState,
-    config: &Config,
-) -> (bool, bool) {
-    effective_linux_graphics_settings_for_flags(
-        state.linux_set_opengl_driver,
-        state.linux_use_zink_driver,
-        config.linux_set_opengl_driver(),
-        config.linux_use_zink_driver(),
-    )
-}
-
-#[cfg(target_os = "linux")]
-fn effective_linux_graphics_settings_for_flags(
-    override_enabled: bool,
-    use_zink_driver: bool,
-    global_set_opengl_driver: bool,
-    global_use_zink_driver: bool,
-) -> (bool, bool) {
-    if override_enabled {
-        (true, use_zink_driver)
-    } else {
-        (global_set_opengl_driver, global_use_zink_driver)
-    }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn effective_linux_graphics_settings_for_state(
-    state: &InstanceScreenState,
-    _config: &Config,
-) -> (bool, bool) {
-    (state.linux_set_opengl_driver, state.linux_use_zink_driver)
 }
 
 pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&str>) -> bool {
@@ -1210,7 +1180,7 @@ fn request_instance_screenshot_delete(
     };
 
     state.delete_screenshot_in_flight = true;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fs::remove_file(path.as_path()).map_err(|err| err.to_string())
         })
@@ -1273,7 +1243,7 @@ fn refresh_instance_screenshots(
     let request_id = state.screenshot_scan_request_serial;
     state.screenshot_scan_in_flight = true;
     let instance_root = instance_root.to_path_buf();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let outcome = tokio_runtime::spawn_blocking(move || {
             collect_instance_screenshots(instance_root.as_path())
         })
@@ -1378,7 +1348,7 @@ fn refresh_instance_logs(state: &mut InstanceScreenState, instance_root: &Path, 
     let request_id = state.log_scan_request_serial;
     state.log_scan_in_flight = true;
     let instance_root = instance_root.to_path_buf();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let outcome =
             tokio_runtime::spawn_blocking(move || collect_instance_logs(instance_root.as_path()))
                 .await;
@@ -1529,7 +1499,7 @@ fn load_selected_instance_log(state: &mut InstanceScreenState) {
     state.requested_log_load_path = Some(selected_log_path.clone());
     state.requested_log_load_modified_at_ms = modified_at_ms;
     let path_for_worker = selected_log_path.clone();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let outcome = tokio_runtime::spawn_blocking(move || {
             read_instance_log_lines(path_for_worker.as_path())
         })
@@ -2474,170 +2444,6 @@ fn render_instance_settings_modal(
     instances_changed
 }
 
-fn linux_instance_driver_settings_for_save(
-    state: &InstanceScreenState,
-    _existing: Option<&instances::InstanceRecord>,
-) -> (Option<bool>, Option<bool>) {
-    #[cfg(target_os = "linux")]
-    {
-        let _ = _existing;
-        return linux_instance_driver_override_for_save(
-            state.linux_set_opengl_driver,
-            state.linux_use_zink_driver,
-        );
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = state;
-        return _existing
-            .map(|instance| {
-                (
-                    instance.linux_set_opengl_driver,
-                    instance.linux_use_zink_driver,
-                )
-            })
-            .unwrap_or((None, None));
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn linux_instance_driver_override_for_save(
-    override_enabled: bool,
-    use_zink_driver: bool,
-) -> (Option<bool>, Option<bool>) {
-    if override_enabled {
-        (Some(true), Some(use_zink_driver))
-    } else {
-        (None, None)
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod tests {
-    use super::{
-        effective_linux_graphics_settings_for_flags, linux_instance_driver_override_for_save,
-    };
-
-    #[test]
-    fn linux_driver_override_is_cleared_when_instance_override_is_disabled() {
-        assert_eq!(
-            linux_instance_driver_override_for_save(false, false),
-            (None, None)
-        );
-        assert_eq!(
-            linux_instance_driver_override_for_save(false, true),
-            (None, None)
-        );
-    }
-
-    #[test]
-    fn linux_driver_override_is_saved_when_instance_override_is_enabled() {
-        assert_eq!(
-            linux_instance_driver_override_for_save(true, false),
-            (Some(true), Some(false))
-        );
-        assert_eq!(
-            linux_instance_driver_override_for_save(true, true),
-            (Some(true), Some(true))
-        );
-    }
-
-    #[test]
-    fn effective_linux_graphics_settings_use_global_when_instance_override_is_disabled() {
-        assert_eq!(
-            effective_linux_graphics_settings_for_flags(false, false, true, true),
-            (true, true)
-        );
-    }
-
-    #[test]
-    fn effective_linux_graphics_settings_use_instance_zink_when_override_is_enabled() {
-        assert_eq!(
-            effective_linux_graphics_settings_for_flags(true, true, false, false),
-            (true, true)
-        );
-    }
-}
-
-fn render_platform_specific_instance_settings_section(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-    instance_id: &str,
-    section_style: &LabelOptions,
-    muted_style: &LabelOptions,
-) {
-    let Some(section) = current_platform_specific_section() else {
-        return;
-    };
-
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(10.0);
-
-    let _ = text_ui.label(
-        ui,
-        (
-            "instance_platform_settings_heading",
-            instance_id,
-            section.id,
-        ),
-        section.heading,
-        section_style,
-    );
-    let _ = text_ui.label(
-        ui,
-        (
-            "instance_platform_settings_description",
-            instance_id,
-            section.id,
-        ),
-        section.instance_description,
-        muted_style,
-    );
-    ui.add_space(8.0);
-
-    #[cfg(target_os = "linux")]
-    {
-        let response = ui
-            .push_id(("instance_linux_set_opengl_driver", instance_id), |ui| {
-                settings_widgets::toggle_row(
-                    text_ui,
-                    ui,
-                    "Set Linux OpenGL Driver",
-                    Some(
-                        "Linux-only. When enabled, this instance uses the Zink toggle below instead of the launcher-wide Linux OpenGL driver behavior. When disabled, this instance falls back to the launcher-wide Linux graphics settings. Versions using Vulkan directly should ignore it.",
-                    ),
-                    &mut state.linux_set_opengl_driver,
-                )
-            })
-            .inner;
-        let _ = response;
-        ui.add_space(6.0);
-
-        let zink_response = ui.add_enabled_ui(state.linux_set_opengl_driver, |ui| {
-            ui.push_id(("instance_linux_use_zink_driver", instance_id), |ui| {
-                settings_widgets::toggle_row(
-                    text_ui,
-                    ui,
-                    "Use Zink Driver (Experimental)",
-                    Some(
-                        "Linux-only. Experimental. When the setting above is enabled, this toggle decides whether this instance forces Mesa Zink so OpenGL runs over Vulkan. When the setting above is disabled, the launcher-wide Zink setting is used instead. Versions using Vulkan directly should ignore it.",
-                    ),
-                    &mut state.linux_use_zink_driver,
-                )
-            })
-            .inner
-        });
-        let _ = zink_response;
-        ui.add_space(8.0);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = state;
-}
-
 fn render_export_vtmpack_modal(
     ctx: &egui::Context,
     text_ui: &mut TextUi,
@@ -2986,11 +2792,12 @@ fn memory_slider_max_mib() -> (u128, bool) {
                 let (tx, rx) = mpsc::channel::<Option<u128>>();
                 state.rx = Some(rx);
                 pending = true;
-                let _ = tokio_runtime::spawn(async move {
-                    let result = tokio_runtime::spawn_blocking(detect_total_memory_mib)
-                        .await
-                        .ok()
-                        .flatten();
+                let _ = tokio_runtime::spawn_detached(async move {
+                    let result =
+                        tokio_runtime::spawn_blocking(screen_platform::detect_total_memory_mib)
+                            .await
+                            .ok()
+                            .flatten();
                     let _ = tx.send(result);
                 });
             }
@@ -3004,49 +2811,4 @@ fn memory_slider_max_mib() -> (u128, bool) {
         .saturating_sub(RESERVED_SYSTEM_MEMORY_MIB)
         .max(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN);
     (max_mib, pending)
-}
-
-#[cfg(target_os = "linux")]
-fn detect_total_memory_mib() -> Option<u128> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = "/proc/meminfo", context = "detect total memory");
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
-    let kib = line.split_whitespace().nth(1)?.parse::<u128>().ok()?;
-    Some(kib / 1024)
-}
-
-#[cfg(target_os = "windows")]
-fn detect_total_memory_mib() -> Option<u128> {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-
-    let mut status = MEMORYSTATUSEX {
-        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
-        ..unsafe { std::mem::zeroed() }
-    };
-
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if ok == 0 {
-        return None;
-    }
-
-    Some((status.ullTotalPhys as u128) / (1024 * 1024))
-}
-
-#[cfg(target_os = "macos")]
-fn detect_total_memory_mib() -> Option<u128> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let bytes = String::from_utf8(output.stdout).ok()?;
-    let bytes = bytes.trim().parse::<u128>().ok()?;
-    Some(bytes / (1024 * 1024))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn detect_total_memory_mib() -> Option<u128> {
-    None
 }

@@ -621,7 +621,7 @@ fn load_preview_from_state(state: &mut ImportInstanceState) {
     let request_serial = state.preview_request_serial;
     state.preview_in_flight = true;
     state.error = None;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let (path, launcher_hint, manifest_mode) = request;
         let outcome = tokio_runtime::spawn_blocking(move || {
             if manifest_mode {

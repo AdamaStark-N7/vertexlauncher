@@ -10,7 +10,7 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::Duration;
 use textui::{ButtonOptions, TextUi};
 
-use super::{SettingsInfo, platform_specific::current_platform_specific_section};
+use super::{SettingsInfo, platform};
 use crate::ui::{components::settings_widgets, style, theme::Theme};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
@@ -197,7 +197,7 @@ fn render_platform_specific_settings_section(
     text_ui: &mut TextUi,
     config: &mut Config,
 ) {
-    let Some(section) = current_platform_specific_section() else {
+    let Some(section) = platform::current_platform_specific_section() else {
         return;
     };
 
@@ -206,48 +206,8 @@ fn render_platform_specific_settings_section(
         text_ui,
         section.heading,
         section.launcher_description,
-        |ui, text_ui| {
-            #[cfg(target_os = "linux")]
-            render_linux_graphics_settings(ui, text_ui, config);
-            #[cfg(not(target_os = "linux"))]
-            let _ = (ui, text_ui, config);
-        },
+        |ui, text_ui| platform::render_launcher_platform_settings(ui, text_ui, config),
     );
-}
-
-#[cfg(target_os = "linux")]
-fn render_linux_graphics_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
-    let mut set_linux_opengl_driver = config.linux_set_opengl_driver();
-    let response = settings_widgets::toggle_row(
-        text_ui,
-        ui,
-        "Set Linux OpenGL Driver",
-        Some(
-            "Linux-only. Vertex will explicitly manage OpenGL driver environment variables for launched games. This affects all launched versions by default; versions using Vulkan directly should ignore it.",
-        ),
-        &mut set_linux_opengl_driver,
-    );
-    if response.changed() {
-        config.set_linux_set_opengl_driver(set_linux_opengl_driver);
-    }
-    ui.add_space(style::SPACE_MD);
-
-    let mut use_zink_driver = config.linux_use_zink_driver();
-    let zink_response = ui.add_enabled_ui(config.linux_set_opengl_driver(), |ui| {
-        settings_widgets::toggle_row(
-            text_ui,
-            ui,
-            "Use Zink Driver (Experimental)",
-            Some(
-                "Linux-only. Experimental. When the setting above is enabled, forces Mesa Zink so OpenGL runs over Vulkan. Disable it to keep Mesa's default OpenGL driver selection. Versions using Vulkan directly should ignore it.",
-            ),
-            &mut use_zink_driver,
-        )
-    });
-    if zink_response.inner.changed() {
-        config.set_linux_use_zink_driver(use_zink_driver);
-    }
-    ui.add_space(style::SPACE_MD);
 }
 
 fn render_info_row(
@@ -1011,8 +971,8 @@ fn memory_slider_max_mib() -> (u128, bool) {
                 let (tx, rx) = mpsc::channel::<Option<u128>>();
                 state.rx = Some(rx);
                 pending = true;
-                let _ = tokio_runtime::spawn(async move {
-                    let result = tokio_runtime::spawn_blocking(detect_total_memory_mib)
+                let _ = tokio_runtime::spawn_detached(async move {
+                    let result = tokio_runtime::spawn_blocking(platform::detect_total_memory_mib)
                         .await
                         .ok()
                         .flatten();
@@ -1029,49 +989,4 @@ fn memory_slider_max_mib() -> (u128, bool) {
         .saturating_sub(RESERVED_SYSTEM_MEMORY_MIB)
         .max(INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN);
     (max_mib, pending)
-}
-
-#[cfg(target_os = "linux")]
-fn detect_total_memory_mib() -> Option<u128> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = "/proc/meminfo", context = "detect total memory");
-    let meminfo = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = meminfo.lines().find(|line| line.starts_with("MemTotal:"))?;
-    let kib = line.split_whitespace().nth(1)?.parse::<u128>().ok()?;
-    Some(kib / 1024)
-}
-
-#[cfg(target_os = "windows")]
-fn detect_total_memory_mib() -> Option<u128> {
-    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
-
-    let mut status = MEMORYSTATUSEX {
-        dwLength: std::mem::size_of::<MEMORYSTATUSEX>() as u32,
-        ..unsafe { std::mem::zeroed() }
-    };
-
-    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
-    if ok == 0 {
-        return None;
-    }
-
-    Some((status.ullTotalPhys as u128) / (1024 * 1024))
-}
-
-#[cfg(target_os = "macos")]
-fn detect_total_memory_mib() -> Option<u128> {
-    let output = std::process::Command::new("sysctl")
-        .args(["-n", "hw.memsize"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let bytes = String::from_utf8(output.stdout).ok()?;
-    let bytes = bytes.trim().parse::<u128>().ok()?;
-    Some(bytes / (1024 * 1024))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
-fn detect_total_memory_mib() -> Option<u128> {
-    None
 }

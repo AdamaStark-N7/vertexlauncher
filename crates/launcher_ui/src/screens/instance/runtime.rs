@@ -669,7 +669,7 @@ pub(super) fn sync_version_catalog(
     state.version_catalog_error = None;
     state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fetch_version_catalog_with_refresh(include_snapshots_and_betas, force_refresh)
                 .map_err(|err| err.to_string())
@@ -840,7 +840,7 @@ pub(super) fn request_modloader_versions(
 
     let loader = loader_label.to_owned();
     let game = game_version.to_owned();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fetch_loader_versions_for_game(loader.as_str(), game.as_str(), force_refresh)
                 .map_err(|err| err.to_string())
@@ -1153,7 +1153,7 @@ pub(super) fn request_runtime_prepare(
         },
     );
     let instance_id_for_notifications = state.name_input.clone();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let progress_tx_done = progress_tx.clone();
         let progress_callback: InstallProgressCallback = Arc::new(move |event| {
             let _ = progress_tx.send(event);

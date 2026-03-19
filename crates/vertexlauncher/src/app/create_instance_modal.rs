@@ -654,7 +654,7 @@ fn sync_version_catalog(
     state.version_catalog_include_snapshots = Some(include_snapshots_and_betas);
     state.version_catalog_error = None;
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fetch_version_catalog_with_refresh(include_snapshots_and_betas, force_refresh)
                 .map_err(|err| err.to_string())
@@ -842,11 +842,7 @@ fn render_thumbnail_picker(
             }
         }
 
-        if should_open_picker
-            && let Ok(picked) =
-                std::panic::catch_unwind(|| pick_thumbnail_path(state.thumbnail_path.trim()))
-            && let Some(path) = picked
-        {
+        if should_open_picker && let Some(path) = pick_thumbnail_path(state.thumbnail_path.trim()) {
             state.thumbnail_path = path;
         }
     });
@@ -953,7 +949,7 @@ fn request_modloader_versions(
 
     let loader = loader_label.to_owned();
     let game = game_version.to_owned();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             installation::fetch_loader_versions_for_game(
                 loader.as_str(),

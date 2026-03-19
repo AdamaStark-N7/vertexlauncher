@@ -16,7 +16,6 @@ use std::{
     collections::{HashMap, HashSet, VecDeque},
     hash::{Hash, Hasher},
     io::{Read, Write},
-    panic::{self, AssertUnwindSafe},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, OnceLock, mpsc},
     thread,
@@ -2154,7 +2153,7 @@ fn request_detail_versions(state: &mut ContentBrowserState) {
     state.detail_versions_in_flight = true;
     state.detail_versions_error = None;
     let project_key = entry.dedupe_key.clone();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let versions = tokio_runtime::spawn_blocking(move || fetch_versions_for_entry(&entry))
             .await
             .map_err(|err| format!("detail versions join error: {err}"))
@@ -2180,7 +2179,7 @@ fn request_version_catalog(state: &mut ContentBrowserState) {
     };
 
     state.version_catalog_in_flight = true;
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             fetch_version_catalog(false)
                 .map(|catalog| catalog.game_versions)
@@ -2333,7 +2332,7 @@ fn request_identify_file(state: &mut ContentBrowserState, selected_path: PathBuf
         "Identifying {} in the background...",
         selected_path.display()
     ));
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let path_for_result = selected_path.clone();
         let result = tokio_runtime::spawn_blocking(move || {
             identify_mod_file_by_hash(selected_path.as_path())
@@ -2445,7 +2444,7 @@ fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest
         "Searching content..."
     );
     let request_for_failure = request.clone();
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let worker_tx = tx.clone();
         let result =
             tokio_runtime::spawn_blocking(move || run_search_request(request, worker_tx)).await;
@@ -3080,8 +3079,8 @@ fn run_search_request(
     }
 
     let mut provider_entries = Vec::new();
-    thread::scope(|scope| {
-        let (task_tx, task_rx) = mpsc::channel::<SearchTaskOutcome>();
+    let outcomes = thread::scope(|scope| -> Result<Vec<SearchTaskOutcome>, String> {
+        let mut tasks = Vec::new();
         for content_type in BrowserContentType::ORDERED {
             if !request.content_scope.includes(content_type) {
                 continue;
@@ -3094,9 +3093,9 @@ fn run_search_request(
             let curseforge = curseforge.clone();
             let curseforge_class_id = curseforge_class_ids.get(&content_type).copied();
             let loader = request.loader;
-            let task_tx = task_tx.clone();
-            scope.spawn(move || {
-                let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+            tasks.push((
+                content_type,
+                scope.spawn(move || {
                     search_content_type_providers(
                         content_type,
                         query_for_type,
@@ -3107,37 +3106,39 @@ fn run_search_request(
                         curseforge,
                         curseforge_class_id,
                     )
-                }))
-                .unwrap_or_else(|_| SearchTaskOutcome {
-                    warnings: vec![format!(
-                        "{} search worker panicked unexpectedly.",
-                        content_type.label()
-                    )],
-                    ..SearchTaskOutcome::default()
-                });
-                let _ = task_tx.send(outcome);
-            });
+                }),
+            ));
         }
-        drop(task_tx);
 
-        let mut completed_tasks = 0usize;
-        for outcome in task_rx {
-            completed_tasks = completed_tasks.saturating_add(1);
-            provider_entries.extend(outcome.entries);
-            warnings.extend(outcome.warnings);
-            let _ = tx.send(SearchUpdate::Snapshot {
-                request: request.clone(),
-                snapshot: build_search_snapshot(
-                    provider_entries.as_slice(),
-                    warnings.as_slice(),
-                    request.mod_sort_mode,
-                ),
-                completed_tasks,
-                total_tasks,
-                finished: completed_tasks >= total_tasks,
-            });
+        let mut outcomes = Vec::with_capacity(tasks.len());
+        for (content_type, task) in tasks {
+            outcomes.push(task.join().map_err(|_| {
+                format!(
+                    "{} search worker panicked unexpectedly.",
+                    content_type.label()
+                )
+            })?);
         }
-    });
+        Ok(outcomes)
+    })?;
+
+    let mut completed_tasks = 0usize;
+    for outcome in outcomes {
+        completed_tasks = completed_tasks.saturating_add(1);
+        provider_entries.extend(outcome.entries);
+        warnings.extend(outcome.warnings);
+        let _ = tx.send(SearchUpdate::Snapshot {
+            request: request.clone(),
+            snapshot: build_search_snapshot(
+                provider_entries.as_slice(),
+                warnings.as_slice(),
+                request.mod_sort_mode,
+            ),
+            completed_tasks,
+            total_tasks,
+            finished: completed_tasks >= total_tasks,
+        });
+    }
 
     Ok(())
 }
@@ -3620,7 +3621,7 @@ fn maybe_start_queued_download(
     let root = instance_root.to_path_buf();
     let request = next.request.clone();
 
-    let _ = tokio_runtime::spawn(async move {
+    let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             apply_content_install_request(root.as_path(), request)
         })

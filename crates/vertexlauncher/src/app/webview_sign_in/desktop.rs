@@ -3,6 +3,11 @@ pub(super) fn run_webview_window(
     auth_request_uri: &str,
     redirect_uri: &str,
 ) -> Result<String, String> {
+    run_webview_window_inner(auth_request_uri, redirect_uri)
+}
+
+#[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+fn run_webview_window_inner(auth_request_uri: &str, redirect_uri: &str) -> Result<String, String> {
     use std::sync::{Arc, Mutex};
 
     use tao::dpi::LogicalSize;
@@ -28,13 +33,15 @@ pub(super) fn run_webview_window(
     let result_for_nav = Arc::clone(&result);
     let redirect_prefix = redirect_uri.to_owned();
 
-    let mut window_builder = WindowBuilder::new()
+    let window_builder = WindowBuilder::new()
         .with_title("Microsoft Sign-In")
         .with_inner_size(LogicalSize::new(980.0, 760.0));
     #[cfg(not(target_os = "macos"))]
-    if let Some(icon) = crate::app::app_icon::tao_icon() {
-        window_builder = window_builder.with_window_icon(Some(icon));
-    }
+    let window_builder = if let Some(icon) = crate::app::app_icon::tao_icon() {
+        window_builder.with_window_icon(Some(icon))
+    } else {
+        window_builder
+    };
 
     let window = window_builder
         .build(&event_loop)

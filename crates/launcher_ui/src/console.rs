@@ -240,7 +240,7 @@ pub fn attach_launch_log(tab_id: &str, instance_root: &str, log_path: &Path) {
     };
     let tab_id = trimmed_tab_id.to_owned();
     let log_path = log_path.to_path_buf();
-    let _ = tokio_runtime::spawn_blocking(move || {
+    let _ = tokio_runtime::spawn_blocking_detached(move || {
         tail_launch_log_to_tab(
             tab_id.as_str(),
             instance_root_key.as_str(),

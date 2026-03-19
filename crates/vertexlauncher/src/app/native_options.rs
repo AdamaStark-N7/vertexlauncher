@@ -3,56 +3,7 @@ use eframe::{self, egui};
 use launcher_ui::window_effects;
 use std::sync::Arc;
 
-use super::{app_icon, app_metadata};
-
-#[cfg(target_os = "macos")]
-fn macos_force_wgpu() -> bool {
-    std::env::var("VERTEX_MACOS_WGPU")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
-fn startup_renderer() -> eframe::Renderer {
-    #[cfg(target_os = "macos")]
-    {
-        if !macos_force_wgpu() {
-            return eframe::Renderer::Glow;
-        }
-    }
-
-    eframe::Renderer::Wgpu
-}
-
-fn startup_hardware_acceleration() -> eframe::HardwareAcceleration {
-    #[cfg(target_os = "macos")]
-    {
-        if !macos_force_wgpu() {
-            return eframe::HardwareAcceleration::Preferred;
-        }
-    }
-
-    eframe::HardwareAcceleration::Required
-}
-
-fn startup_backends() -> eframe::egui_wgpu::wgpu::Backends {
-    #[cfg(target_os = "macos")]
-    {
-        eframe::egui_wgpu::wgpu::Backends::METAL
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        eframe::egui_wgpu::wgpu::Backends::VULKAN
-            | eframe::egui_wgpu::wgpu::Backends::METAL
-            | eframe::egui_wgpu::wgpu::Backends::DX12
-    }
-}
+use super::{app_icon, app_metadata, platform};
 
 pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     let startup_power_preference = if startup_config.low_power_gpu_preferred() {
@@ -60,20 +11,13 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     } else {
         eframe::egui_wgpu::wgpu::PowerPreference::HighPerformance
     };
-    let renderer = startup_renderer();
-    let hardware_acceleration = startup_hardware_acceleration();
+    let startup_graphics = platform::startup_graphics_config();
+    let renderer = startup_graphics.renderer;
+    let hardware_acceleration = startup_graphics.hardware_acceleration;
     let blur_enabled =
         startup_config.window_blur_enabled() && window_effects::platform_supports_blur();
 
-    #[cfg(target_os = "macos")]
-    {
-        if matches!(renderer, eframe::Renderer::Glow) {
-            tracing::warn!(
-                target: "vertexlauncher/app/graphics",
-                "Using Glow renderer on macOS by default to avoid native Metal startup aborts. Set VERTEX_MACOS_WGPU=1 to force wgpu/Metal."
-            );
-        }
-    }
+    platform::log_startup_graphics_choice(startup_graphics);
 
     eframe::NativeOptions {
         viewport: egui::ViewportBuilder {
@@ -106,7 +50,7 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
             wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
                 eframe::egui_wgpu::WgpuSetupCreateNew {
                     instance_descriptor: eframe::egui_wgpu::wgpu::InstanceDescriptor {
-                        backends: startup_backends(),
+                        backends: startup_graphics.backends,
                         ..Default::default()
                     },
                     power_preference: startup_power_preference,

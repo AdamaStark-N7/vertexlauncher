@@ -451,10 +451,10 @@ pub fn fetch_version_catalog_with_refresh(
 }
 
 pub fn ensure_openjdk_runtime(runtime_major: u8) -> Result<PathBuf, InstallationError> {
-    let (os, arch) = platform_for_adoptium()?;
+    let (os, arch, arch_cache_key) = platform_for_adoptium()?;
     let install_root = cache_root_dir()
         .join("java")
-        .join(format!("openjdk-{runtime_major}"));
+        .join(format!("openjdk-{runtime_major}-{arch_cache_key}"));
     if let Some(existing) = find_java_executable_under(install_root.as_path())? {
         return Ok(canonicalize_existing_path(existing));
     }
@@ -571,10 +571,20 @@ fn fetch_version_catalog_uncached(
                 "minecraft version manifest task panicked",
             ))
         })??;
-        let fabric = fabric_task.join().unwrap_or_default();
-        let forge = forge_task.join().unwrap_or_default();
-        let neoforge = neoforge_task.join().unwrap_or_default();
-        let quilt = quilt_task.join().unwrap_or_default();
+        let fabric = fabric_task.join().map_err(|_| {
+            InstallationError::Io(std::io::Error::other("fabric loader catalog task panicked"))
+        })?;
+        let forge = forge_task.join().map_err(|_| {
+            InstallationError::Io(std::io::Error::other("forge loader catalog task panicked"))
+        })?;
+        let neoforge = neoforge_task.join().map_err(|_| {
+            InstallationError::Io(std::io::Error::other(
+                "neoforge loader catalog task panicked",
+            ))
+        })?;
+        let quilt = quilt_task.join().map_err(|_| {
+            InstallationError::Io(std::io::Error::other("quilt loader catalog task panicked"))
+        })?;
         Ok::<_, InstallationError>((manifest, fabric, forge, neoforge, quilt))
     })?;
 
@@ -2608,7 +2618,7 @@ fn prefetch_batch_total_bytes(
     tasks: &mut [FileDownloadTask],
     probe_workers: usize,
     max_probe_count: usize,
-) -> u64 {
+) -> Result<u64, InstallationError> {
     let mut total_known_bytes = 0u64;
     let mut unknown = std::collections::VecDeque::new();
     let mut skipped_probe_count = 0usize;
@@ -2624,7 +2634,7 @@ fn prefetch_batch_total_bytes(
         }
     }
     if unknown.is_empty() {
-        return total_known_bytes;
+        return Ok(total_known_bytes);
     }
     if skipped_probe_count > 0 {
         tracing::debug!(
@@ -2637,7 +2647,7 @@ fn prefetch_batch_total_bytes(
 
     let queue = Arc::new(Mutex::new(unknown));
     let discovered = Arc::new(Mutex::new(Vec::<(usize, u64)>::new()));
-    thread::scope(|scope| {
+    thread::scope(|scope| -> Result<(), InstallationError> {
         let mut workers = Vec::new();
         for _ in 0..probe_workers.max(1) {
             let queue = Arc::clone(&queue);
@@ -2657,9 +2667,14 @@ fn prefetch_batch_total_bytes(
             }));
         }
         for worker in workers {
-            let _ = worker.join();
+            worker.join().map_err(|_| {
+                InstallationError::Io(std::io::Error::other(
+                    "content-length probe worker panicked",
+                ))
+            })?;
         }
-    });
+        Ok(())
+    })?;
 
     if let Ok(discovered) = discovered.lock() {
         for (index, size) in discovered.iter().copied() {
@@ -2672,7 +2687,7 @@ fn prefetch_batch_total_bytes(
         }
     }
 
-    total_known_bytes
+    Ok(total_known_bytes)
 }
 
 fn probe_content_length(url: &str) -> Option<u64> {
@@ -2730,7 +2745,7 @@ fn download_files_concurrent(
     let size_probe_workers = worker_count.min(8).max(1);
     let max_size_probes = MAX_CONTENT_LENGTH_PROBES_PER_BATCH.max(size_probe_workers);
     let prefetched_total_bytes =
-        prefetch_batch_total_bytes(&mut tasks, size_probe_workers, max_size_probes);
+        prefetch_batch_total_bytes(&mut tasks, size_probe_workers, max_size_probes)?;
     // Prioritize larger files so long-running transfers start earlier.
     tasks.sort_by_key(|task| std::cmp::Reverse(task.expected_size.unwrap_or(0)));
     tracing::info!(
@@ -3440,7 +3455,8 @@ fn canonicalize_existing_path(path: PathBuf) -> PathBuf {
     fs_canonicalize(path.as_path()).unwrap_or(path)
 }
 
-fn platform_for_adoptium() -> Result<(&'static str, &'static str), InstallationError> {
+fn platform_for_adoptium() -> Result<(&'static str, &'static str, &'static str), InstallationError>
+{
     let os = if cfg!(target_os = "linux") {
         "linux"
     } else if cfg!(target_os = "windows") {
@@ -3452,16 +3468,146 @@ fn platform_for_adoptium() -> Result<(&'static str, &'static str), InstallationE
             std::env::consts::OS.to_owned(),
         ));
     };
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        return Err(InstallationError::UnsupportedPlatform(
-            std::env::consts::ARCH.to_owned(),
-        ));
-    };
-    Ok((os, arch))
+    let arch = current_runtime_architecture().ok_or_else(|| {
+        InstallationError::UnsupportedPlatform(
+            detected_runtime_architecture().unwrap_or_else(|| std::env::consts::ARCH.to_owned()),
+        )
+    })?;
+    Ok((os, arch.adoptium_value(), arch.cache_key()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RuntimeArchitecture {
+    X86,
+    X64,
+    Arm,
+    Aarch64,
+}
+
+impl RuntimeArchitecture {
+    fn adoptium_value(self) -> &'static str {
+        match self {
+            RuntimeArchitecture::X86 => "x32",
+            RuntimeArchitecture::X64 => "x64",
+            RuntimeArchitecture::Arm => "arm",
+            RuntimeArchitecture::Aarch64 => "aarch64",
+        }
+    }
+
+    fn cache_key(self) -> &'static str {
+        match self {
+            RuntimeArchitecture::X86 => "x86",
+            RuntimeArchitecture::X64 => "x64",
+            RuntimeArchitecture::Arm => "arm",
+            RuntimeArchitecture::Aarch64 => "aarch64",
+        }
+    }
+}
+
+fn current_runtime_architecture() -> Option<RuntimeArchitecture> {
+    normalize_runtime_architecture(
+        detected_runtime_architecture()
+            .unwrap_or_else(|| std::env::consts::ARCH.to_owned())
+            .as_str(),
+    )
+}
+
+fn normalize_runtime_architecture(raw: &str) -> Option<RuntimeArchitecture> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "x86" | "i386" | "i486" | "i586" | "i686" => Some(RuntimeArchitecture::X86),
+        "x86_64" | "amd64" => Some(RuntimeArchitecture::X64),
+        "arm" | "armv7" | "armv7l" => Some(RuntimeArchitecture::Arm),
+        "arm64" | "aarch64" => Some(RuntimeArchitecture::Aarch64),
+        _ => None,
+    }
+}
+
+fn detected_runtime_architecture() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::env::var("PROCESSOR_ARCHITEW6432")
+            .ok()
+            .or_else(|| std::env::var("PROCESSOR_ARCHITECTURE").ok())
+            .map(|value| value.trim().to_owned())
+            .filter(|value| !value.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let uname = command_stdout_trimmed("uname", ["-m"])?;
+        if normalize_runtime_architecture(uname.as_str()) == Some(RuntimeArchitecture::X64)
+            && command_stdout_trimmed("sysctl", ["-in", "hw.optional.arm64"]).as_deref()
+                == Some("1")
+        {
+            return Some("arm64".to_owned());
+        }
+        return Some(uname);
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        return command_stdout_trimmed("uname", ["-m"]);
+    }
+
+    #[allow(unreachable_code)]
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn command_stdout_trimmed<const N: usize>(program: &str, args: [&str; N]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8(output.stdout).ok()?;
+    let trimmed = stdout.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod runtime_architecture_tests {
+    use super::{RuntimeArchitecture, normalize_runtime_architecture};
+
+    #[test]
+    fn normalizes_common_x64_aliases() {
+        assert_eq!(
+            normalize_runtime_architecture("x86_64"),
+            Some(RuntimeArchitecture::X64)
+        );
+        assert_eq!(
+            normalize_runtime_architecture("AMD64"),
+            Some(RuntimeArchitecture::X64)
+        );
+    }
+
+    #[test]
+    fn normalizes_common_arm64_aliases() {
+        assert_eq!(
+            normalize_runtime_architecture("arm64"),
+            Some(RuntimeArchitecture::Aarch64)
+        );
+        assert_eq!(
+            normalize_runtime_architecture("aarch64"),
+            Some(RuntimeArchitecture::Aarch64)
+        );
+    }
+
+    #[test]
+    fn normalizes_x86_aliases() {
+        assert_eq!(
+            normalize_runtime_architecture("i686"),
+            Some(RuntimeArchitecture::X86)
+        );
+    }
+
+    #[test]
+    fn rejects_unknown_architecture_strings() {
+        assert_eq!(normalize_runtime_architecture("sparc64"), None);
+    }
 }
 
 fn extract_adoptium_package(metadata: &serde_json::Value) -> Option<(String, String)> {

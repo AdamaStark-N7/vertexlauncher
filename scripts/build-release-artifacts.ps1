@@ -4,83 +4,255 @@ $scriptDir = $PSScriptRoot
 $repoRoot = (Resolve-Path (Join-Path $scriptDir "..")).Path
 
 $package = "vertexlauncher"
-$windowsTarget = "x86_64-pc-windows-msvc"
-$linuxToolchain = "stable-x86_64-unknown-linux-gnu"
-$linuxTarget = "x86_64-unknown-linux-gnu"
 $releaseDir = Join-Path $repoRoot "target/release"
-$windowsBinary = Join-Path $repoRoot (Join-Path "target/$windowsTarget/release" "$package.exe")
-$linuxBinary = Join-Path $repoRoot (Join-Path "target/$linuxTarget/release" $package)
-$stagedLinuxBinary = Join-Path $releaseDir $package
-$stagedWindowsBinary = Join-Path $releaseDir "$package.exe"
-$crossEnvVars = @("CFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "AR", "RANLIB")
+$crossEnvVars = @("CFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "AR", "RANLIB", "RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")
+$stagedArtifacts = @(
+    "vertexlauncher-windowsx86-64.exe",
+    "vertexlauncher-windowsarm64.exe",
+    "vertexlauncher-linuxx86-64",
+    "vertexlauncher-linuxarm64",
+    "vertexlauncher-macosarm64",
+    "vertexlauncher-windows-x86-64.exe",
+    "vertexlauncher-windows-arm64.exe",
+    "vertexlauncher-linux-arm64",
+    "vertexlauncher-macos-aarch64",
+    "vertexlauncher-windows-x86_64.exe",
+    "vertexlauncher-linux-x86_64",
+    "vertexlauncher-macos-x86_64"
+)
+$windowsTargets = @(
+    @{ Target = "x86_64-pc-windows-msvc"; Platform = "windows"; Arch = "x86-64"; Extension = ".exe"; Builder = "xwin" },
+    @{ Target = "aarch64-pc-windows-msvc"; Platform = "windows"; Arch = "arm64"; Extension = ".exe"; Builder = "xwin" }
+)
+$linuxTargets = @(
+    @{ Target = "x86_64-unknown-linux-gnu"; Platform = "linux"; Arch = "x86-64"; Extension = ""; Builder = "cargo" },
+    @{ Target = "aarch64-unknown-linux-gnu"; Platform = "linux"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
+)
+$macosTargets = @(
+    @{ Target = "aarch64-apple-darwin"; Platform = "macos"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
+)
 
-Push-Location $repoRoot
-try {
-    Write-Host "Building Windows MSVC release binary..."
-    if ($IsWindows) {
-        & cargo build --release --target $windowsTarget -p $package
-        if ($LASTEXITCODE -ne 0) {
-            throw "cargo build --release --target $windowsTarget -p $package failed with exit code $LASTEXITCODE"
+function Require-CargoSubcommand {
+    param(
+        [Parameter(Mandatory = $true)][string]$Subcommand,
+        [Parameter(Mandatory = $true)][string]$InstallHint
+    )
+
+    & cargo $Subcommand --help *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Missing cargo-$Subcommand. $InstallHint"
+    }
+}
+
+function Get-StagedArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Platform,
+        [Parameter(Mandatory = $true)][string]$Arch,
+        [Parameter(Mandatory = $true)][string]$Extension
+    )
+
+    Join-Path $releaseDir "vertexlauncher-$Platform$Arch$Extension"
+}
+
+function Get-BuiltArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Target,
+        [Parameter(Mandatory = $true)][string]$Extension
+    )
+
+    Join-Path $repoRoot (Join-Path "target/$Target/release" "$package$Extension")
+}
+
+function Clear-StagedArtifacts {
+    foreach ($artifact in $stagedArtifacts) {
+        $artifactPath = Join-Path $releaseDir $artifact
+        if (Test-Path -LiteralPath $artifactPath -PathType Leaf) {
+            Remove-Item -LiteralPath $artifactPath -Force
         }
     }
-    else {
-        & cargo xwin --version *> $null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Missing cargo-xwin. Install it with: cargo install --locked cargo-xwin"
-        }
+}
 
-        $savedEnv = @{}
-        foreach ($varName in $crossEnvVars) {
-            if (Test-Path "Env:$varName") {
-                $savedEnv[$varName] = (Get-Item "Env:$varName").Value
-                Remove-Item "Env:$varName" -ErrorAction SilentlyContinue
-            }
-            else {
-                $savedEnv[$varName] = $null
-            }
-        }
+function Test-HasCrossPkgConfig {
+    if ($env:PKG_CONFIG) {
+        return $true
+    }
 
-        try {
-            & cargo xwin build --release --target $windowsTarget -p $package
-            if ($LASTEXITCODE -ne 0) {
-                throw "cargo xwin build --release --target $windowsTarget -p $package failed with exit code $LASTEXITCODE"
+    if ($env:PKG_CONFIG_ALLOW_CROSS -and ($env:PKG_CONFIG_SYSROOT_DIR -or $env:PKG_CONFIG_PATH -or $env:PKG_CONFIG_LIBDIR)) {
+        return $true
+    }
+
+    return $false
+}
+
+function Test-HasMacOsSdk {
+    return [bool](Resolve-MacOsSdkPath)
+}
+
+function Resolve-MacOsSdkPath {
+    if ($env:SDKROOT -and (Test-Path -LiteralPath $env:SDKROOT -PathType Container)) {
+        return $env:SDKROOT
+    }
+
+    if ($env:DEVELOPER_DIR -and (Test-Path -LiteralPath $env:DEVELOPER_DIR -PathType Container)) {
+        $developerSdk = Join-Path $env:DEVELOPER_DIR "Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
+        if (Test-Path -LiteralPath $developerSdk -PathType Container) {
+            return $developerSdk
+        }
+    }
+
+    $xcrun = Get-Command xcrun -ErrorAction SilentlyContinue
+    if ($xcrun) {
+        $sdkPath = & $xcrun.Source --sdk macosx --show-sdk-path 2>$null
+        if ($LASTEXITCODE -eq 0 -and $sdkPath) {
+            return $sdkPath.Trim()
+        }
+    }
+
+    $sdkCandidates = Get-ChildItem -Path (Join-Path $HOME ".local/share/macos-sdk") -Filter "MacOSX*.sdk" -Directory -ErrorAction SilentlyContinue
+    if ($sdkCandidates) {
+        return $sdkCandidates[0].FullName
+    }
+
+    return $null
+}
+
+function Invoke-BuildCommand {
+    param(
+        [Parameter(Mandatory = $true)]$Spec
+    )
+
+    switch ($Spec.Builder) {
+        "cargo" {
+            & cargo build --release --target $Spec.Target -p $package
+        }
+        "zigbuild" {
+            $savedSdkRoot = $env:SDKROOT
+            if ($Spec.Target -eq "aarch64-apple-darwin") {
+                $sdkRoot = Resolve-MacOsSdkPath
+                if ($sdkRoot) {
+                    $env:SDKROOT = $sdkRoot
+                }
+            }
+
+            try {
+                & cargo zigbuild --release --target $Spec.Target -p $package
+            }
+            finally {
+                if ($null -eq $savedSdkRoot) {
+                    Remove-Item "Env:SDKROOT" -ErrorAction SilentlyContinue
+                }
+                else {
+                    Set-Item "Env:SDKROOT" $savedSdkRoot
+                }
             }
         }
-        finally {
+        "xwin" {
+            $savedEnv = @{}
             foreach ($varName in $crossEnvVars) {
-                if ($null -eq $savedEnv[$varName]) {
+                if (Test-Path "Env:$varName") {
+                    $savedEnv[$varName] = (Get-Item "Env:$varName").Value
                     Remove-Item "Env:$varName" -ErrorAction SilentlyContinue
                 }
                 else {
-                    Set-Item "Env:$varName" $savedEnv[$varName]
+                    $savedEnv[$varName] = $null
+                }
+            }
+
+            try {
+                & cargo xwin build --release --target $Spec.Target --cross-compiler clang -p $package
+            }
+            finally {
+                foreach ($varName in $crossEnvVars) {
+                    if ($null -eq $savedEnv[$varName]) {
+                        Remove-Item "Env:$varName" -ErrorAction SilentlyContinue
+                    }
+                    else {
+                        Set-Item "Env:$varName" $savedEnv[$varName]
+                    }
                 }
             }
         }
+        default {
+            throw "Unsupported builder '$($Spec.Builder)'"
+        }
     }
 
-    Write-Host "Building Linux GNU release binary..."
-    & cargo "+$linuxToolchain" build --release --target $linuxTarget -p $package
     if ($LASTEXITCODE -ne 0) {
-        throw "cargo +$linuxToolchain build --release --target $linuxTarget -p $package failed with exit code $LASTEXITCODE"
+        throw "cargo $($Spec.Builder) build --release --target $($Spec.Target) -p $package failed with exit code $LASTEXITCODE"
+    }
+}
+
+function Build-And-StageArtifact {
+    param(
+        [Parameter(Mandatory = $true)]$Spec
+    )
+
+    Write-Host "Building $($Spec.Platform) $($Spec.Arch) release binary..."
+
+    if ($Spec.Target -eq "aarch64-unknown-linux-gnu" -and -not (Test-HasCrossPkgConfig)) {
+        throw "Linux arm64 requires PKG_CONFIG_ALLOW_CROSS=1 plus either PKG_CONFIG=<wrapper> or PKG_CONFIG_SYSROOT_DIR with PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR."
     }
 
+    if ($Spec.Target -eq "aarch64-apple-darwin" -and -not (Test-HasMacOsSdk)) {
+        throw "macOS arm64 requires an Apple SDK via SDKROOT, DEVELOPER_DIR, xcrun, or ~/.local/share/macos-sdk/MacOSX*.sdk."
+    }
+
+    Invoke-BuildCommand -Spec $Spec
+
+    $builtArtifact = Get-BuiltArtifactPath -Target $Spec.Target -Extension $Spec.Extension
+    $stagedArtifact = Get-StagedArtifactPath -Platform $Spec.Platform -Arch $Spec.Arch -Extension $Spec.Extension
+
+    if (-not (Test-Path -LiteralPath $builtArtifact -PathType Leaf)) {
+        throw "Missing built artifact: $builtArtifact"
+    }
+
+    Copy-Item -LiteralPath $builtArtifact -Destination $stagedArtifact -Force
+    Write-Host "  Staged: $stagedArtifact"
+}
+
+Push-Location $repoRoot
+try {
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+    Clear-StagedArtifacts
 
-    if (-not (Test-Path -LiteralPath $windowsBinary -PathType Leaf)) {
-        throw "Missing Windows release binary: $windowsBinary"
+    Require-CargoSubcommand -Subcommand "xwin" -InstallHint "Install it with: cargo install --locked cargo-xwin"
+    Require-CargoSubcommand -Subcommand "zigbuild" -InstallHint "Install it with: cargo install --locked cargo-zigbuild"
+
+    $failures = @()
+    foreach ($spec in $windowsTargets) {
+        try {
+            Build-And-StageArtifact -Spec $spec
+        }
+        catch {
+            $failures += "$($spec.Platform) $($spec.Arch): $($_.Exception.Message)"
+        }
     }
-
-    if (-not (Test-Path -LiteralPath $linuxBinary -PathType Leaf)) {
-        throw "Missing Linux release binary: $linuxBinary"
+    foreach ($spec in $linuxTargets) {
+        try {
+            Build-And-StageArtifact -Spec $spec
+        }
+        catch {
+            $failures += "$($spec.Platform) $($spec.Arch): $($_.Exception.Message)"
+        }
     }
-
-    Copy-Item -LiteralPath $windowsBinary -Destination $stagedWindowsBinary -Force
-    Copy-Item -LiteralPath $linuxBinary -Destination $stagedLinuxBinary -Force
+    foreach ($spec in $macosTargets) {
+        try {
+            Build-And-StageArtifact -Spec $spec
+        }
+        catch {
+            $failures += "$($spec.Platform) $($spec.Arch): $($_.Exception.Message)"
+        }
+    }
 
     Write-Host ""
     Write-Host "Artifacts ready:"
-    Write-Host "  Windows: $stagedWindowsBinary"
-    Write-Host "  Linux:   $stagedLinuxBinary"
+    foreach ($spec in ($windowsTargets + $linuxTargets + $macosTargets)) {
+        Write-Host "  $(Get-StagedArtifactPath -Platform $spec.Platform -Arch $spec.Arch -Extension $spec.Extension)"
+    }
+
+    if ($failures.Count -gt 0) {
+        Write-Error ("Build matrix incomplete:`n  - " + ($failures -join "`n  - "))
+    }
 }
 finally {
     Pop-Location

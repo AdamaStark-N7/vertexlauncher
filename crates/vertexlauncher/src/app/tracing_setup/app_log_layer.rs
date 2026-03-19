@@ -1,18 +1,13 @@
-use std::{
-    io,
-    sync::{Arc, Mutex},
-};
-
 use tracing_subscriber::layer::{Context as LayerContext, Layer};
 
 use crate::app::tracing_setup::{
-    current_date_time_parts, format_module_path, message_visitor::MessageVisitor,
-    should_omit_module_path,
+    SharedLogWriter, current_date_time_parts, format_module_path, message_visitor::MessageVisitor,
+    should_omit_module_path, write_log_line,
 };
 
 #[derive(Clone)]
 pub(super) struct AppLogLayer {
-    pub(super) writer: Arc<Mutex<Box<dyn io::Write + Send>>>,
+    pub(super) writer: SharedLogWriter,
 }
 
 impl<S> Layer<S> for AppLogLayer
@@ -41,8 +36,6 @@ where
         };
 
         launcher_ui::console::push_line(line.clone());
-        if let Ok(mut writer) = self.writer.lock() {
-            let _ = writeln!(writer, "{line}");
-        }
+        write_log_line(&self.writer, &line);
     }
 }

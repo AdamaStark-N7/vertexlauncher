@@ -67,7 +67,7 @@ fn start_responder(
     let stop_requested = Arc::new(AtomicBool::new(false));
     let worker_stop = Arc::clone(&stop_requested);
     let (completion_tx, completion_rx) = mpsc::channel::<()>();
-    let _ = tokio_runtime::spawn_blocking(move || {
+    let _ = tokio_runtime::spawn_blocking_detached(move || {
         run_responder(socket, worker_stop);
         let _ = completion_tx.send(());
     });

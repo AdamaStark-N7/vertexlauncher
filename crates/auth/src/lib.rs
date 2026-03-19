@@ -74,7 +74,19 @@ pub fn start_device_code_login(client_id: impl Into<String>) -> DeviceCodeLoginF
         return start_device_code_login_with_handle(client_id, &handle);
     }
 
-    start_device_code_login_with_handle(client_id, runtime::auth_runtime_handle())
+    match runtime::auth_runtime_handle() {
+        Ok(handle) => start_device_code_login_with_handle(client_id, handle),
+        Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/auth",
+                error = %err,
+                "device-code login could not start because the auth runtime failed to initialize"
+            );
+            failed_device_code_login_flow(format!(
+                "Failed to start device-code login background runtime: {err}"
+            ))
+        }
+    }
 }
 
 /// Starts device-code login flow using the provided Tokio runtime handle.
@@ -96,6 +108,15 @@ pub fn start_device_code_login_with_handle(
         }
     });
 
+    DeviceCodeLoginFlow {
+        receiver,
+        finished: false,
+    }
+}
+
+fn failed_device_code_login_flow(message: String) -> DeviceCodeLoginFlow {
+    let (sender, receiver) = mpsc::channel();
+    let _ = sender.send(LoginEvent::Failed(message));
     DeviceCodeLoginFlow {
         receiver,
         finished: false,

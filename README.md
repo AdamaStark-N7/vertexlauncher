@@ -1,23 +1,30 @@
-[![Discord](https://img.shields.io/discord/1480105103414530190?label=Discord%20Members&logo=discord)](https://discord.gg/EJGUFeuGrN)
 # Vertex Launcher
 
 Native Minecraft launcher written in Rust.
 
-Vertex Launcher is a multi-crate workspace that provides a desktop launcher, a quick-launch CLI, account handling, instance management, runtime/bootstrap logic, and in-app content discovery for the current Minecraft mod ecosystem.
+Vertex Launcher is a multi-crate desktop launcher with:
 
-## Installation
-On the right side of our GitHub page, we provide release builds for download. Each release includes a `.sig` file signed by one of our maintainers so you can verify the build's authenticity; if you are not familiar with PGP signature verification, we recommend looking up how to verify a PGP signature with Kleopatra.
+- native desktop UI built on `eframe`/`egui`
+- Microsoft and Minecraft account sign-in
+- multi-instance management
+- runtime/bootstrap setup for Minecraft and Java
+- in-app Modrinth and CurseForge browsing
+- quick-launch CLI flows for packs, worlds, and servers
 
-if you choose to build from source, you will need to have a couple of things installed:
-- Rust toolchain (stable)
-    - **[NOTE]**: This requires a C/C++ linker to be installed. You can get this from the Visual Studio Community installer by checking `Build Desktop Applications in C++` and installing Visual Studio.
-    - **Windows builds must use the MSVC target** (for example `x86_64-pc-windows-msvc`). `windows-gnu` builds are not supported for release artifacts.
-- Cargo (Rust package manager)
-- Git (for cloning the repository)
+## Building
 
-## Linux Build Prerequisites
+If you build from source, install:
 
-On Linux, you need native development libraries for `gtk`, `glib`, and `webkit` before `cargo build` will succeed. we use these to handle logins without being able to read your username or password, all we see is a refresh token and a active session token when we log in.
+- Rust toolchain
+- Cargo
+- Git
+- a working C/C++ toolchain
+
+Windows release artifacts must use the MSVC targets. `windows-gnu` is not part of the supported release matrix.
+
+## Native Linux Prerequisites
+
+On Linux, native launcher builds require GTK, GLib, Soup, and WebKit development packages.
 
 For Debian/Ubuntu:
 
@@ -36,57 +43,95 @@ sudo apt-get install -y --no-install-recommends \
   libjavascriptcoregtk-4.1-dev
 ```
 
-If your distro ships `4.0` instead of `4.1`, use:
+If your distro only ships the `4.0` WebKit packages, use:
 
 - `libwebkit2gtk-4.0-dev`
 - `libjavascriptcoregtk-4.0-dev`
 
-once you have everything installed, clone the repository, open a shell inside the root of the repo, and trigger a build with:
+Basic native builds:
 
-Linux/macOS:
 ```sh
 cargo build --release
 ```
 
-Windows (MSVC):
+Windows MSVC example:
+
 ```sh
 cargo build --release --target x86_64-pc-windows-msvc
 ```
 
-this should produce a release build of the application which should appear in the `target/release` directory. this binary is compiled to bundle everything it needs within itself, so you can move it around wherever you like and it should work without any issues.
+## Release Matrix
 
-On Wayland, the desktop app ID is `vertexlauncher`, this will allow you to set an icon and other desktop integration features, a copy of the svg icon we use is included in the repository to help. 
+The current supported release artifact matrix is:
 
+- Windows x86-64: `x86_64-pc-windows-msvc`
+- Windows ARM64: `aarch64-pc-windows-msvc`
+- Linux x86-64: `x86_64-unknown-linux-gnu`
+- Linux ARM64: `aarch64-unknown-linux-gnu`
+- macOS ARM64: `aarch64-apple-darwin`
 
-## Current Capabilities
+Installed Rust targets intentionally not used for release artifacts:
 
-- Native desktop application built with `eframe/egui` and `wgpu`
-- Multi-instance library with create, import, delete, launch, and usage tracking flows
-- Microsoft account sign-in, cached account management, token refresh, and multi-account switching
-- Native quick-launch CLI for packs, worlds, and servers without opening the GUI
-- Minecraft runtime/bootstrap setup, OpenJDK provisioning, asset/version resolution, and modloader install flows
-- Modrinth and CurseForge content browsing inside the app
-- Content-type filtering for mods, resource packs, shaders, and data packs
-- In-app content detail/version browsing and per-instance content installation
-- Home screen activity feed with world/server discovery, favorites, and server reachability checks
-- Console/log surfaces, notifications, settings, skins, legal/privacy views, and theme/font customization
-- Download throttling and frame limiter controls for lower-power systems
+- `x86_64-pc-windows-gnu`
+- `armv7-unknown-linux-gnueabihf`
+- `x86_64-apple-darwin`
+
+To build the staged release artifacts:
+
+Linux/macOS:
+
+```sh
+fish scripts/build-release-artifacts.fish
+```
+
+Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1
+```
+
+Staged artifacts are written to `target/release` as:
+
+- `vertexlauncher-windowsx86-64.exe`
+- `vertexlauncher-windowsarm64.exe`
+- `vertexlauncher-linuxx86-64`
+- `vertexlauncher-linuxarm64`
+- `vertexlauncher-macosarm64`
+
+## Cross-Build Notes
+
+- Windows cross-builds use `cargo xwin` with the `clang` backend and scrub host-specific compiler flags.
+- Linux ARM64 release builds use a cross sysroot path. The current helper script can assemble that sysroot for release builds.
+- macOS ARM64 release builds require a usable Apple SDK. The scripts detect `SDKROOT`, `DEVELOPER_DIR`, `xcrun`, and `~/.local/share/macos-sdk/MacOSX*.sdk`.
+
+## What The Launcher Can Do
+
+- Create, import, edit, delete, and launch Minecraft instances
+- Track favorites and usage metadata per instance
+- Sign in with Microsoft accounts and switch between cached accounts
+- Auto-provision compatible OpenJDK runtimes when needed
+- Resolve and install Minecraft assets, libraries, and version metadata
+- Install and update Fabric, Forge, NeoForge, and Quilt content
+- Browse Modrinth and CurseForge content inside the launcher
+- Filter and install mods, resource packs, shaders, and data packs per instance
+- Support direct quick-launch into packs, worlds, and servers from the CLI
+- Show notifications, logs, settings, skins, legal/privacy views, and themed UI configuration
 
 ## Workspace Layout
 
-- `crates/vertexlauncher`: desktop app entrypoint, app orchestration, CLI dispatch
+- `crates/vertexlauncher`: desktop app entrypoint, app shell, CLI dispatch
 - `crates/launcher_ui`: screens, widgets, notifications, desktop UI helpers
-- `crates/installation`: game file resolution, modloader/runtime setup, launch orchestration
-- `crates/auth`: Microsoft/Minecraft auth, account cache, secret store integration
-- `crates/instances`: persisted instance records and usage/favorite metadata
-- `crates/modprovider`, `crates/modrinth`, `crates/curseforge`: content discovery providers
-- `crates/config`: persisted launcher configuration and config format handling
-- `crates/runtime_bootstrap`, `crates/launcher_runtime`: runtime creation and async task execution
-- `crates/textui`, `crates/fontloader`: text/layout/font support used by the UI
+- `crates/installation`: Minecraft setup, dependency resolution, Java/runtime provisioning, launch orchestration
+- `crates/auth`: Microsoft/Minecraft auth and account state
+- `crates/instances`: persisted instance records and related metadata
+- `crates/config`: launcher configuration and serialization
+- `crates/modprovider`, `crates/modrinth`, `crates/curseforge`: content provider integration
+- `crates/runtime_bootstrap`, `crates/launcher_runtime`: async runtime creation and task execution
+- `crates/textui`, `crates/fontloader`: text, layout, and font support
 
-## Command Line
+## CLI
 
-These commands run without opening the desktop UI.
+Quick-launch commands run without opening the full desktop UI.
 
 Launch an instance:
 
@@ -112,41 +157,14 @@ Show quick-launch help:
 vertexlauncher --quick-launch-help
 ```
 
-List available quick-launch targets for one instance:
+List quick-launch targets for an instance:
 
 ```sh
 vertexlauncher --list-quick-launch-targets --instance <instance-id-or-name>
 ```
 
-Build an argument string for scripts or external launchers:
+Build launch arguments for scripts or external launchers:
 
 ```sh
 vertexlauncher --build-quick-launch-args --mode <pack|world|server> --instance <instance-id-or-name> --user <profile-id-or-username> [--world <world-folder-name>] [--server <server-name-or-address>]
 ```
-
-## Project Direction
-
-The project is aimed at a practical native launcher with enough control for power users without turning into a browser shell or a piracy tool.
-
-- Uses valid Minecraft account data and launch credentials
-- Prefers native Rust codepaths over heavyweight web stacks
-- Keeps launcher concerns separated into reusable crates
-- Targets desktop environments where Minecraft itself can run
-
-# What we will never do
-
-Our goal is to provide a high-quality, secure, and reliable launcher for Minecraft. We will never:
-
-- assist in the distribution or sale of cracked or pirated Minecraft content
-- tell people how or where to obtain cracked or pirated Minecraft content
-- attempt to steal credentials or data from Minecraft accounts
-- ban people from using this launcher due to:
-  - their beliefs
-  - their speech so long as it is lawful in the United States
-  - who they voted for
-  - who they affiliate with
-- try to allow people to continue using this launcher after they have been banned from Minecraft
-- collect data for resale
-
-We care about community trust, and above that as well, I as the owner of this project hate pirates, that is all anyone needs to know.
-Free speech is a core value of this project, and we will never censor or ban people for their opinions. Mojang is ultimately the arbiter of whom gets banned and why, it is not our place to either help nor hinder with their decisions.

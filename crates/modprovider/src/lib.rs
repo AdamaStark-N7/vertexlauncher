@@ -59,6 +59,8 @@ struct ProviderSearchResult {
 pub enum UnifiedSearchError {
     #[error("search query cannot be empty")]
     EmptyQuery,
+    #[error("{provider} search task failed unexpectedly")]
+    WorkerPanicked { provider: &'static str },
 }
 
 /// Searches Minecraft content across supported providers.
@@ -67,8 +69,10 @@ pub enum UnifiedSearchError {
 /// - `query`: non-empty once trimmed.
 /// - `per_provider_limit`: clamped to `1..=50`.
 ///
-/// The function always attempts both providers. Provider-specific failures are
-/// surfaced in `UnifiedSearchResult::warnings` while keeping partial results.
+/// The function always attempts both providers. Provider-specific API failures
+/// are surfaced in `UnifiedSearchResult::warnings` while keeping partial
+/// results. Internal worker failures abort the unified search with
+/// [`UnifiedSearchError::WorkerPanicked`].
 pub fn search_minecraft_content(
     query: &str,
     per_provider_limit: u32,
@@ -99,10 +103,10 @@ pub fn search_minecraft_content(
         let curseforge_task =
             scope.spawn(move || search_curseforge(curseforge_query.as_str(), limit));
 
-        let modrinth_result = join_provider_result("Modrinth", modrinth_task.join());
-        let curseforge_result = join_provider_result("CurseForge", curseforge_task.join());
-        (modrinth_result, curseforge_result)
-    });
+        let modrinth_result = join_provider_result("Modrinth", modrinth_task.join())?;
+        let curseforge_result = join_provider_result("CurseForge", curseforge_task.join())?;
+        Ok::<_, UnifiedSearchError>((modrinth_result, curseforge_result))
+    })?;
 
     let mut result = UnifiedSearchResult::default();
     merge_provider_result(&mut result, modrinth_result);
@@ -338,16 +342,13 @@ fn merge_provider_result(result: &mut UnifiedSearchResult, provider_result: Prov
 fn join_provider_result(
     provider: &'static str,
     join_result: std::thread::Result<ProviderSearchResult>,
-) -> ProviderSearchResult {
-    join_result.unwrap_or_else(|_| {
+) -> Result<ProviderSearchResult, UnifiedSearchError> {
+    join_result.map_err(|_| {
         warn!(
             target: "vertexlauncher/modprovider",
             provider,
             "provider search task panicked"
         );
-        ProviderSearchResult {
-            warnings: vec![format!("{provider} search task panicked.")],
-            ..ProviderSearchResult::default()
-        }
+        UnifiedSearchError::WorkerPanicked { provider }
     })
 }

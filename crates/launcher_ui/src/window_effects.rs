@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
+
 use eframe::CreationContext;
 
 /// Returns whether the current target should opt into native blur effects.
@@ -22,6 +24,10 @@ pub fn apply(cc: &CreationContext<'_>, blur_enabled: bool) -> Result<(), String>
         return Ok(());
     }
 
+    apply_impl(cc)
+}
+
+fn apply_impl(cc: &CreationContext<'_>) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     return windows::apply(cc);
     #[cfg(target_os = "linux")]
