@@ -8,19 +8,24 @@ $releaseDir = Join-Path $repoRoot "target/release"
 $flatpakAppId = "io.github.SturdyFool10.VertexLauncher"
 $flatpakBranch = if ($env:VERTEX_RELEASE_FLATPAK_BRANCH) { $env:VERTEX_RELEASE_FLATPAK_BRANCH } elseif ($env:VERTEX_FLATPAK_BRANCH) { $env:VERTEX_FLATPAK_BRANCH } else { "stable" }
 $flatpakArtifactArches = @()
+$appImageArtifactArches = @()
 $crossEnvVars = @("CFLAGS", "CXXFLAGS", "LDFLAGS", "CC", "CXX", "AR", "RANLIB", "RUSTFLAGS", "CARGO_BUILD_RUSTFLAGS")
 $stagedArtifacts = @(
     "vertexlauncher-windowsx86-64.exe",
     "vertexlauncher-windowsarm64.exe",
     "vertexlauncher-linuxx86-64",
     "vertexlauncher-linuxarm64",
+    "vertexlauncher-linuxx86-64.AppImage",
+    "vertexlauncher-linuxarm64.AppImage",
     "vertexlauncher-macosarm64",
     "vertexlauncher-windows-x86-64.exe",
     "vertexlauncher-windows-arm64.exe",
     "vertexlauncher-linux-arm64",
+    "vertexlauncher-linux-arm64.AppImage",
     "vertexlauncher-macos-aarch64",
     "vertexlauncher-windows-x86_64.exe",
     "vertexlauncher-linux-x86_64",
+    "vertexlauncher-linux-x86_64.AppImage",
     "vertexlauncher-macos-x86_64",
     "$flatpakAppId-x86_64.flatpak",
     "$flatpakAppId-aarch64.flatpak"
@@ -31,7 +36,7 @@ $windowsTargets = @(
 )
 $linuxTargets = @(
     @{ Target = "x86_64-unknown-linux-gnu"; Platform = "linux"; Arch = "x86-64"; Extension = ""; Builder = "linux-container" },
-    @{ Target = "aarch64-unknown-linux-gnu"; Platform = "linux"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
+    @{ Target = "aarch64-unknown-linux-gnu"; Platform = "linux"; Arch = "arm64"; Extension = ""; Builder = "linux-arm64-container" }
 )
 $macosTargets = @(
     @{ Target = "aarch64-apple-darwin"; Platform = "macos"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
@@ -74,6 +79,40 @@ function Get-FlatpakArtifactPath {
     )
 
     Join-Path $releaseDir "$flatpakAppId-$Arch.flatpak"
+}
+
+function Get-AppImageArtifactPath {
+    param(
+        [Parameter(Mandatory = $true)][string]$Arch
+    )
+
+    Join-Path $releaseDir "vertexlauncher-linux$Arch.AppImage"
+}
+
+function Normalize-PackagingArch {
+    param(
+        [Parameter(Mandatory = $true)][string]$Arch
+    )
+
+    $trimmed = $Arch.Trim()
+    switch ($trimmed) {
+        { $_ -in @("x86_64", "amd64", "x86-64") } { return "x86_64" }
+        { $_ -in @("aarch64", "arm64") } { return "aarch64" }
+        default { throw "Unsupported Linux architecture '$Arch'." }
+    }
+}
+
+function Get-DefaultReleaseLinuxArches {
+    if (-not $IsLinux) {
+        return @()
+    }
+
+    $machine = (& uname -m).Trim()
+    switch ($machine) {
+        { $_ -in @("x86_64", "amd64") } { return @("x86_64", "aarch64") }
+        { $_ -in @("aarch64", "arm64") } { return @("aarch64") }
+        default { return @() }
+    }
 }
 
 function Clear-StagedArtifacts {
@@ -156,6 +195,24 @@ function Invoke-BuildCommand {
 
             & $bash.Source $helperScript
         }
+        "linux-arm64-container" {
+            $helperScript = Join-Path $repoRoot "scripts/build-linux-arm64-container.sh"
+            if (-not (Test-Path -LiteralPath $helperScript -PathType Leaf)) {
+                throw "Missing Linux arm64 container helper: $helperScript"
+            }
+
+            $bash = Get-Command bash -ErrorAction SilentlyContinue
+            if (-not $bash) {
+                throw "Linux arm64 containerized release builds require bash on PATH."
+            }
+
+            $podman = Get-Command podman -ErrorAction SilentlyContinue
+            if (-not $podman) {
+                throw "Linux arm64 containerized release builds require podman on PATH."
+            }
+
+            & $bash.Source $helperScript
+        }
         "zigbuild" {
             $savedSdkRoot = $env:SDKROOT
             if ($Spec.Target -eq "aarch64-apple-darwin") {
@@ -220,7 +277,7 @@ function Build-And-StageArtifact {
 
     Write-Host "Building $($Spec.Platform) $($Spec.Arch) release binary..."
 
-    if ($Spec.Target -eq "aarch64-unknown-linux-gnu" -and -not (Test-HasCrossPkgConfig)) {
+    if ($Spec.Target -eq "aarch64-unknown-linux-gnu" -and $Spec.Builder -eq "zigbuild" -and -not (Test-HasCrossPkgConfig)) {
         throw "Linux arm64 requires PKG_CONFIG_ALLOW_CROSS=1 plus either PKG_CONFIG=<wrapper> or PKG_CONFIG_SYSROOT_DIR with PKG_CONFIG_PATH/PKG_CONFIG_LIBDIR."
     }
 
@@ -256,28 +313,49 @@ function Build-FlatpakArtifacts {
         throw "Flatpak builds require flatpak on PATH."
     }
 
-    if (-not (Get-Command flatpak-builder -ErrorAction SilentlyContinue)) {
-        throw "Flatpak builds require flatpak-builder on PATH."
-    }
-
-    $requestedArches = if ($env:VERTEX_RELEASE_FLATPAK_ARCHES) {
+    $rawRequestedArches = if ($env:VERTEX_RELEASE_FLATPAK_ARCHES) {
         $env:VERTEX_RELEASE_FLATPAK_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
     }
     elseif ($env:VERTEX_FLATPAK_ARCHES) {
         $env:VERTEX_FLATPAK_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
     }
     else {
-        @((& flatpak --default-arch).Trim())
+        $defaults = Get-DefaultReleaseLinuxArches
+        if ($defaults.Count -gt 0) {
+            $defaults
+        }
+        else {
+            @((& flatpak --default-arch).Trim())
+        }
     }
 
-    $requestedArchList = ($requestedArches | ForEach-Object { $_.Trim() } | Where-Object { $_ }) -join ","
+    $requestedArches = @()
+    foreach ($arch in $rawRequestedArches) {
+        if (-not $arch) {
+            continue
+        }
+
+        $normalizedArch = Normalize-PackagingArch -Arch $arch
+        if ($requestedArches -notcontains $normalizedArch) {
+            $requestedArches += $normalizedArch
+        }
+    }
+
+    $requestedArchList = $requestedArches -join ","
     $savedFlatpakBranch = $env:VERTEX_FLATPAK_BRANCH
     $savedFlatpakArches = $env:VERTEX_FLATPAK_ARCHES
+    $savedFlatpakEmulation = $env:VERTEX_ENABLE_ARM64_EMULATION
     Write-Host "Building Flatpak release bundle..."
 
     try {
         $env:VERTEX_FLATPAK_BRANCH = $flatpakBranch
         $env:VERTEX_FLATPAK_ARCHES = $requestedArchList
+        if ($requestedArches -contains "aarch64") {
+            $env:VERTEX_ENABLE_ARM64_EMULATION = "1"
+        }
+        else {
+            Remove-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" -ErrorAction SilentlyContinue
+        }
         & $bash.Source $helperScript
         if ($LASTEXITCODE -ne 0) {
             throw "Flatpak helper failed with exit code $LASTEXITCODE"
@@ -297,6 +375,13 @@ function Build-FlatpakArtifacts {
         else {
             Set-Item "Env:VERTEX_FLATPAK_ARCHES" $savedFlatpakArches
         }
+
+        if ($null -eq $savedFlatpakEmulation) {
+            Remove-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" -ErrorAction SilentlyContinue
+        }
+        else {
+            Set-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" $savedFlatpakEmulation
+        }
     }
 
     $script:flatpakArtifactArches = @()
@@ -312,6 +397,147 @@ function Build-FlatpakArtifacts {
         }
 
         $script:flatpakArtifactArches += $normalizedArch
+        Write-Host "  Staged: $artifactPath"
+    }
+}
+
+function Get-CurrentLinuxAppImageArch {
+    if (-not $IsLinux) {
+        return $null
+    }
+
+    $machine = (& uname -m).Trim()
+    switch ($machine) {
+        { $_ -in @("x86_64", "amd64") } { return "x86_64" }
+        { $_ -in @("aarch64", "arm64") } { return "aarch64" }
+        default { return $null }
+    }
+}
+
+function Build-AppImageArtifacts {
+    if (-not $IsLinux) {
+        throw "AppImage builds require a native Linux host."
+    }
+
+    $helperScript = Join-Path $repoRoot "scripts/build-appimage.sh"
+    if (-not (Test-Path -LiteralPath $helperScript -PathType Leaf)) {
+        throw "Missing AppImage helper: $helperScript"
+    }
+
+    $bash = Get-Command bash -ErrorAction SilentlyContinue
+    if (-not $bash) {
+        throw "AppImage builds require bash on PATH."
+    }
+
+    $rawRequestedArches = if ($env:VERTEX_RELEASE_APPIMAGE_ARCHES) {
+        $env:VERTEX_RELEASE_APPIMAGE_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
+    }
+    elseif ($env:VERTEX_APPIMAGE_ARCHES) {
+        $env:VERTEX_APPIMAGE_ARCHES.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
+    }
+    elseif ($env:VERTEX_RELEASE_APPIMAGE_ARCH) {
+        @($env:VERTEX_RELEASE_APPIMAGE_ARCH.Trim())
+    }
+    elseif ($env:VERTEX_APPIMAGE_ARCH) {
+        @($env:VERTEX_APPIMAGE_ARCH.Trim())
+    }
+    else {
+        $defaults = Get-DefaultReleaseLinuxArches
+        if ($defaults.Count -gt 0) {
+            $defaults
+        }
+        else {
+            @((Get-CurrentLinuxAppImageArch))
+        }
+    }
+
+    $requestedArches = @()
+    foreach ($arch in $rawRequestedArches) {
+        if (-not $arch) {
+            continue
+        }
+
+        $normalizedArch = Normalize-PackagingArch -Arch $arch
+        if ($requestedArches -notcontains $normalizedArch) {
+            $requestedArches += $normalizedArch
+        }
+    }
+
+    if ($requestedArches.Count -eq 0) {
+        throw "Unsupported AppImage host architecture."
+    }
+
+    $script:appImageArtifactArches = @()
+    foreach ($requestedArch in $requestedArches) {
+        switch ($requestedArch) {
+            "x86_64" {
+                $target = "x86_64-unknown-linux-gnu"
+                $stagedArch = "x86-64"
+            }
+            "aarch64" {
+                $target = "aarch64-unknown-linux-gnu"
+                $stagedArch = "arm64"
+            }
+        }
+
+        $savedAppImageArch = $env:VERTEX_APPIMAGE_ARCH
+        $savedAppImageTarget = $env:VERTEX_APPIMAGE_TARGET
+        $savedAppImageSource = $env:VERTEX_APPIMAGE_SOURCE
+        $savedAppImageEmulation = $env:VERTEX_ENABLE_ARM64_EMULATION
+        Write-Host "Building AppImage release bundle for $stagedArch..."
+
+        try {
+            $env:VERTEX_APPIMAGE_ARCH = $requestedArch
+            $env:VERTEX_APPIMAGE_TARGET = $target
+            $env:VERTEX_APPIMAGE_SOURCE = (Join-Path $repoRoot "target/$target/release/$package")
+            if ($requestedArch -eq "aarch64") {
+                $env:VERTEX_ENABLE_ARM64_EMULATION = "1"
+            }
+            else {
+                Remove-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" -ErrorAction SilentlyContinue
+            }
+
+            & $bash.Source $helperScript
+            if ($LASTEXITCODE -ne 0) {
+                throw "AppImage helper failed with exit code $LASTEXITCODE"
+            }
+        }
+        finally {
+            if ($null -eq $savedAppImageArch) {
+                Remove-Item "Env:VERTEX_APPIMAGE_ARCH" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:VERTEX_APPIMAGE_ARCH" $savedAppImageArch
+            }
+
+            if ($null -eq $savedAppImageTarget) {
+                Remove-Item "Env:VERTEX_APPIMAGE_TARGET" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:VERTEX_APPIMAGE_TARGET" $savedAppImageTarget
+            }
+
+            if ($null -eq $savedAppImageSource) {
+                Remove-Item "Env:VERTEX_APPIMAGE_SOURCE" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:VERTEX_APPIMAGE_SOURCE" $savedAppImageSource
+            }
+
+            if ($null -eq $savedAppImageEmulation) {
+                Remove-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" -ErrorAction SilentlyContinue
+            }
+            else {
+                Set-Item "Env:VERTEX_ENABLE_ARM64_EMULATION" $savedAppImageEmulation
+            }
+        }
+
+        $artifactPath = Get-AppImageArtifactPath -Arch $stagedArch
+        if (-not (Test-Path -LiteralPath $artifactPath -PathType Leaf)) {
+            throw "Missing built AppImage artifact: $artifactPath"
+        }
+
+        $script:appImageArtifactArches += $stagedArch
         Write-Host "  Staged: $artifactPath"
     }
 }
@@ -357,6 +583,13 @@ try {
         $failures += "flatpak: $($_.Exception.Message)"
     }
 
+    try {
+        Build-AppImageArtifacts
+    }
+    catch {
+        $failures += "appimage: $($_.Exception.Message)"
+    }
+
     Write-Host ""
     Write-Host "Artifacts ready:"
     foreach ($spec in ($windowsTargets + $linuxTargets + $macosTargets)) {
@@ -364,6 +597,9 @@ try {
     }
     foreach ($arch in $flatpakArtifactArches) {
         Write-Host "  $(Get-FlatpakArtifactPath -Arch $arch)"
+    }
+    foreach ($arch in $appImageArtifactArches) {
+        Write-Host "  $(Get-AppImageArtifactPath -Arch $arch)"
     }
 
     if ($failures.Count -gt 0) {

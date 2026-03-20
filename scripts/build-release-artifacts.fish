@@ -11,19 +11,24 @@ set -g macos_targets aarch64-apple-darwin
 set -g flatpak_app_id io.github.SturdyFool10.VertexLauncher
 set -g flatpak_branch stable
 set -g flatpak_artifact_arches
+set -g appimage_artifact_arches
 set -g build_failures
 set -g staged_artifacts \
     vertexlauncher-windowsx86-64.exe \
     vertexlauncher-windowsarm64.exe \
     vertexlauncher-linuxx86-64 \
     vertexlauncher-linuxarm64 \
+    vertexlauncher-linuxx86-64.AppImage \
+    vertexlauncher-linuxarm64.AppImage \
     vertexlauncher-macosarm64 \
     vertexlauncher-windows-x86-64.exe \
     vertexlauncher-windows-arm64.exe \
     vertexlauncher-linux-arm64 \
+    vertexlauncher-linux-arm64.AppImage \
     vertexlauncher-macos-aarch64 \
     vertexlauncher-windows-x86_64.exe \
     vertexlauncher-linux-x86_64 \
+    vertexlauncher-linux-x86_64.AppImage \
     vertexlauncher-macos-x86_64 \
     $flatpak_app_id-x86_64.flatpak \
     $flatpak_app_id-aarch64.flatpak
@@ -42,6 +47,38 @@ function artifact_name
     set -l arch $argv[2]
     set -l ext $argv[3]
     printf "%s/vertexlauncher-%s%s%s\n" $release_dir $platform $arch $ext
+end
+
+function normalize_packaging_arch
+    set -l requested_arch $argv[1]
+    switch $requested_arch
+        case x86_64 amd64 x86-64
+            echo x86_64
+            return 0
+        case aarch64 arm64
+            echo aarch64
+            return 0
+    end
+
+    return 1
+end
+
+function default_release_linux_arches
+    if test (uname -s) != Linux
+        return 1
+    end
+
+    switch (uname -m)
+        case x86_64 amd64
+            echo x86_64
+            echo aarch64
+            return 0
+        case aarch64 arm64
+            echo aarch64
+            return 0
+    end
+
+    return 1
 end
 
 function copy_artifact
@@ -146,6 +183,7 @@ function build_linux_target
             or return $status
 
             copy_artifact $source_path $staged_path
+            or return $status
             echo "  Staged: $staged_path"
             return 0
         end
@@ -162,6 +200,7 @@ function build_linux_target
             or return $status
 
             copy_artifact $source_path $staged_path
+            or return $status
             echo "  Staged: $staged_path"
             return 0
         end
@@ -208,6 +247,11 @@ function flatpak_artifact_name
     printf "%s/%s-%s.flatpak\n" $release_dir $flatpak_app_id $arch
 end
 
+function appimage_artifact_name
+    set -l arch $argv[1]
+    printf "%s/vertexlauncher-linux%s.AppImage\n" $release_dir $arch
+end
+
 function build_flatpak_artifacts
     set -l helper $repo_root/scripts/build-flatpak.sh
 
@@ -226,23 +270,44 @@ function build_flatpak_artifacts
         return 2
     end
 
-    if not command -sq flatpak-builder
-        echo "Skipping Flatpak: flatpak-builder is required." >&2
-        return 2
+    set -l raw_requested_arches
+    if set -q VERTEX_RELEASE_FLATPAK_ARCHES
+        set raw_requested_arches (string split , -- $VERTEX_RELEASE_FLATPAK_ARCHES)
+    else if set -q VERTEX_FLATPAK_ARCHES
+        set raw_requested_arches (string split , -- $VERTEX_FLATPAK_ARCHES)
+    else
+        set raw_requested_arches (default_release_linux_arches)
+        if test $status -ne 0 -o (count $raw_requested_arches) -eq 0
+            set raw_requested_arches (flatpak --default-arch)
+        end
     end
 
     set -l requested_arches
-    if set -q VERTEX_RELEASE_FLATPAK_ARCHES
-        set requested_arches (string split , -- $VERTEX_RELEASE_FLATPAK_ARCHES)
-    else if set -q VERTEX_FLATPAK_ARCHES
-        set requested_arches (string split , -- $VERTEX_FLATPAK_ARCHES)
-    else
-        set requested_arches (flatpak --default-arch)
+    for arch in $raw_requested_arches
+        if test -z "$arch"
+            continue
+        end
+
+        set -l normalized_arch (normalize_packaging_arch $arch)
+        if test $status -ne 0
+            echo "Skipping Flatpak: unsupported architecture $arch." >&2
+            return 2
+        end
+
+        if not contains -- $normalized_arch $requested_arches
+            set -a requested_arches $normalized_arch
+        end
     end
 
     echo "Building Flatpak release bundle..."
-    env VERTEX_FLATPAK_BRANCH=$flatpak_branch VERTEX_FLATPAK_ARCHES=(string join , $requested_arches) \
-        bash $helper
+    set -l build_env \
+        VERTEX_FLATPAK_BRANCH=$flatpak_branch \
+        VERTEX_FLATPAK_ARCHES=(string join , $requested_arches)
+    if contains -- aarch64 $requested_arches
+        set -a build_env VERTEX_ENABLE_ARM64_EMULATION=1
+    end
+
+    env $build_env bash $helper
     or return $status
 
     set -g flatpak_artifact_arches
@@ -258,6 +323,110 @@ function build_flatpak_artifacts
         end
 
         set -ga flatpak_artifact_arches $arch
+        echo "  Staged: $artifact_path"
+    end
+end
+
+function current_linux_appimage_arch
+    set -l kernel_name (uname -s)
+    if test "$kernel_name" != Linux
+        return 1
+    end
+
+    switch (uname -m)
+        case x86_64 amd64
+            echo x86_64
+            return 0
+        case aarch64 arm64
+            echo aarch64
+            return 0
+    end
+
+    return 1
+end
+
+function build_appimage_artifacts
+    set -l helper $repo_root/scripts/build-appimage.sh
+
+    if not test -x $helper
+        echo "Skipping AppImage: missing helper script $helper" >&2
+        return 2
+    end
+
+    if not command -sq bash
+        echo "Skipping AppImage: bash is required." >&2
+        return 2
+    end
+
+    set -l raw_requested_arches
+    if set -q VERTEX_RELEASE_APPIMAGE_ARCHES
+        set raw_requested_arches (string split , -- $VERTEX_RELEASE_APPIMAGE_ARCHES)
+    else if set -q VERTEX_APPIMAGE_ARCHES
+        set raw_requested_arches (string split , -- $VERTEX_APPIMAGE_ARCHES)
+    else if set -q VERTEX_RELEASE_APPIMAGE_ARCH
+        set raw_requested_arches $VERTEX_RELEASE_APPIMAGE_ARCH
+    else if set -q VERTEX_APPIMAGE_ARCH
+        set raw_requested_arches $VERTEX_APPIMAGE_ARCH
+    else
+        set raw_requested_arches (default_release_linux_arches)
+        if test $status -ne 0 -o (count $raw_requested_arches) -eq 0
+            set raw_requested_arches (current_linux_appimage_arch)
+        end
+    end
+
+    if test (count $raw_requested_arches) -eq 0
+        echo "Skipping AppImage: only native Linux hosts are supported." >&2
+        return 2
+    end
+
+    set -g appimage_artifact_arches
+    set -l requested_arches
+    for arch in $raw_requested_arches
+        if test -z "$arch"
+            continue
+        end
+
+        set -l requested_arch (normalize_packaging_arch $arch)
+        if test $status -ne 0
+            echo "Skipping AppImage: unsupported architecture $arch." >&2
+            return 2
+        end
+
+        if contains -- $requested_arch $requested_arches
+            continue
+        end
+        set -a requested_arches $requested_arch
+
+        set -l target
+        set -l staged_arch
+        switch $requested_arch
+            case x86_64
+                set target x86_64-unknown-linux-gnu
+                set staged_arch x86-64
+            case aarch64
+                set target aarch64-unknown-linux-gnu
+                set staged_arch arm64
+        end
+
+        echo "Building AppImage release bundle for $staged_arch..."
+        set -l build_env \
+            VERTEX_APPIMAGE_ARCH=$requested_arch \
+            VERTEX_APPIMAGE_TARGET=$target \
+            VERTEX_APPIMAGE_SOURCE=$repo_root/target/$target/release/$package
+        if test "$requested_arch" = aarch64
+            set -a build_env VERTEX_ENABLE_ARM64_EMULATION=1
+        end
+
+        env $build_env bash $helper
+        or return $status
+
+        set -l artifact_path (appimage_artifact_name $staged_arch)
+        if not test -f $artifact_path
+            echo "Missing built AppImage artifact: $artifact_path" >&2
+            return 1
+        end
+
+        set -ga appimage_artifact_arches $staged_arch
         echo "  Staged: $artifact_path"
     end
 end
@@ -312,6 +481,9 @@ end
 build_flatpak_artifacts
 or note_failure "Flatpak build failed."
 
+build_appimage_artifacts
+or note_failure "AppImage build failed."
+
 echo ""
 echo "Artifacts ready:"
 echo "  "(artifact_name windows x86-64 .exe)
@@ -321,6 +493,9 @@ echo "  "(artifact_name linux arm64 "")
 echo "  "(artifact_name macos arm64 "")
 for arch in $flatpak_artifact_arches
     echo "  "(flatpak_artifact_name $arch)
+end
+for arch in $appimage_artifact_arches
+    echo "  "(appimage_artifact_name $arch)
 end
 
 if test (count $build_failures) -gt 0

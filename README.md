@@ -115,18 +115,54 @@ This script will:
 - export an arch-specific local Flatpak repo under `flatpak/repo/<arch>`
 - emit distributable bundles under `target/release/io.github.SturdyFool10.VertexLauncher-<arch>.flatpak`
 
-By default the script builds the current Flatpak host architecture. Override `VERTEX_FLATPAK_ARCHES` with a comma-separated list such as `x86_64,aarch64` to request specific arches. Flatpak only allows builds for host-compatible arches, so producing both x86-64 and ARM64 bundles requires running the script on builders that support each architecture.
+By default the standalone helper builds the current Flatpak host architecture. Override `VERTEX_FLATPAK_ARCHES` with a comma-separated list such as `x86_64,aarch64` to request specific arches. Flatpak only allows builds for host-compatible arches unless the ARM64 container helper is used.
 
-The release scripts also invoke the Flatpak helper so `build-release-artifacts` / your compile-all flow stages Flatpak bundles alongside the native release artifacts when Flatpak tooling is available.
+The release scripts also invoke the Flatpak helper. On Linux x86-64 they now default to staging both `x86_64` and `aarch64` Flatpak bundles, enabling the ARM64 container helper automatically when needed. Override that with `VERTEX_RELEASE_FLATPAK_ARCHES=<comma-separated arches>`.
 
 The Flatpak app id is `io.github.SturdyFool10.VertexLauncher`.
+
+If you only have an x86-64 Linux builder but want an ARM64 Flatpak, set `VERTEX_FLATPAK_ARCHES=aarch64` and `VERTEX_ENABLE_ARM64_EMULATION=1`. That path delegates the build to `scripts/build-flatpak-arm64-container.sh`, which runs an emulated ARM64 Podman container. It is much slower than a native ARM64 host and depends on working `podman` plus host `binfmt_misc` / QEMU user emulation.
+
+## AppImage
+
+Linux users who want a single-file portable launcher can also build an AppImage. Unlike the Flatpak bundle, the AppImage path still depends on `linuxdeploy` to collect the launcher's native GTK/WebKit stack from the build host, so it should be produced on the same Linux architecture you plan to ship.
+
+When Vertex runs from an AppImage, it now defaults to portable storage beside the AppImage itself unless `VERTEX_CONFIG_LOCATION` is already set. For example, running `VertexLauncher-x86_64.AppImage` will use `VertexLauncher-x86_64.AppImage.data/` for config, instances, cache, logs, and themes.
+
+To build the AppImage bundle automatically on Linux:
+
+```sh
+bash scripts/build-appimage.sh
+```
+
+This helper expects:
+
+- `linuxdeploy` on `PATH`, or `VERTEX_LINUXDEPLOY=/path/to/linuxdeploy*.AppImage`
+- `appimagetool` on `PATH`, or `VERTEX_APPIMAGETOOL=/path/to/appimagetool*.AppImage`
+- `linuxdeploy-plugin-gtk` on `PATH` is recommended for the GTK/WebKit runtime bundle, or `VERTEX_LINUXDEPLOY_GTK_PLUGIN=/path/to/linuxdeploy-plugin-gtk*`
+- a matching native Linux release binary under `target/<triple>/release/vertexlauncher`
+
+If `linuxdeploy` or `appimagetool` are missing, `build-appimage.sh` now downloads arch-matched AppImage builds into `.cache/appimage-tools/`. Override those download URLs with `VERTEX_LINUXDEPLOY_URL` and `VERTEX_APPIMAGETOOL_URL` if you need pinned mirrors or a private cache.
+
+The staged AppImage artifact is written to `target/release` as one of:
+
+- `vertexlauncher-linuxx86-64.AppImage`
+- `vertexlauncher-linuxarm64.AppImage`
+
+On Linux, the AppImage helper now prefers packaging inside a Debian Bookworm container when `podman` is available. That avoids `linuxdeploy` failures on rolling hosts whose system libraries use newer ELF features such as RELR relocations. Set `VERTEX_APPIMAGE_USE_CONTAINER=0` if you need to force host packaging.
+
+If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper delegates to `scripts/build-appimage-arm64-container.sh`, which runs an emulated ARM64 Podman container and will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
+
+The release scripts now default to building both `vertexlauncher-linuxx86-64.AppImage` and `vertexlauncher-linuxarm64.AppImage` on Linux x86-64. Override that with `VERTEX_RELEASE_APPIMAGE_ARCHES=<comma-separated arches>` or the legacy single-arch `VERTEX_RELEASE_APPIMAGE_ARCH`.
+
+The release scripts still build raw Linux binaries under `target/<triple>/release/vertexlauncher` as packaging intermediates, but they no longer stage those host-linked binaries into `target/release`. The intended Linux release outputs are the AppImage and Flatpak artifacts.
 
 Staged artifacts are written to `target/release` as:
 
 - `vertexlauncher-windowsx86-64.exe`
 - `vertexlauncher-windowsarm64.exe`
-- `vertexlauncher-linuxx86-64`
-- `vertexlauncher-linuxarm64`
+- `vertexlauncher-linuxx86-64.AppImage`
+- `vertexlauncher-linuxarm64.AppImage`
 - `vertexlauncher-macosarm64`
 
 ## Cross-Build Notes

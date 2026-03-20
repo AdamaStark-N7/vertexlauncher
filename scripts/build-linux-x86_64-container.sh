@@ -5,15 +5,29 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
 MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.42}"
+WORK_ROOT="${REPO_ROOT}/.cache/linux-x86_64-container"
+CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
+CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
+
+mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}"
 
 podman run --rm \
+  --arch=amd64 \
   -v "${REPO_ROOT}:/workspace" \
+  -v "${WORK_ROOT}:/cache" \
+  -v "${CARGO_REGISTRY_DIR}:/usr/local/cargo/registry" \
+  -v "${CARGO_GIT_DIR}:/usr/local/cargo/git" \
   -w /workspace \
   -e MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION}" \
   "${CONTAINER_IMAGE}" \
   bash -lc '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
+    export PATH="/usr/local/cargo/bin:${PATH}"
+    export HOME=/cache/home
+    export XDG_CACHE_HOME=/cache/xdg-cache
+    export XDG_DATA_HOME=/cache/xdg-data
+    mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
     normalize_glibc_version() {
       local value="$1"
@@ -37,11 +51,10 @@ podman run --rm \
       libjavascriptcoregtk-4.1-dev \
       binutils >/dev/null
 
-    echo "[linux-x86_64] adding Rust toolchain..."
+    echo "[linux-x86_64] ensuring Rust toolchain..."
     if ! command -v rustup >/dev/null 2>&1; then
       echo "[linux-x86_64] bootstrapping rustup..."
       curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
-      export PATH="${HOME}/.cargo/bin:/usr/local/cargo/bin:${PATH}"
       if [ -f "${HOME}/.cargo/env" ]; then
         # shellcheck disable=SC1091
         . "${HOME}/.cargo/env"
@@ -50,6 +63,10 @@ podman run --rm \
         . /usr/local/cargo/env
       fi
     fi
+    if ! rustup toolchain list | grep -Eq "^stable($|-)"; then
+      rustup toolchain install stable --profile minimal >/dev/null
+    fi
+    rustup default stable >/dev/null
     rustup target add x86_64-unknown-linux-gnu >/dev/null
 
     echo "[linux-x86_64] building release artifact..."

@@ -5,11 +5,27 @@ const APP_DIR_NAME: &str = "vertexlauncher";
 const LEGACY_APP_DIR_NAME: &str = "vertex-launcher";
 
 pub fn portable_root() -> Option<PathBuf> {
+    explicit_portable_root().or_else(appimage_portable_root)
+}
+
+fn explicit_portable_root() -> Option<PathBuf> {
     std::env::var("VERTEX_CONFIG_LOCATION")
         .ok()
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+fn appimage_portable_root() -> Option<PathBuf> {
+    std::env::var("APPIMAGE")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .and_then(|path| {
+            let file_name = path.file_name()?.to_string_lossy().into_owned();
+            Some(path.with_file_name(format!("{file_name}.data")))
+        })
 }
 
 fn project_dirs_for(app_dir_name: &str) -> Option<ProjectDirs> {
@@ -108,4 +124,93 @@ pub fn legacy_instances_store_path() -> Option<PathBuf> {
 
 pub fn legacy_themes_dir() -> Option<PathBuf> {
     legacy_project_dirs().map(|project_dirs| project_dirs.config_dir().join("themes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        ffi::OsString,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    struct EnvReset {
+        vertex_config_location: Option<OsString>,
+        appimage: Option<OsString>,
+    }
+
+    impl EnvReset {
+        fn capture() -> Self {
+            Self {
+                vertex_config_location: std::env::var_os("VERTEX_CONFIG_LOCATION"),
+                appimage: std::env::var_os("APPIMAGE"),
+            }
+        }
+    }
+
+    impl Drop for EnvReset {
+        fn drop(&mut self) {
+            restore_env("VERTEX_CONFIG_LOCATION", self.vertex_config_location.as_ref());
+            restore_env("APPIMAGE", self.appimage.as_ref());
+        }
+    }
+
+    fn restore_env(key: &str, value: Option<&OsString>) {
+        match value {
+            Some(value) => unsafe { std::env::set_var(key, value) },
+            None => unsafe { std::env::remove_var(key) },
+        }
+    }
+
+    #[test]
+    fn portable_root_prefers_explicit_vertex_config_location() {
+        let _lock = env_lock().lock().unwrap();
+        let _reset = EnvReset::capture();
+
+        unsafe {
+            std::env::set_var("VERTEX_CONFIG_LOCATION", "/tmp/vertex-portable");
+            std::env::set_var("APPIMAGE", "/opt/Vertex/VertexLauncher.AppImage");
+        }
+
+        assert_eq!(
+            portable_root(),
+            Some(PathBuf::from("/tmp/vertex-portable"))
+        );
+    }
+
+    #[test]
+    fn portable_root_falls_back_to_appimage_sibling_data_dir() {
+        let _lock = env_lock().lock().unwrap();
+        let _reset = EnvReset::capture();
+
+        unsafe {
+            std::env::remove_var("VERTEX_CONFIG_LOCATION");
+            std::env::set_var("APPIMAGE", "/opt/Vertex/VertexLauncher-x86_64.AppImage");
+        }
+
+        assert_eq!(
+            portable_root(),
+            Some(PathBuf::from(
+                "/opt/Vertex/VertexLauncher-x86_64.AppImage.data"
+            ))
+        );
+    }
+
+    #[test]
+    fn empty_env_values_do_not_enable_portable_mode() {
+        let _lock = env_lock().lock().unwrap();
+        let _reset = EnvReset::capture();
+
+        unsafe {
+            std::env::set_var("VERTEX_CONFIG_LOCATION", "   ");
+            std::env::set_var("APPIMAGE", "   ");
+        }
+
+        assert_eq!(portable_root(), None);
+    }
 }

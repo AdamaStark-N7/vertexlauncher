@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
 WORK_ROOT="${REPO_ROOT}/.cache/linux-arm64-container"
+CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
+CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
 SYSROOT_DIR="${WORK_ROOT}/sysroot"
 DEBS_DIR="${WORK_ROOT}/debs"
 PACKAGE_LIST="${WORK_ROOT}/packages.txt"
@@ -22,16 +24,24 @@ PACKAGE_ROOTS=(
   "libjavascriptcoregtk-4.1-dev:arm64"
 )
 
-mkdir -p "${WORK_ROOT}"
+mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}"
 
 podman run --rm \
+  --arch=amd64 \
   -v "${REPO_ROOT}:/workspace" \
   -v "${WORK_ROOT}:/cache" \
+  -v "${CARGO_REGISTRY_DIR}:/usr/local/cargo/registry" \
+  -v "${CARGO_GIT_DIR}:/usr/local/cargo/git" \
   -w /workspace \
   "${CONTAINER_IMAGE}" \
   bash -lc '
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
+    export PATH="/usr/local/cargo/bin:${PATH}"
+    export HOME=/cache/home
+    export XDG_CACHE_HOME=/cache/xdg-cache
+    export XDG_DATA_HOME=/cache/xdg-data
+    mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
     echo "[linux-arm64] installing cross-build host tools..."
     apt-get update >/dev/null
@@ -45,9 +55,9 @@ podman run --rm \
     DEBS_DIR=/cache/debs
     PACKAGE_LIST=/cache/packages.txt
     RESOLVED_LIST=/cache/resolved-packages.txt
+    SYSROOT_STAMP="${SYSROOT_DIR}/.vertex-sysroot-ready"
 
-    rm -rf "${SYSROOT_DIR}"
-    mkdir -p "${SYSROOT_DIR}" "${DEBS_DIR}"
+    mkdir -p "${DEBS_DIR}"
 
     if ! compgen -G "${DEBS_DIR}/*.deb" > /dev/null; then
       echo "[linux-arm64] resolving dependency graph..."
@@ -76,16 +86,29 @@ podman run --rm \
       echo "[linux-arm64] reusing cached Debian sysroot packages..."
     fi
 
-    echo "[linux-arm64] extracting sysroot..."
-    for deb in "${DEBS_DIR}"/*.deb; do
-      dpkg-deb -x "${deb}" "${SYSROOT_DIR}"
-    done
+    rebuild_sysroot=0
+    if [[ ! -f "${SYSROOT_STAMP}" ]]; then
+      rebuild_sysroot=1
+    elif find "${DEBS_DIR}" -name "*.deb" -newer "${SYSROOT_STAMP}" -print -quit | grep -q .; then
+      rebuild_sysroot=1
+    fi
 
-    echo "[linux-arm64] adding Rust target..."
+    if (( rebuild_sysroot )); then
+      echo "[linux-arm64] extracting sysroot..."
+      rm -rf "${SYSROOT_DIR}"
+      mkdir -p "${SYSROOT_DIR}"
+      for deb in "${DEBS_DIR}"/*.deb; do
+        dpkg-deb -x "${deb}" "${SYSROOT_DIR}"
+      done
+      touch "${SYSROOT_STAMP}"
+    else
+      echo "[linux-arm64] reusing extracted sysroot..."
+    fi
+
+    echo "[linux-arm64] ensuring Rust toolchain..."
     if ! command -v rustup >/dev/null 2>&1; then
       echo "[linux-arm64] bootstrapping rustup..."
       curl https://sh.rustup.rs -sSf | sh -s -- -y --profile minimal --default-toolchain stable >/dev/null
-      export PATH="${HOME}/.cargo/bin:/usr/local/cargo/bin:${PATH}"
       if [ -f "${HOME}/.cargo/env" ]; then
         # shellcheck disable=SC1091
         . "${HOME}/.cargo/env"
@@ -94,6 +117,10 @@ podman run --rm \
         . /usr/local/cargo/env
       fi
     fi
+    if ! rustup toolchain list | grep -Eq "^stable($|-)"; then
+      rustup toolchain install stable --profile minimal >/dev/null
+    fi
+    rustup default stable >/dev/null
     rustup target add aarch64-unknown-linux-gnu >/dev/null
 
     export PKG_CONFIG_ALLOW_CROSS=1
