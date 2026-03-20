@@ -100,7 +100,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1
 
 Linux users who need the broadest cross-distro compatibility should use the Flatpak package instead of the raw host-linked binary. The Flatpak package carries its own GNOME runtime, so it does not rely on the host distro's glibc, GTK, Soup, or WebKitGTK stack. That is the packaging path intended for current gaming-oriented distros such as Bazzite, Nobara, CachyOS, and similar systems that already support Flatpak.
 
-The Flatpak manifest grants home-directory filesystem access so the launcher can detect and import existing Minecraft / Modrinth / launcher install folders by path instead of being limited to its sandbox-private storage.
+The Flatpak manifest grants home-directory filesystem access so the launcher can detect and import existing Minecraft / Modrinth / launcher install folders by path instead of being limited to its sandbox-private storage. It also exposes both Wayland and X11 sockets and sets `GDK_BACKEND=wayland,x11`, so the launcher prefers Wayland when available while still allowing Minecraft clients and Java mods to fall back to X11 when needed.
 
 To build the Flatpak bundle automatically:
 

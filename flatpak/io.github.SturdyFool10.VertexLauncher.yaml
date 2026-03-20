@@ -10,11 +10,12 @@ finish-args:
   - --share=network
   - --share=ipc
   - --socket=wayland
-  - --socket=fallback-x11
+  - --socket=x11
   - --socket=pulseaudio
   - --device=dri
   - --filesystem=home
   - --talk-name=org.freedesktop.secrets
+  - --env=GDK_BACKEND=wayland,x11
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   env:
