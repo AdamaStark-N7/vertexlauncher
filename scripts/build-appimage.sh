@@ -542,7 +542,17 @@ if [[ "$(uname -s)" != "Linux" ]]; then
   exit 2
 fi
 
-appimagetool_tool="$(resolve_tool VERTEX_APPIMAGETOOL appimagetool "Install appimagetool first." "${requested_arch}")"
+prepare_only=0
+case "${VERTEX_APPIMAGE_PREPARE_ONLY:-}" in
+  1|true|TRUE|True|yes|YES)
+    prepare_only=1
+    ;;
+esac
+
+appimagetool_tool=""
+if (( ! prepare_only )); then
+  appimagetool_tool="$(resolve_tool VERTEX_APPIMAGETOOL appimagetool "Install appimagetool first." "${requested_arch}")"
+fi
 manual_library_bundle=0
 linuxdeploy_tool=""
 plugin_args=()
@@ -648,6 +658,12 @@ fi
 bundle_runtime_support_assets "${appdir}"
 
 install -Dm755 "${SCRIPT_DIR}/resources/AppRun" "${appdir}/AppRun"
+
+if (( prepare_only )); then
+  echo "AppDir prepared:"
+  echo "  ${appdir}"
+  exit 0
+fi
 
 ARCH="${requested_arch}" run_tool "${appimagetool_tool}" "${appdir}" "${output_path}"
 

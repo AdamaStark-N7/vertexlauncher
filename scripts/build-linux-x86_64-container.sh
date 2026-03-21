@@ -3,78 +3,41 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/centos:7}"
 MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.17}"
 WORK_ROOT="${REPO_ROOT}/.cache/linux-x86_64-container"
-CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
-CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
+TOOLCHAIN_CACHE_ROOT="${REPO_ROOT}/.cache/linux-x86_64-toolchain"
+CARGO_HOME_DIR="${TOOLCHAIN_CACHE_ROOT}/cargo-home"
+RUSTUP_HOME_DIR="${TOOLCHAIN_CACHE_ROOT}/rustup"
+CONTAINER_DIR="${REPO_ROOT}/containers"
 
-mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}"
+source "${REPO_ROOT}/scripts/lib/portable-linux-common.sh"
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
+  centos7-webkit \
+  x86_64 \
+  "${CONTAINER_DIR}/vertexlauncher-centos7-webkit.Dockerfile" \
+  "${CONTAINER_DIR}")}"
+
+mkdir -p "${WORK_ROOT}" "${CARGO_HOME_DIR}" "${RUSTUP_HOME_DIR}"
 
 podman run --rm \
   --arch=amd64 \
   -v "${REPO_ROOT}:/workspace" \
   -v "${WORK_ROOT}:/cache" \
-  -v "${CARGO_REGISTRY_DIR}:/usr/local/cargo/registry" \
-  -v "${CARGO_GIT_DIR}:/usr/local/cargo/git" \
+  -v "${CARGO_HOME_DIR}:/usr/local/cargo" \
+  -v "${RUSTUP_HOME_DIR}:/usr/local/rustup" \
   -w /workspace \
   -e MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION}" \
   "${CONTAINER_IMAGE}" \
   bash -lc '
     set -euo pipefail
-    export DEBIAN_FRONTEND=noninteractive
     export PATH="/usr/local/cargo/bin:${PATH}"
-    export HOME=/cache/home
+    export CARGO_HOME=/usr/local/cargo
+    export RUSTUP_HOME=/usr/local/rustup
+    export HOME=/root
     export XDG_CACHE_HOME=/cache/xdg-cache
     export XDG_DATA_HOME=/cache/xdg-data
-    mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
-
-    configure_centos_vault() {
-      rm -f /etc/yum.repos.d/*.repo
-      cat >/etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[base]
-name=CentOS-7 - Base
-baseurl=http://vault.centos.org/7.9.2009/os/\$basearch/
-gpgcheck=0
-enabled=1
-[updates]
-name=CentOS-7 - Updates
-baseurl=http://vault.centos.org/7.9.2009/updates/\$basearch/
-gpgcheck=0
-enabled=1
-[extras]
-name=CentOS-7 - Extras
-baseurl=http://vault.centos.org/7.9.2009/extras/\$basearch/
-gpgcheck=0
-enabled=1
-EOF
-    }
-
-    normalize_glibc_version() {
-      local value="$1"
-      value="${value#GLIBC_}"
-      printf "%s\n" "${value}"
-    }
-
-    echo "[linux-x86_64] installing native build dependencies..."
-    configure_centos_vault
-    yum -y install \
-      ca-certificates \
-      curl \
-      gcc \
-      gcc-c++ \
-      make \
-      pkgconfig \
-      glib2-devel \
-      gtk3-devel \
-      gdk-pixbuf2-devel \
-      pango-devel \
-      atk-devel \
-      cairo-devel \
-      libsoup-devel \
-      webkitgtk4-devel \
-      webkitgtk4-jsc-devel \
-      binutils >/dev/null
+    mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
     echo "[linux-x86_64] ensuring Rust toolchain..."
     if ! command -v rustup >/dev/null 2>&1; then
@@ -104,8 +67,8 @@ EOF
     echo "[linux-x86_64] highest required glibc: ${glibc_floor}"
 
     if [ -n "${MAX_GLIBC_VERSION}" ]; then
-      normalized_max_glibc="$(normalize_glibc_version "${MAX_GLIBC_VERSION}")"
-      normalized_glibc_floor="$(normalize_glibc_version "${glibc_floor}")"
+      normalized_max_glibc="${MAX_GLIBC_VERSION#GLIBC_}"
+      normalized_glibc_floor="${glibc_floor#GLIBC_}"
 
       if [ "$(printf "%s\n%s\n" "${normalized_max_glibc}" "${normalized_glibc_floor}" | sort -V | tail -n 1)" != "${normalized_max_glibc}" ]; then
         echo "[linux-x86_64] glibc floor ${glibc_floor} exceeds allowed maximum ${MAX_GLIBC_VERSION}" >&2

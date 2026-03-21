@@ -3,12 +3,21 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/centos:7}"
 WORK_ROOT="${REPO_ROOT}/.cache/appimage-x86_64-container"
-CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
-CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
+TOOLCHAIN_CACHE_ROOT="${REPO_ROOT}/.cache/linux-x86_64-toolchain"
+CARGO_HOME_DIR="${TOOLCHAIN_CACHE_ROOT}/cargo-home"
+RUSTUP_HOME_DIR="${TOOLCHAIN_CACHE_ROOT}/rustup"
+CONTAINER_DIR="${REPO_ROOT}/containers"
 
-mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}"
+source "${REPO_ROOT}/scripts/lib/portable-linux-common.sh"
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
+  centos7-webkit \
+  x86_64 \
+  "${CONTAINER_DIR}/vertexlauncher-centos7-webkit.Dockerfile" \
+  "${CONTAINER_DIR}")}"
+
+mkdir -p "${WORK_ROOT}" "${CARGO_HOME_DIR}" "${RUSTUP_HOME_DIR}"
 
 declare -A MOUNTED_DIRS=()
 PODMAN_ARGS=(
@@ -17,8 +26,8 @@ PODMAN_ARGS=(
   --arch=amd64
   -v "${REPO_ROOT}:/workspace"
   -v "${WORK_ROOT}:/cache"
-  -v "${CARGO_REGISTRY_DIR}:/usr/local/cargo/registry"
-  -v "${CARGO_GIT_DIR}:/usr/local/cargo/git"
+  -v "${CARGO_HOME_DIR}:/usr/local/cargo"
+  -v "${RUSTUP_HOME_DIR}:/usr/local/rustup"
   -w /workspace
   -e VERTEX_APPIMAGE_ARCH=x86_64
   -e VERTEX_APPIMAGE_TARGET=x86_64-unknown-linux-gnu
@@ -54,52 +63,13 @@ podman "${PODMAN_ARGS[@]}" \
   "${CONTAINER_IMAGE}" \
   bash -lc '
     set -euo pipefail
-    export DEBIAN_FRONTEND=noninteractive
     export PATH="/usr/local/cargo/bin:${PATH}"
-    export HOME=/cache/home
+    export CARGO_HOME=/usr/local/cargo
+    export RUSTUP_HOME=/usr/local/rustup
+    export HOME=/root
     export XDG_CACHE_HOME=/cache/xdg-cache
     export XDG_DATA_HOME=/cache/xdg-data
-    mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
-
-    configure_centos_vault() {
-      rm -f /etc/yum.repos.d/*.repo
-      cat >/etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[base]
-name=CentOS-7 - Base
-baseurl=http://vault.centos.org/7.9.2009/os/\$basearch/
-gpgcheck=0
-enabled=1
-[updates]
-name=CentOS-7 - Updates
-baseurl=http://vault.centos.org/7.9.2009/updates/\$basearch/
-gpgcheck=0
-enabled=1
-[extras]
-name=CentOS-7 - Extras
-baseurl=http://vault.centos.org/7.9.2009/extras/\$basearch/
-gpgcheck=0
-enabled=1
-EOF
-    }
-
-    echo "[appimage-x86_64] installing native packaging dependencies..."
-    configure_centos_vault
-    yum -y install \
-      ca-certificates \
-      curl \
-      pkgconfig \
-      patchelf \
-      file \
-      desktop-file-utils \
-      glib2-devel \
-      gtk3-devel \
-      gdk-pixbuf2-devel \
-      pango-devel \
-      atk-devel \
-      cairo-devel \
-      libsoup-devel \
-      webkitgtk4-devel \
-      webkitgtk4-jsc-devel >/dev/null
+    mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
     if [[ ! -f /workspace/target/x86_64-unknown-linux-gnu/release/vertexlauncher ]]; then
       echo "[appimage-x86_64] ensuring Rust toolchain..."

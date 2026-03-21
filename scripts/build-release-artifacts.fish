@@ -466,7 +466,7 @@ for target in $linux_targets
             or note_failure "Linux x86-64 build failed."
         case aarch64-unknown-linux-gnu
             build_linux_target $target arm64
-            or note_failure "Linux arm64 build requires a cross pkg-config sysroot/wrapper."
+            or note_failure "Linux arm64 build failed."
     end
 end
 

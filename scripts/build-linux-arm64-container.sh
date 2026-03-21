@@ -3,51 +3,80 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
 MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.17}"
+TARGET_TRIPLE="aarch64-unknown-linux-gnu"
 WORK_ROOT="${REPO_ROOT}/.cache/linux-arm64-container"
-CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
-CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
-APT_CACHE_DIR="${WORK_ROOT}/apt-cache"
-APT_LISTS_DIR="${WORK_ROOT}/apt-lists"
 SYSROOT_DIR="${WORK_ROOT}/sysroot"
 RPMS_DIR="${WORK_ROOT}/rpms"
 PACKAGE_STAMP="${WORK_ROOT}/sysroot-packages.txt"
-
-mkdir -p "${WORK_ROOT}" "${CARGO_REGISTRY_DIR}" "${CARGO_GIT_DIR}" "${APT_CACHE_DIR}" "${APT_LISTS_DIR}" "${RPMS_DIR}"
-
-podman run --rm \
-  -v "${REPO_ROOT}:/workspace" \
-  -v "${WORK_ROOT}:/cache" \
-  -v "${CARGO_REGISTRY_DIR}:/usr/local/cargo/registry" \
-  -v "${CARGO_GIT_DIR}:/usr/local/cargo/git" \
-  -v "${APT_CACHE_DIR}:/var/cache/apt" \
-  -v "${APT_LISTS_DIR}:/var/lib/apt/lists" \
-  -w /workspace \
-  -e MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION}" \
-  "${CONTAINER_IMAGE}" \
-  bash -s -- <<'EOF'
-set -euo pipefail
-
-export PATH="/usr/local/cargo/bin:${PATH}"
-export DEBIAN_FRONTEND=noninteractive
-export CARGO_HOME=/usr/local/cargo
-export HOME=/cache/home
-export XDG_CACHE_HOME=/cache/xdg-cache
-export XDG_DATA_HOME=/cache/xdg-data
-mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
-
-SYSROOT_DIR=/cache/sysroot
-RPMS_DIR=/cache/rpms
-PACKAGE_STAMP=/cache/sysroot-packages.txt
+TOOLCHAIN_DIR="${WORK_ROOT}/toolchain"
+ARM64_CARGO_JOBS="${VERTEX_ARM64_CARGO_JOBS:-$(nproc)}"
+CONTAINER_DIR="${REPO_ROOT}/containers"
 
 PACKAGE_ROOTS=(
+  glibc-devel
   glib2-devel
   gtk3-devel
   gdk-pixbuf2-devel
   pango-devel
   atk-devel
   cairo-devel
+  dbus-devel
+  libsoup-devel
+  webkitgtk4-devel
+  webkitgtk4-jsc-devel
+)
+
+source "${REPO_ROOT}/scripts/lib/portable-linux-common.sh"
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
+  debian-tooling \
+  "$(normalize_arch "$(uname -m)")" \
+  "${CONTAINER_DIR}/vertexlauncher-debian-tooling.Dockerfile" \
+  "${CONTAINER_DIR}")}"
+
+mkdir -p "${WORK_ROOT}" "${TOOLCHAIN_DIR}"
+
+sysroot_is_usable() {
+  [[ -f "${PACKAGE_STAMP}" ]] \
+    && cmp -s <(printf '%s\n' "${PACKAGE_ROOTS[@]}") "${PACKAGE_STAMP}" \
+    && [[ -f "${SYSROOT_DIR}/usr/lib64/libc.so" ]] \
+    && compgen -G "${SYSROOT_DIR}/usr/lib64/libwebkit2gtk-4.0.so.*" >/dev/null \
+    && [[ -f "${SYSROOT_DIR}/usr/lib64/pkgconfig/webkit2gtk-4.0.pc" ]] \
+    && [[ -f "${SYSROOT_DIR}/usr/lib64/pkgconfig/gtk+-3.0.pc" ]] \
+    && [[ -f "${SYSROOT_DIR}/usr/lib64/pkgconfig/libsoup-2.4.pc" ]]
+}
+
+refresh_sysroot_if_needed() {
+  if sysroot_is_usable; then
+    echo "[linux-arm64] reusing cached CentOS 7 aarch64 sysroot..."
+    return 0
+  fi
+
+  require_command podman "Install Podman so the ARM64 CentOS 7 sysroot can be refreshed on cache miss."
+
+  echo "[linux-arm64] refreshing CentOS 7 aarch64 sysroot cache..."
+  mkdir -p "${RPMS_DIR}"
+
+  podman run --rm -i \
+    -v "${WORK_ROOT}:/cache" \
+    "${CONTAINER_IMAGE}" \
+    bash -s -- <<'EOF'
+set -euo pipefail
+
+SYSROOT_DIR=/cache/sysroot
+RPMS_DIR=/cache/rpms
+PACKAGE_STAMP=/cache/sysroot-packages.txt
+
+PACKAGE_ROOTS=(
+  glibc-devel
+  glib2-devel
+  gtk3-devel
+  gdk-pixbuf2-devel
+  pango-devel
+  atk-devel
+  cairo-devel
+  dbus-devel
   libsoup-devel
   webkitgtk4-devel
   webkitgtk4-jsc-devel
@@ -74,104 +103,232 @@ gpgcheck=0
 REPO
 }
 
-normalize_glibc_version() {
-  local value="$1"
-  value="${value#GLIBC_}"
-  printf '%s\n' "${value}"
+rm -rf "${SYSROOT_DIR}" "${RPMS_DIR}"
+mkdir -p "${SYSROOT_DIR}" "${RPMS_DIR}"
+
+configure_centos_vault_repo
+dnf \
+  --releasever=7 \
+  --forcearch=aarch64 \
+  --disablerepo=_dnf_local \
+  download \
+  --resolve \
+  --alldeps \
+  --destdir "${RPMS_DIR}" \
+  "${PACKAGE_ROOTS[@]}" >/dev/null
+
+shopt -s nullglob
+for rpm in "${RPMS_DIR}"/*.rpm; do
+  rpm2cpio "${rpm}" | (cd "${SYSROOT_DIR}" && cpio -idm --quiet)
+done
+shopt -u nullglob
+
+printf '%s\n' "${PACKAGE_ROOTS[@]}" > "${PACKAGE_STAMP}"
+EOF
 }
 
-install_cross_build_host_tools() {
-  echo "[linux-arm64] installing cross-build host tools..."
-  apt-get update >/dev/null
-  apt-get install -y --no-install-recommends \
-    ca-certificates \
-    cpio \
-    dnf \
-    dnf-plugins-core \
-    gcc-aarch64-linux-gnu \
-    g++-aarch64-linux-gnu \
-    make \
-    pkg-config \
-    rpm2cpio >/dev/null
-}
+prepare_toolchain_wrappers() {
+  mkdir -p "${TOOLCHAIN_DIR}"
 
-refresh_sysroot_if_needed() {
-  local need_refresh=0
-  local package_list
-  package_list="$(printf '%s\n' "${PACKAGE_ROOTS[@]}")"
+  cat >"${TOOLCHAIN_DIR}/zig-aarch64-common" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
 
-  if [[ ! -f "${PACKAGE_STAMP}" ]]; then
-    need_refresh=1
-  elif ! cmp -s <(printf '%s\n' "${PACKAGE_ROOTS[@]}") "${PACKAGE_STAMP}"; then
-    need_refresh=1
-  elif [[ ! -d "${SYSROOT_DIR}/usr/include" || ! -d "${SYSROOT_DIR}/usr/lib64" ]]; then
-    need_refresh=1
+filtered_args=()
+skip_next=0
+for arg in "$@"; do
+  if (( skip_next )); then
+    skip_next=0
+    continue
   fi
 
-  if (( need_refresh == 0 )); then
-    echo "[linux-arm64] reusing cached CentOS 7 aarch64 sysroot..."
+  case "${arg}" in
+    --target)
+      skip_next=1
+      ;;
+    --target=*|--sysroot=*)
+      ;;
+    *)
+      filtered_args+=("${arg}")
+      ;;
+  esac
+done
+
+printf '%s\0' "${filtered_args[@]}"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/arm64-pkg-config" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${VERTEX_ARM64_SYSROOT:?}"
+
+export PKG_CONFIG_DIR=
+export PKG_CONFIG_ALLOW_CROSS=1
+export PKG_CONFIG_SYSROOT_DIR="${VERTEX_ARM64_SYSROOT}"
+export PKG_CONFIG_LIBDIR="${VERTEX_ARM64_SYSROOT}/usr/lib64/pkgconfig:${VERTEX_ARM64_SYSROOT}/usr/share/pkgconfig:${VERTEX_ARM64_SYSROOT}/usr/lib/pkgconfig"
+
+exec pkg-config "$@"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/zig-aarch64-cc" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${VERTEX_ARM64_SYSROOT:?}"
+
+mapfile -d '' -t filtered_args < <("$(dirname -- "$0")/zig-aarch64-common" "$@")
+
+exec zig cc \
+  -target aarch64-linux-gnu \
+  --sysroot "${VERTEX_ARM64_SYSROOT}" \
+  -D__ARM_ARCH=8 \
+  "${filtered_args[@]}"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/zig-aarch64-cxx" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${VERTEX_ARM64_SYSROOT:?}"
+
+mapfile -d '' -t filtered_args < <("$(dirname -- "$0")/zig-aarch64-common" "$@")
+
+exec zig c++ \
+  -target aarch64-linux-gnu \
+  --sysroot "${VERTEX_ARM64_SYSROOT}" \
+  -D__ARM_ARCH=8 \
+  "${filtered_args[@]}"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/zig-aarch64-linker" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+: "${VERTEX_ARM64_SYSROOT:?}"
+
+mapfile -d '' -t filtered_args < <("$(dirname -- "$0")/zig-aarch64-common" "$@")
+linker_args=()
+arg_index=0
+
+normalize_link_search_path() {
+  local path_value="$1"
+
+  if [[ "${path_value}" != /* ]]; then
+    printf '%s\n' "${path_value}"
     return 0
   fi
 
-  echo "[linux-arm64] refreshing CentOS 7 aarch64 sysroot..."
-  rm -rf "${SYSROOT_DIR}" "${RPMS_DIR}"
-  mkdir -p "${SYSROOT_DIR}" "${RPMS_DIR}"
+  if [[ "${path_value}" == "${VERTEX_ARM64_SYSROOT}/"* ]]; then
+    printf '/%s\n' "${path_value#${VERTEX_ARM64_SYSROOT}/}"
+    return 0
+  fi
 
-  configure_centos_vault_repo
-  dnf \
-    --releasever=7 \
-    --forcearch=aarch64 \
-    --disablerepo=_dnf_local \
-    download \
-    --resolve \
-    --alldeps \
-    --destdir "${RPMS_DIR}" \
-    "${PACKAGE_ROOTS[@]}" >/dev/null
-
-  shopt -s nullglob
-  for rpm in "${RPMS_DIR}"/*.rpm; do
-    rpm2cpio "${rpm}" | (cd "${SYSROOT_DIR}" && cpio -idm --quiet)
-  done
-  shopt -u nullglob
-
-  printf '%s\n' "${PACKAGE_ROOTS[@]}" > "${PACKAGE_STAMP}"
+  realpath -m --relative-to="${PWD}" "${path_value}"
 }
 
-install_cross_build_host_tools
+while (( arg_index < ${#filtered_args[@]} )); do
+  current_arg="${filtered_args[arg_index]}"
+
+  if [[ "${current_arg}" == "-L" ]] && (( arg_index + 1 < ${#filtered_args[@]} )); then
+    next_arg="${filtered_args[arg_index + 1]}"
+    linker_args+=("${current_arg}" "$(normalize_link_search_path "${next_arg}")")
+    arg_index=$((arg_index + 2))
+    continue
+  fi
+
+  case "${current_arg}" in
+    -L/*)
+      linker_args+=("-L$(normalize_link_search_path "${current_arg#-L}")")
+      ;;
+    *)
+      linker_args+=("${current_arg}")
+      ;;
+  esac
+
+  arg_index=$((arg_index + 1))
+done
+
+exec zig cc \
+  -target aarch64-linux-gnu.2.17 \
+  --sysroot "${VERTEX_ARM64_SYSROOT}" \
+  -L/lib64 \
+  -L/usr/lib64 \
+  "${linker_args[@]}"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/zig-ar" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec zig ar "$@"
+EOF
+
+  cat >"${TOOLCHAIN_DIR}/zig-ranlib" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec zig ranlib "$@"
+EOF
+
+  chmod +x \
+    "${TOOLCHAIN_DIR}/zig-aarch64-common" \
+    "${TOOLCHAIN_DIR}/arm64-pkg-config" \
+    "${TOOLCHAIN_DIR}/zig-aarch64-cc" \
+    "${TOOLCHAIN_DIR}/zig-aarch64-cxx" \
+    "${TOOLCHAIN_DIR}/zig-aarch64-linker" \
+    "${TOOLCHAIN_DIR}/zig-ar" \
+    "${TOOLCHAIN_DIR}/zig-ranlib"
+}
+
+require_command cargo "Install Rust and Cargo."
+require_command rustup "Install rustup so the ARM64 target can be added."
+require_command zig "Install Zig so the host can cross-link the ARM64 Linux build."
+require_command pkg-config "Install pkg-config for ARM64 sysroot resolution."
+
 refresh_sysroot_if_needed
+prepare_toolchain_wrappers
 
 echo "[linux-arm64] ensuring Rust target..."
-rustup target add aarch64-unknown-linux-gnu >/dev/null
+rustup target add "${TARGET_TRIPLE}" >/dev/null
 
-bash /workspace/scripts/patch-wry-source.sh
+bash "${REPO_ROOT}/scripts/patch-wry-source.sh"
 
+export VERTEX_ARM64_SYSROOT="${SYSROOT_DIR}"
+export PKG_CONFIG="${TOOLCHAIN_DIR}/arm64-pkg-config"
 export PKG_CONFIG_ALLOW_CROSS=1
 export PKG_CONFIG_SYSROOT_DIR="${SYSROOT_DIR}"
 export PKG_CONFIG_LIBDIR="${SYSROOT_DIR}/usr/lib64/pkgconfig:${SYSROOT_DIR}/usr/share/pkgconfig:${SYSROOT_DIR}/usr/lib/pkgconfig"
 export PKG_CONFIG_PATH="${PKG_CONFIG_LIBDIR}"
-export CARGO_BUILD_JOBS="$(nproc)"
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=--sysroot=${SYSROOT_DIR} -Clink-arg=-Wl,-rpath-link,${SYSROOT_DIR}/lib64 -Clink-arg=-Wl,-rpath-link,${SYSROOT_DIR}/usr/lib64"
-export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-export CFLAGS_aarch64_unknown_linux_gnu="--sysroot=${SYSROOT_DIR} -D__ARM_ARCH=8 -march=armv8-a"
-export CXXFLAGS_aarch64_unknown_linux_gnu="--sysroot=${SYSROOT_DIR} -D__ARM_ARCH=8 -march=armv8-a"
+export CARGO_BUILD_JOBS="${ARM64_CARGO_JOBS}"
+export CC_aarch64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-aarch64-cc"
+export CXX_aarch64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-aarch64-cxx"
+export AR_aarch64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-ar"
+export RANLIB_aarch64_unknown_linux_gnu="${TOOLCHAIN_DIR}/zig-ranlib"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER="${TOOLCHAIN_DIR}/zig-aarch64-linker"
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_AR="${TOOLCHAIN_DIR}/zig-ar"
 
-echo "[linux-arm64] cross-compiling release artifact..."
-cargo build --release --target aarch64-unknown-linux-gnu -p vertexlauncher
+echo "[linux-arm64] cross-compiling release artifact on the host..."
+env \
+  -u CFLAGS \
+  -u CXXFLAGS \
+  -u CPPFLAGS \
+  -u LDFLAGS \
+  -u CC \
+  -u CXX \
+  -u AR \
+  -u RANLIB \
+  -u RUSTFLAGS \
+  -u CARGO_BUILD_RUSTFLAGS \
+  cargo build --release --target "${TARGET_TRIPLE}" -p vertexlauncher
 
 echo "[linux-arm64] inspecting glibc symbol floor..."
-glibc_floor="$(bash /workspace/scripts/report-linux-glibc-floor.sh /workspace/target/aarch64-unknown-linux-gnu/release/vertexlauncher)"
+glibc_floor="$(bash "${REPO_ROOT}/scripts/report-linux-glibc-floor.sh" "${REPO_ROOT}/target/${TARGET_TRIPLE}/release/vertexlauncher")"
 echo "[linux-arm64] highest required glibc: ${glibc_floor}"
 
 if [[ -n "${MAX_GLIBC_VERSION}" ]]; then
-  normalized_max_glibc="$(normalize_glibc_version "${MAX_GLIBC_VERSION}")"
-  normalized_glibc_floor="$(normalize_glibc_version "${glibc_floor}")"
-
-  if [[ "$(printf '%s\n%s\n' "${normalized_max_glibc}" "${normalized_glibc_floor}" | sort -V | tail -n 1)" != "${normalized_max_glibc}" ]]; then
+  if glibc_floor_exceeds_limit "${glibc_floor}" "${MAX_GLIBC_VERSION}"; then
     echo "[linux-arm64] glibc floor ${glibc_floor} exceeds allowed maximum ${MAX_GLIBC_VERSION}" >&2
     exit 1
   fi
 fi
-EOF

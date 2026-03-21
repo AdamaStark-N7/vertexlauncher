@@ -57,6 +57,14 @@ Linux release binaries should not be built on a rolling distro with plain `cargo
 
 The current Linux UI stack still depends on distro WebKitGTK/GTK libraries, so the final glibc floor is constrained by those packages. To preserve the embedded Microsoft sign-in webview while restoring a `glibc 2.17` floor on x86-64, the launcher is pinned to the last `wry` line that still uses `libsoup2.4` with WebKitGTK 4.0, and the Linux container scripts target CentOS 7 where that WebKitGTK stack is still available. That upstream `wry` line currently needs a one-line compatibility patch against the modern `webkit2gtk` Rust bindings, so native Linux builds should run `bash scripts/patch-wry-source.sh` once before `cargo build`. The containerized Linux/AppImage helpers run that patch step automatically. The x86-64 container helper prints the highest required glibc symbol version after each build and now defaults to enforcing `VERTEX_MAX_GLIBC_VERSION=2.17`.
 
+If you want the portable Linux deliverables instead of a host-linked binary, use the dedicated helper:
+
+```sh
+bash scripts/build-linux-portables.sh
+```
+
+On Linux x86-64, that helper defaults to building both `x86_64` and `aarch64` AppImage + Flatpak artifacts. On Linux ARM64, it defaults to `aarch64` only. The first run now builds reusable local Podman images for the CentOS 7 and Debian packaging environments and caches the x86-64 Rust toolchain plus the ARM64 CentOS sysroot, so repeat builds avoid most of the previous setup cost.
+
 Windows MSVC example:
 
 ```sh
@@ -105,6 +113,12 @@ To build the Flatpak bundle automatically:
 bash scripts/build-flatpak.sh
 ```
 
+For the full portable Linux matrix, prefer:
+
+```sh
+bash scripts/build-linux-portables.sh --formats flatpak
+```
+
 This script will:
 
 - build or reuse the matching prebuilt Linux AppDir from the CentOS 7 packaging pipeline
@@ -135,6 +149,12 @@ To build the AppImage bundle automatically on Linux:
 bash scripts/build-appimage.sh
 ```
 
+For the full portable Linux matrix, prefer:
+
+```sh
+bash scripts/build-linux-portables.sh --formats appimage
+```
+
 This helper expects:
 
 - `linuxdeploy` on `PATH`, or `VERTEX_LINUXDEPLOY=/path/to/linuxdeploy*.AppImage`
@@ -155,6 +175,8 @@ During staging, the AppImage helper now also copies the WebKitGTK helper binarie
 
 If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper now cross-compiles the ARM64 launcher on the host against a cached CentOS 7 ARM64 sysroot, then runs only the final AppImage packaging step inside an emulated ARM64 Podman container. It will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
 
+The CentOS 7 AppImage/Linux helpers now also reuse a shared cached Rust toolchain under `.cache/linux-x86_64-toolchain/`, so rebuilding x86-64 artifacts no longer has to bootstrap rustup inside the container every time.
+
 The release scripts now default to building both `vertexlauncher-linuxx86-64.AppImage` and `vertexlauncher-linuxarm64.AppImage` on Linux x86-64. Override that with `VERTEX_RELEASE_APPIMAGE_ARCHES=<comma-separated arches>` or the legacy single-arch `VERTEX_RELEASE_APPIMAGE_ARCH`.
 
 The release scripts still build raw Linux binaries under `target/<triple>/release/vertexlauncher` as packaging intermediates, but they no longer stage those host-linked binaries into `target/release`. The intended Linux release outputs are the AppImage and Flatpak artifacts.
@@ -170,8 +192,9 @@ Staged artifacts are written to `target/release` as:
 ## Cross-Build Notes
 
 - Windows cross-builds use `cargo xwin` with the `clang` backend and scrub host-specific compiler flags.
-- Linux x86-64 release builds use a CentOS 7 container so release binaries and portable bundles stay at a `glibc 2.17` floor.
+- Linux x86-64 release builds use a cached CentOS 7 Podman image so release binaries and portable bundles stay at a `glibc 2.17` floor without reinstalling the full GTK/WebKit stack on every run.
 - Linux ARM64 release builds now cross-compile on the host against a cached CentOS 7 ARM64 sysroot, then use emulation only for the final AppImage/Flatpak packaging steps.
+- The new `scripts/build-linux-portables.sh` helper is the fastest path for the Linux portable matrix because it reuses the local container images, the cached x86-64 Rust toolchain, and the cached ARM64 sysroot across runs.
 - macOS ARM64 release builds require a usable Apple SDK. The scripts detect `SDKROOT`, `DEVELOPER_DIR`, `xcrun`, and `~/.local/share/macos-sdk/MacOSX*.sdk`.
 
 ## What The Launcher Can Do

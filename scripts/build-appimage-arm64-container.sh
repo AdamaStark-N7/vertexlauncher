@@ -3,9 +3,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/centos:7}"
 WORK_ROOT="${REPO_ROOT}/.cache/appimage-arm64-container"
 SOURCE_BINARY="${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/vertexlauncher"
+CONTAINER_DIR="${REPO_ROOT}/containers"
+
+source "${REPO_ROOT}/scripts/lib/portable-linux-common.sh"
+
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
+  centos7-webkit \
+  aarch64 \
+  "${CONTAINER_DIR}/vertexlauncher-centos7-webkit.Dockerfile" \
+  "${CONTAINER_DIR}")}"
 
 mkdir -p "${WORK_ROOT}"
 
@@ -29,6 +37,7 @@ PODMAN_ARGS=(
   -w /workspace
   -e VERTEX_APPIMAGE_ARCH=aarch64
   -e VERTEX_APPIMAGE_TARGET=aarch64-unknown-linux-gnu
+  -e VERTEX_APPIMAGE_PREPARE_ONLY="${VERTEX_APPIMAGE_PREPARE_ONLY:-}"
   -e VERTEX_IN_APPIMAGE_CONTAINER=1
 )
 
@@ -87,45 +96,6 @@ podman "${PODMAN_ARGS[@]}" \
     export XDG_CACHE_HOME=/cache/xdg-cache
     export XDG_DATA_HOME=/cache/xdg-data
     mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
-
-    configure_centos_vault() {
-      rm -f /etc/yum.repos.d/*.repo
-      cat >/etc/yum.repos.d/CentOS-Vault.repo <<EOF
-[base]
-name=CentOS-7 - Base
-baseurl=http://vault.centos.org/altarch/7.9.2009/os/\$basearch/
-gpgcheck=0
-enabled=1
-[updates]
-name=CentOS-7 - Updates
-baseurl=http://vault.centos.org/altarch/7.9.2009/updates/\$basearch/
-gpgcheck=0
-enabled=1
-[extras]
-name=CentOS-7 - Extras
-baseurl=http://vault.centos.org/altarch/7.9.2009/extras/\$basearch/
-gpgcheck=0
-enabled=1
-EOF
-    }
-
-    echo "[appimage-arm64] installing packaging dependencies..."
-    configure_centos_vault
-    yum -y --setopt=cachedir=/cache/yum install \
-      ca-certificates \
-      curl \
-      patchelf \
-      file \
-      desktop-file-utils \
-      glib2-devel \
-      gtk3-devel \
-      gdk-pixbuf2-devel \
-      pango-devel \
-      atk-devel \
-      cairo-devel \
-      libsoup-devel \
-      webkitgtk4-devel \
-      webkitgtk4-jsc-devel >/dev/null
 
     echo "[appimage-arm64] packaging AppImage inside CentOS 7 container..."
     bash /workspace/scripts/build-appimage.sh
