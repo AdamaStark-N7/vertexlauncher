@@ -190,7 +190,7 @@ function build_linux_target
     end
 
     if test $target = aarch64-unknown-linux-gnu
-        if test -x $repo_root/scripts/build-linux-arm64-container.sh
+        if test -f $repo_root/scripts/build-linux-arm64-container.sh
             if not command -sq podman
                 echo "Skipping Linux $arch: podman is required for the containerized cross-build helper." >&2
                 return 2

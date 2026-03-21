@@ -3,8 +3,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
-MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.42}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/centos:7}"
+MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.17}"
 WORK_ROOT="${REPO_ROOT}/.cache/linux-x86_64-container"
 CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
 CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
@@ -29,6 +29,27 @@ podman run --rm \
     export XDG_DATA_HOME=/cache/xdg-data
     mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
+    configure_centos_vault() {
+      rm -f /etc/yum.repos.d/*.repo
+      cat >/etc/yum.repos.d/CentOS-Vault.repo <<EOF
+[base]
+name=CentOS-7 - Base
+baseurl=http://vault.centos.org/7.9.2009/os/\$basearch/
+gpgcheck=0
+enabled=1
+[updates]
+name=CentOS-7 - Updates
+baseurl=http://vault.centos.org/7.9.2009/updates/\$basearch/
+gpgcheck=0
+enabled=1
+[extras]
+name=CentOS-7 - Extras
+baseurl=http://vault.centos.org/7.9.2009/extras/\$basearch/
+gpgcheck=0
+enabled=1
+EOF
+    }
+
     normalize_glibc_version() {
       local value="$1"
       value="${value#GLIBC_}"
@@ -36,22 +57,23 @@ podman run --rm \
     }
 
     echo "[linux-x86_64] installing native build dependencies..."
-    apt-get update >/dev/null
-    apt-get install -y --no-install-recommends \
+    configure_centos_vault
+    yum -y install \
       ca-certificates \
       curl \
-      build-essential \
-      pkg-config \
-      libglib2.0-dev \
-      libgtk-3-dev \
-      libgdk-pixbuf-2.0-dev \
-      libpango1.0-dev \
-      libatk1.0-dev \
-      libcairo2-dev \
-      libsysprof-4-dev \
-      libsoup-3.0-dev \
-      libwebkit2gtk-4.1-dev \
-      libjavascriptcoregtk-4.1-dev \
+      gcc \
+      gcc-c++ \
+      make \
+      pkgconfig \
+      glib2-devel \
+      gtk3-devel \
+      gdk-pixbuf2-devel \
+      pango-devel \
+      atk-devel \
+      cairo-devel \
+      libsoup-devel \
+      webkitgtk4-devel \
+      webkitgtk4-jsc-devel \
       binutils >/dev/null
 
     echo "[linux-x86_64] ensuring Rust toolchain..."
@@ -71,6 +93,8 @@ podman run --rm \
     fi
     rustup default stable >/dev/null
     rustup target add x86_64-unknown-linux-gnu >/dev/null
+
+    bash /workspace/scripts/patch-wry-source.sh
 
     echo "[linux-x86_64] building release artifact..."
     cargo build --release --target x86_64-unknown-linux-gnu -p vertexlauncher

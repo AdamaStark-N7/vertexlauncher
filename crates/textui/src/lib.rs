@@ -5,8 +5,9 @@ use std::{
 };
 
 use cosmic_text::{
-    Action, Attrs, AttrsOwned, Buffer, Color, Cursor, Edit, Editor, Family, FontFeatures,
-    FontSystem, Metrics, Motion, Selection, Shaping, Style as FontStyle, SwashCache, Weight, Wrap,
+    Action, Attrs, AttrsOwned, BorrowedWithFontSystem, Buffer, Color, Cursor, Edit, Editor, Family,
+    FontFeatures, FontSystem, Metrics, Motion, Selection, Shaping, Style as FontStyle, SwashCache,
+    Weight, Wrap,
 };
 use egui::{
     self, Color32, ColorImage, Context, CornerRadius, Id, Key, Pos2, Rect, Response, Sense,
@@ -45,22 +46,43 @@ pub use tooltip_options::TooltipOptions;
 const DEFAULT_OPEN_TYPE_FEATURE_TAGS: &str = "liga, calt";
 
 #[derive(Clone, Debug)]
-struct SpanStyle {
-    color: Color32,
-    monospace: bool,
-    italic: bool,
-    weight: u16,
+pub struct RichTextStyle {
+    pub color: Color32,
+    pub monospace: bool,
+    pub italic: bool,
+    pub weight: u16,
+}
+
+impl Default for RichTextStyle {
+    fn default() -> Self {
+        Self {
+            color: Color32::WHITE,
+            monospace: false,
+            italic: false,
+            weight: 400,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
-struct RichSpan {
-    text: String,
-    style: SpanStyle,
+pub struct RichTextSpan {
+    pub text: String,
+    pub style: RichTextStyle,
 }
+
+type SpanStyle = RichTextStyle;
+type RichSpan = RichTextSpan;
 
 #[derive(Clone, Debug)]
 struct RasterizedText {
     image: ColorImage,
+    size_points: Vec2,
+}
+
+#[derive(Clone, Debug)]
+struct RasterizedTile {
+    image: ColorImage,
+    offset_points: Vec2,
     size_points: Vec2,
 }
 
@@ -83,6 +105,7 @@ struct AsyncRasterRequest {
     kind: AsyncRasterKind,
     options: LabelOptions,
     width_points_opt: Option<f32>,
+    max_texture_side_px: usize,
     scale: f32,
     typography: TypographySnapshot,
 }
@@ -120,6 +143,28 @@ struct InputState {
     last_text: String,
     attrs_fingerprint: u64,
     multiline: bool,
+    scroll_metrics: EditorScrollMetrics,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct EditorScrollMetrics {
+    current_horizontal_scroll_px: f32,
+    max_horizontal_scroll_px: f32,
+    current_vertical_scroll_px: f32,
+    max_vertical_scroll_px: f32,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct ViewerScrollbarTracks {
+    horizontal: Option<Rect>,
+    vertical: Option<Rect>,
+}
+
+impl ViewerScrollbarTracks {
+    fn contains(self, pos: Pos2) -> bool {
+        self.horizontal.is_some_and(|rect| rect.contains(pos))
+            || self.vertical.is_some_and(|rect| rect.contains(pos))
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -151,6 +196,7 @@ pub struct TextUi {
     open_type_features: Option<FontFeatures>,
     async_raster: AsyncRasterState,
     current_frame: u64,
+    max_texture_side_px: usize,
 }
 
 impl Default for TextUi {
@@ -204,12 +250,18 @@ impl TextUi {
                 cache: HashMap::new(),
             },
             current_frame: 0,
+            max_texture_side_px: usize::MAX,
         }
     }
 
     /// Performs per-frame maintenance and processes async raster results.
     pub fn begin_frame(&mut self, ctx: &Context) {
         self.current_frame = ctx.cumulative_frame_nr();
+        let max_texture_side_px = ctx.input(|i| i.max_texture_side).max(1);
+        if self.max_texture_side_px != max_texture_side_px {
+            self.max_texture_side_px = max_texture_side_px;
+            self.invalidate_text_caches(false);
+        }
         self.textures
             .retain(|_, entry| self.current_frame.saturating_sub(entry.last_used_frame) <= 600);
         self.poll_async_raster_results();
@@ -943,6 +995,204 @@ impl TextUi {
         self.input_widget(ui, id_source, text, options, true)
     }
 
+    /// Renders a read-only, selectable multi-line rich-text viewer.
+    ///
+    /// This keeps the same font pipeline as the rest of `TextUi`, supports drag selection and
+    /// copy/select-all shortcuts, and rasterizes the visible viewport into texture tiles so large
+    /// views do not depend on a single oversized GPU texture.
+    pub fn multiline_rich_viewer(
+        &mut self,
+        ui: &mut Ui,
+        id_source: impl Hash,
+        spans: &[RichTextSpan],
+        options: &InputOptions,
+        stick_to_bottom: bool,
+        wrap: bool,
+    ) -> Response {
+        let id = ui.make_persistent_id(id_source).with("textui_rich_viewer");
+        let width = options
+            .desired_width
+            .unwrap_or_else(|| ui.available_width())
+            .max(options.min_width);
+        let min_height = options.line_height + (options.padding.y * 2.0);
+        let height = (options.line_height * options.desired_rows.max(1) as f32
+            + options.padding.y * 2.0)
+            .max(min_height);
+
+        let desired_size = egui::vec2(width, height);
+        let (rect, mut response) = ui.allocate_exact_size(desired_size, Sense::click_and_drag());
+
+        let has_focus = response.has_focus();
+        let scale = ui.ctx().pixels_per_point();
+        let content_rect = rect.shrink2(options.padding);
+        let content_width_px = (content_rect.width() * scale).max(1.0);
+        let content_height_px = (content_rect.height() * scale).max(1.0);
+        let text = spans
+            .iter()
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        let attrs_fingerprint = self.rich_viewer_attrs_fingerprint(spans, options, scale, wrap);
+
+        let mut state = self
+            .input_states
+            .remove(&id)
+            .unwrap_or_else(|| Self::new_input_state(&mut self.font_system, &text, true));
+
+        let needs_text_sync =
+            state.last_text != text || state.attrs_fingerprint != attrs_fingerprint;
+        if needs_text_sync {
+            state.scroll_metrics = self.replace_editor_rich_text(
+                &mut state.editor,
+                spans,
+                options,
+                content_width_px,
+                content_height_px,
+                scale,
+                wrap,
+            );
+            state.last_text = text.clone();
+            state.attrs_fingerprint = attrs_fingerprint;
+            if stick_to_bottom && !has_focus && !response.hovered() {
+                scroll_editor_to_buffer_end(&mut self.font_system, &mut state.editor);
+            }
+        } else {
+            state.scroll_metrics = self.configure_viewer(
+                &mut state.editor,
+                options,
+                content_width_px,
+                content_height_px,
+                scale,
+                wrap,
+            );
+        }
+
+        let pointer_pos = response.interact_pointer_pos();
+        let scrollbar_tracks = viewer_scrollbar_track_rects(
+            ui.style().spacing.scroll,
+            response.hovered(),
+            response.is_pointer_button_down_on(),
+            content_rect,
+            state.scroll_metrics,
+        );
+        let pointer_over_scrollbar = pointer_pos.is_some_and(|pos| scrollbar_tracks.contains(pos));
+        let pointer_over_text = pointer_pos.is_some_and(|pos| {
+            viewer_visible_text_rect(content_rect, state.scroll_metrics)
+                .is_some_and(|text_rect| text_rect.contains(pos))
+        }) && !pointer_over_scrollbar;
+        let pointer_pressed_on_widget =
+            ui.ctx().input(|i| i.pointer.primary_pressed()) && response.is_pointer_button_down_on();
+
+        if (response.clicked() || pointer_pressed_on_widget) && !pointer_over_scrollbar {
+            response.request_focus();
+        }
+
+        if pointer_over_text {
+            ui.output_mut(|o| {
+                o.cursor_icon = egui::CursorIcon::Text;
+                o.mutable_text_under_cursor = true;
+            });
+        }
+
+        let pointer_interacted = !pointer_over_scrollbar
+            && (pointer_pressed_on_widget
+                || response.clicked()
+                || response.double_clicked()
+                || response.triple_clicked()
+                || response.drag_started()
+                || response.dragged());
+
+        let mut state_changed = if has_focus || response.hovered() || pointer_interacted {
+            self.handle_viewer_events(
+                ui,
+                &response,
+                &mut state.editor,
+                content_rect,
+                scale,
+                has_focus,
+                pointer_over_scrollbar,
+                &mut state.scroll_metrics,
+            )
+        } else {
+            false
+        };
+
+        let frame_fill = if has_focus {
+            options
+                .background_color_focused
+                .or(options.background_color_hovered)
+                .unwrap_or(options.background_color)
+        } else if response.hovered() {
+            options
+                .background_color_hovered
+                .unwrap_or(options.background_color)
+        } else {
+            options.background_color
+        };
+        let frame_stroke = if has_focus {
+            options
+                .stroke_focused
+                .or(options.stroke_hovered)
+                .unwrap_or(options.stroke)
+        } else if response.hovered() {
+            options.stroke_hovered.unwrap_or(options.stroke)
+        } else {
+            options.stroke
+        };
+        let corner_radius = CornerRadius::same(options.corner_radius);
+
+        ui.painter().rect_filled(rect, corner_radius, frame_fill);
+        ui.painter()
+            .rect_stroke(rect, corner_radius, frame_stroke, egui::StrokeKind::Inside);
+
+        let base_fingerprint =
+            rich_viewer_texture_fingerprint(&state.editor, &text, spans, options, false, wrap);
+        for (tile_index, tile) in self
+            .rasterize_editor_tiled(
+                &state.editor,
+                options,
+                content_width_px as usize,
+                content_height_px as usize,
+                scale,
+                false,
+                true,
+            )
+            .into_iter()
+            .enumerate()
+        {
+            let texture = self.update_texture(
+                ui.ctx(),
+                id.with(("tile", tile_index)),
+                {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    base_fingerprint.hash(&mut hasher);
+                    tile_index.hash(&mut hasher);
+                    hasher.finish()
+                },
+                tile.image,
+                tile.size_points,
+            );
+            let tile_rect =
+                Rect::from_min_size(content_rect.min + tile.offset_points, tile.size_points);
+            paint_texture(ui, &texture, tile_rect);
+        }
+
+        state_changed |= self.sync_viewer_scrollbars(
+            ui,
+            id,
+            &mut state.editor,
+            content_rect,
+            scale,
+            &mut state.scroll_metrics,
+        );
+
+        self.input_states.insert(id, state);
+        if state_changed {
+            response.mark_changed();
+        }
+
+        response
+    }
+
     fn input_widget(
         &mut self,
         ui: &mut Ui,
@@ -998,7 +1248,7 @@ impl TextUi {
         let needs_text_sync = !has_focus && state.last_text != *text;
         let needs_attrs_sync = state.attrs_fingerprint != attrs_fingerprint;
         if needs_text_sync || needs_attrs_sync {
-            self.replace_editor_text(
+            state.scroll_metrics = self.replace_editor_text(
                 &mut state.editor,
                 text,
                 options,
@@ -1011,7 +1261,7 @@ impl TextUi {
             state.attrs_fingerprint = attrs_fingerprint;
         }
 
-        self.configure_editor(
+        state.scroll_metrics = self.configure_editor(
             &mut state.editor,
             options,
             multiline,
@@ -1035,6 +1285,7 @@ impl TextUi {
                 content_rect,
                 scale,
                 has_focus,
+                &mut state.scroll_metrics,
             );
 
             if !multiline && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1123,6 +1374,7 @@ impl TextUi {
             last_text: text.to_owned(),
             attrs_fingerprint: 0,
             multiline,
+            scroll_metrics: EditorScrollMetrics::default(),
         }
     }
 
@@ -1135,12 +1387,14 @@ impl TextUi {
         width_px: f32,
         height_px: f32,
         scale: f32,
-    ) {
+    ) -> EditorScrollMetrics {
         let attrs_owned = self.input_attrs_owned(options, scale);
         let effective_font_size = self.effective_font_size(options.font_size) * scale;
         let effective_line_height = self.effective_line_height(options.line_height) * scale;
         let previous_cursor = editor.cursor();
         let previous_selection = editor.selection();
+        let previous_scroll = editor.with_buffer(|buffer| buffer.scroll());
+        let mut scroll_metrics = EditorScrollMetrics::default();
         editor.with_buffer_mut(|buffer| {
             let mut borrowed = buffer.borrow_with(&mut self.font_system);
             borrowed.set_metrics_and_size(
@@ -1155,10 +1409,13 @@ impl TextUi {
             });
             let attrs = attrs_owned.as_attrs();
             borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+            borrowed.set_scroll(previous_scroll);
             borrowed.shape_until_scroll(true);
+            scroll_metrics = clamp_borrowed_buffer_scroll(&mut borrowed);
         });
         editor.set_cursor(clamp_cursor_to_editor(editor, previous_cursor));
         editor.set_selection(clamp_selection_to_editor(editor, previous_selection));
+        scroll_metrics
     }
 
     fn configure_editor(
@@ -1169,9 +1426,10 @@ impl TextUi {
         width_px: f32,
         height_px: f32,
         scale: f32,
-    ) {
+    ) -> EditorScrollMetrics {
         let effective_font_size = self.effective_font_size(options.font_size) * scale;
         let effective_line_height = self.effective_line_height(options.line_height) * scale;
+        let mut scroll_metrics = EditorScrollMetrics::default();
         editor.with_buffer_mut(|buffer| {
             let mut borrowed = buffer.borrow_with(&mut self.font_system);
             borrowed.set_metrics_and_size(
@@ -1185,7 +1443,474 @@ impl TextUi {
                 Wrap::None
             });
             borrowed.shape_until_scroll(true);
+            scroll_metrics = clamp_borrowed_buffer_scroll(&mut borrowed);
         });
+        scroll_metrics
+    }
+
+    fn replace_editor_rich_text(
+        &mut self,
+        editor: &mut Editor<'static>,
+        spans: &[RichTextSpan],
+        options: &InputOptions,
+        width_px: f32,
+        height_px: f32,
+        scale: f32,
+        wrap: bool,
+    ) -> EditorScrollMetrics {
+        let effective_font_size = self.effective_font_size(options.font_size) * scale;
+        let effective_line_height = self.effective_line_height(options.line_height) * scale;
+        let previous_cursor = editor.cursor();
+        let previous_selection = editor.selection();
+        let previous_scroll = editor.with_buffer(|buffer| buffer.scroll());
+        let default_attrs = self.input_attrs_owned(options, scale);
+        let span_attrs_owned = spans
+            .iter()
+            .map(|span| self.input_span_attrs_owned(&span.style, options, scale))
+            .collect::<Vec<_>>();
+        let mut scroll_metrics = EditorScrollMetrics::default();
+
+        editor.with_buffer_mut(|buffer| {
+            let mut borrowed = buffer.borrow_with(&mut self.font_system);
+            borrowed.set_metrics_and_size(
+                Metrics::new(effective_font_size, effective_line_height),
+                Some(width_px),
+                Some(height_px),
+            );
+            borrowed.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
+            let rich_text = spans
+                .iter()
+                .zip(span_attrs_owned.iter())
+                .map(|(span, attrs)| (span.text.as_str(), attrs.as_attrs()))
+                .collect::<Vec<_>>();
+            borrowed.set_rich_text(
+                rich_text,
+                &default_attrs.as_attrs(),
+                Shaping::Advanced,
+                None,
+            );
+            borrowed.set_scroll(previous_scroll);
+            borrowed.shape_until_scroll(true);
+            scroll_metrics = clamp_borrowed_buffer_scroll(&mut borrowed);
+        });
+        editor.set_cursor(clamp_cursor_to_editor(editor, previous_cursor));
+        editor.set_selection(clamp_selection_to_editor(editor, previous_selection));
+        scroll_metrics
+    }
+
+    fn configure_viewer(
+        &mut self,
+        editor: &mut Editor<'static>,
+        options: &InputOptions,
+        width_px: f32,
+        height_px: f32,
+        scale: f32,
+        wrap: bool,
+    ) -> EditorScrollMetrics {
+        let effective_font_size = self.effective_font_size(options.font_size) * scale;
+        let effective_line_height = self.effective_line_height(options.line_height) * scale;
+        let mut scroll_metrics = EditorScrollMetrics::default();
+        editor.with_buffer_mut(|buffer| {
+            let mut borrowed = buffer.borrow_with(&mut self.font_system);
+            borrowed.set_metrics_and_size(
+                Metrics::new(effective_font_size, effective_line_height),
+                Some(width_px),
+                Some(height_px),
+            );
+            borrowed.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
+            borrowed.shape_until_scroll(true);
+            scroll_metrics = clamp_borrowed_buffer_scroll(&mut borrowed);
+        });
+        scroll_metrics
+    }
+
+    fn handle_viewer_events(
+        &mut self,
+        ui: &Ui,
+        response: &Response,
+        editor: &mut Editor<'static>,
+        content_rect: Rect,
+        scale: f32,
+        process_keyboard: bool,
+        pointer_over_scrollbar: bool,
+        scroll_metrics: &mut EditorScrollMetrics,
+    ) -> bool {
+        let mut changed = false;
+        let (modifiers, primary_pressed, smooth_scroll_delta, raw_scroll_delta) =
+            ui.ctx().input(|i| {
+                (
+                    i.modifiers,
+                    i.pointer.primary_pressed(),
+                    i.smooth_scroll_delta,
+                    i.raw_scroll_delta,
+                )
+            });
+        let pointer_pressed_on_widget = primary_pressed && response.is_pointer_button_down_on();
+        let horizontal_scroll = editor_horizontal_scroll(editor);
+
+        if !pointer_over_scrollbar && let Some(pointer_pos) = response.interact_pointer_pos() {
+            let x =
+                (((pointer_pos.x - content_rect.min.x) * scale) + horizontal_scroll).round() as i32;
+            let y = ((pointer_pos.y - content_rect.min.y) * scale).round() as i32;
+
+            if response.triple_clicked() {
+                editor
+                    .borrow_with(&mut self.font_system)
+                    .action(Action::TripleClick { x, y });
+                changed = true;
+            } else if response.double_clicked() {
+                editor
+                    .borrow_with(&mut self.font_system)
+                    .action(Action::DoubleClick { x, y });
+                changed = true;
+            } else if pointer_pressed_on_widget {
+                if modifiers.shift {
+                    changed |= extend_selection_to_pointer(editor, x, y);
+                } else {
+                    editor
+                        .borrow_with(&mut self.font_system)
+                        .action(Action::Click { x, y });
+                    changed = true;
+                }
+            } else if response.clicked() {
+                if modifiers.shift {
+                    changed |= extend_selection_to_pointer(editor, x, y);
+                } else {
+                    editor
+                        .borrow_with(&mut self.font_system)
+                        .action(Action::Click { x, y });
+                    changed = true;
+                }
+            }
+
+            if response.dragged() {
+                editor
+                    .borrow_with(&mut self.font_system)
+                    .action(Action::Drag { x, y });
+                changed = true;
+            }
+        }
+
+        if response.hovered() {
+            let vertical_scroll_delta = if smooth_scroll_delta.y.abs() > f32::EPSILON {
+                smooth_scroll_delta.y
+            } else {
+                raw_scroll_delta.y
+            };
+            let horizontal_scroll_delta = if smooth_scroll_delta.x.abs() > f32::EPSILON {
+                smooth_scroll_delta.x
+            } else if raw_scroll_delta.x.abs() > f32::EPSILON {
+                raw_scroll_delta.x
+            } else if modifiers.shift && smooth_scroll_delta.y.abs() > f32::EPSILON {
+                smooth_scroll_delta.y
+            } else if modifiers.shift {
+                raw_scroll_delta.y
+            } else {
+                0.0
+            };
+            let horizontal_uses_vertical_wheel = modifiers.shift
+                && smooth_scroll_delta.x.abs() <= f32::EPSILON
+                && raw_scroll_delta.x.abs() <= f32::EPSILON
+                && horizontal_scroll_delta.abs() > f32::EPSILON;
+
+            if !horizontal_uses_vertical_wheel && vertical_scroll_delta.abs() > f32::EPSILON {
+                editor
+                    .borrow_with(&mut self.font_system)
+                    .action(Action::Scroll {
+                        pixels: -vertical_scroll_delta * scale,
+                    });
+                changed = true;
+            }
+            if horizontal_scroll_delta.abs() > f32::EPSILON {
+                self.adjust_editor_horizontal_scroll(
+                    editor,
+                    -horizontal_scroll_delta * scale,
+                    scroll_metrics.max_horizontal_scroll_px,
+                );
+                changed = true;
+            }
+        }
+
+        if process_keyboard {
+            let events = ui.ctx().input(|i| i.events.clone());
+            for event in events {
+                match event {
+                    egui::Event::Copy | egui::Event::Cut => {
+                        if let Some(selection) = editor.copy_selection() {
+                            ui.ctx().copy_text(selection);
+                        }
+                    }
+                    egui::Event::Key {
+                        key,
+                        pressed,
+                        modifiers,
+                        ..
+                    } if pressed => {
+                        changed |= handle_read_only_editor_key_event(
+                            &mut self.font_system,
+                            editor,
+                            key,
+                            modifiers,
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if changed {
+            editor
+                .borrow_with(&mut self.font_system)
+                .shape_as_needed(false);
+            *scroll_metrics = self.measure_editor_scroll_metrics(editor);
+        }
+
+        changed
+    }
+
+    fn adjust_editor_horizontal_scroll(
+        &mut self,
+        editor: &mut Editor<'static>,
+        delta_px: f32,
+        max_horizontal_scroll_px: f32,
+    ) {
+        editor.with_buffer_mut(|buffer| {
+            let mut borrowed = buffer.borrow_with(&mut self.font_system);
+            let mut scroll = borrowed.scroll();
+            scroll.horizontal = (scroll.horizontal + delta_px).clamp(0.0, max_horizontal_scroll_px);
+            borrowed.set_scroll(scroll);
+            borrowed.shape_until_scroll(true);
+        });
+    }
+
+    fn adjust_editor_vertical_scroll(&mut self, editor: &mut Editor<'static>, delta_px: f32) {
+        editor.with_buffer_mut(|buffer| {
+            let mut borrowed = buffer.borrow_with(&mut self.font_system);
+            let mut scroll = borrowed.scroll();
+            scroll.vertical += delta_px;
+            borrowed.set_scroll(scroll);
+            borrowed.shape_until_scroll(true);
+        });
+    }
+
+    fn measure_editor_scroll_metrics(
+        &mut self,
+        editor: &mut Editor<'static>,
+    ) -> EditorScrollMetrics {
+        editor.with_buffer_mut(|buffer| {
+            let mut borrowed = buffer.borrow_with(&mut self.font_system);
+            measure_borrowed_buffer_scroll_metrics(&mut borrowed)
+        })
+    }
+
+    fn sync_viewer_scrollbars(
+        &mut self,
+        ui: &mut Ui,
+        id: Id,
+        editor: &mut Editor<'static>,
+        content_rect: Rect,
+        scale: f32,
+        scroll_metrics: &mut EditorScrollMetrics,
+    ) -> bool {
+        let has_horizontal_scroll = scroll_metrics.max_horizontal_scroll_px > f32::EPSILON;
+        let has_vertical_scroll = scroll_metrics.max_vertical_scroll_px > f32::EPSILON;
+        if !has_horizontal_scroll && !has_vertical_scroll {
+            return false;
+        }
+
+        let content_width_points =
+            content_rect.width() + (scroll_metrics.max_horizontal_scroll_px / scale.max(1.0));
+        let content_height_points =
+            content_rect.height() + (scroll_metrics.max_vertical_scroll_px / scale.max(1.0));
+        let current_horizontal_scroll_points = scroll_metrics.current_horizontal_scroll_px / scale;
+        let current_vertical_scroll_points = scroll_metrics.current_vertical_scroll_px / scale;
+        let scroll_output = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(content_rect), |ui| {
+                egui::ScrollArea::both()
+                    .id_salt(id.with("egui_scrollbars"))
+                    .max_width(content_rect.width())
+                    .max_height(content_rect.height())
+                    .scroll_source(egui::containers::scroll_area::ScrollSource::SCROLL_BAR)
+                    .scroll_bar_visibility(
+                        egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
+                    .scroll_offset(egui::vec2(
+                        current_horizontal_scroll_points,
+                        current_vertical_scroll_points,
+                    ))
+                    .show_viewport(ui, |ui, _viewport| {
+                        ui.allocate_space(egui::vec2(
+                            content_width_points.max(content_rect.width()),
+                            content_height_points.max(content_rect.height()),
+                        ));
+                    })
+            })
+            .inner;
+        let next_horizontal_scroll_px = (scroll_output.state.offset.x * scale)
+            .clamp(0.0, scroll_metrics.max_horizontal_scroll_px);
+        let next_vertical_scroll_px = (scroll_output.state.offset.y * scale)
+            .clamp(0.0, scroll_metrics.max_vertical_scroll_px);
+        let horizontal_delta_px =
+            next_horizontal_scroll_px - scroll_metrics.current_horizontal_scroll_px;
+        let vertical_delta_px = next_vertical_scroll_px - scroll_metrics.current_vertical_scroll_px;
+
+        let horizontal_changed = horizontal_delta_px.abs() > 0.25;
+        let vertical_changed = vertical_delta_px.abs() > 0.25;
+        if !horizontal_changed && !vertical_changed {
+            return false;
+        }
+
+        if horizontal_changed {
+            self.adjust_editor_horizontal_scroll(
+                editor,
+                horizontal_delta_px,
+                scroll_metrics.max_horizontal_scroll_px,
+            );
+        }
+        if vertical_changed {
+            self.adjust_editor_vertical_scroll(editor, vertical_delta_px);
+        }
+        *scroll_metrics = self.measure_editor_scroll_metrics(editor);
+        ui.ctx().request_repaint();
+        true
+    }
+
+    fn rasterize_editor_tiled(
+        &mut self,
+        editor: &Editor<'static>,
+        options: &InputOptions,
+        width_px: usize,
+        height_px: usize,
+        scale: f32,
+        has_focus: bool,
+        show_selection_without_focus: bool,
+    ) -> Vec<RasterizedTile> {
+        let width_px = width_px.max(1);
+        let height_px = height_px.max(1);
+        let horizontal_scroll = editor_horizontal_scroll(editor).round() as i32;
+        let tile_max_dim_px = self.max_texture_side_px.max(1);
+        let tile_cols = width_px.div_ceil(tile_max_dim_px);
+        let tile_rows = height_px.div_ceil(tile_max_dim_px);
+        let tile_count = tile_cols * tile_rows;
+
+        let mut tiles = Vec::with_capacity(tile_count);
+        for row in 0..tile_rows {
+            for col in 0..tile_cols {
+                let origin_x = col * tile_max_dim_px;
+                let origin_y = row * tile_max_dim_px;
+                let tile_width = (width_px - origin_x).min(tile_max_dim_px);
+                let tile_height = (height_px - origin_y).min(tile_max_dim_px);
+                tiles.push((
+                    origin_x,
+                    origin_y,
+                    ColorImage::new(
+                        [tile_width, tile_height],
+                        vec![Color32::TRANSPARENT; tile_width * tile_height],
+                    ),
+                ));
+            }
+        }
+
+        let selection_visible =
+            has_focus || (show_selection_without_focus && editor.selection() != Selection::None);
+        editor.draw(
+            &mut self.font_system,
+            &mut self.swash_cache,
+            to_cosmic_color(options.text_color),
+            if has_focus {
+                to_cosmic_color(options.cursor_color)
+            } else {
+                to_cosmic_color(Color32::TRANSPARENT)
+            },
+            if selection_visible {
+                to_cosmic_color(options.selection_color)
+            } else {
+                to_cosmic_color(Color32::TRANSPARENT)
+            },
+            if selection_visible {
+                to_cosmic_color(options.selected_text_color)
+            } else {
+                to_cosmic_color(options.text_color)
+            },
+            |x, y, w, h, color| {
+                blend_rect_into_tiles(
+                    &mut tiles,
+                    width_px,
+                    height_px,
+                    x - horizontal_scroll,
+                    y,
+                    w as i32,
+                    h as i32,
+                    cosmic_to_egui_color(color),
+                );
+            },
+        );
+
+        tiles
+            .into_iter()
+            .map(|(origin_x, origin_y, image)| RasterizedTile {
+                offset_points: egui::vec2(origin_x as f32 / scale, origin_y as f32 / scale),
+                size_points: egui::vec2(image.size[0] as f32 / scale, image.size[1] as f32 / scale),
+                image,
+            })
+            .collect()
+    }
+
+    fn input_span_attrs_owned(
+        &self,
+        style: &RichTextStyle,
+        options: &InputOptions,
+        scale: f32,
+    ) -> AttrsOwned {
+        let mut attrs = Attrs::new()
+            .color(to_cosmic_color(style.color))
+            .weight(Weight(self.effective_weight(style.weight)))
+            .metrics(Metrics::new(
+                (self.effective_font_size(options.font_size) * scale).max(1.0),
+                (self.effective_line_height(options.line_height) * scale).max(1.0),
+            ));
+
+        if style.monospace {
+            attrs = attrs.family(Family::Monospace);
+        } else if let Some(family) = self.ui_font_family.as_deref() {
+            attrs = attrs.family(Family::Name(family));
+        }
+        if style.italic {
+            attrs = attrs.style(FontStyle::Italic);
+        }
+        if let Some(features) = &self.open_type_features {
+            attrs = attrs.font_features(features.clone());
+        }
+
+        AttrsOwned::new(&attrs)
+    }
+
+    fn rich_viewer_attrs_fingerprint(
+        &self,
+        spans: &[RichTextSpan],
+        options: &InputOptions,
+        scale: f32,
+        wrap: bool,
+    ) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        "rich_viewer_attrs".hash(&mut hasher);
+        options.font_size.to_bits().hash(&mut hasher);
+        options.line_height.to_bits().hash(&mut hasher);
+        scale.to_bits().hash(&mut hasher);
+        wrap.hash(&mut hasher);
+        self.ui_font_family.hash(&mut hasher);
+        self.ui_font_size_scale.to_bits().hash(&mut hasher);
+        self.ui_font_weight.hash(&mut hasher);
+        self.open_type_features_enabled.hash(&mut hasher);
+        self.open_type_features_to_enable.hash(&mut hasher);
+        for span in spans {
+            span.text.hash(&mut hasher);
+            span.style.color.hash(&mut hasher);
+            span.style.monospace.hash(&mut hasher);
+            span.style.italic.hash(&mut hasher);
+            span.style.weight.hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     fn handle_input_events(
@@ -1197,12 +1922,15 @@ impl TextUi {
         content_rect: Rect,
         scale: f32,
         process_keyboard: bool,
+        scroll_metrics: &mut EditorScrollMetrics,
     ) -> bool {
         let mut changed = false;
         let modifiers = ui.ctx().input(|i| i.modifiers);
+        let horizontal_scroll = editor_horizontal_scroll(editor);
 
         if let Some(pointer_pos) = response.interact_pointer_pos() {
-            let x = ((pointer_pos.x - content_rect.min.x) * scale).round() as i32;
+            let x =
+                (((pointer_pos.x - content_rect.min.x) * scale) + horizontal_scroll).round() as i32;
             let y = ((pointer_pos.y - content_rect.min.y) * scale).round() as i32;
 
             if response.triple_clicked() {
@@ -1290,6 +2018,12 @@ impl TextUi {
             editor
                 .borrow_with(&mut self.font_system)
                 .shape_as_needed(false);
+            self.adjust_editor_horizontal_scroll(
+                editor,
+                0.0,
+                scroll_metrics.max_horizontal_scroll_px,
+            );
+            *scroll_metrics = self.measure_editor_scroll_metrics(editor);
         }
 
         changed
@@ -1303,6 +2037,9 @@ impl TextUi {
         height_px: usize,
         has_focus: bool,
     ) -> ColorImage {
+        let horizontal_scroll = editor_horizontal_scroll(editor).round() as i32;
+        let width_px = width_px.clamp(1, self.max_texture_side_px.max(1));
+        let height_px = height_px.clamp(1, self.max_texture_side_px.max(1));
         let mut image = ColorImage::new(
             [width_px.max(1), height_px.max(1)],
             vec![Color32::TRANSPARENT; width_px.max(1) * height_px.max(1)],
@@ -1326,7 +2063,7 @@ impl TextUi {
             |x, y, w, h, color| {
                 blend_rect(
                     &mut image,
-                    x,
+                    x - horizontal_scroll,
                     y,
                     w as i32,
                     h as i32,
@@ -1486,8 +2223,8 @@ impl TextUi {
             measured_width_px = (width_points * scale).ceil() as usize;
         }
 
-        let width_px = measured_width_px.max(1);
-        let height_px = measured_height_px.max(1);
+        let width_px = measured_width_px.clamp(1, self.max_texture_side_px.max(1));
+        let height_px = measured_height_px.clamp(1, self.max_texture_side_px.max(1));
 
         let mut image = ColorImage::new(
             [width_px, height_px],
@@ -1568,6 +2305,7 @@ impl TextUi {
         self.ui_font_weight.hash(state);
         self.open_type_features_enabled.hash(state);
         self.open_type_features_to_enable.hash(state);
+        self.max_texture_side_px.hash(state);
     }
 
     fn get_or_queue_async_plain_raster(
@@ -1596,6 +2334,7 @@ impl TextUi {
                 kind: AsyncRasterKind::Plain(request_text),
                 options: options.clone(),
                 width_points_opt,
+                max_texture_side_px: self.max_texture_side_px,
                 scale,
                 typography: self.typography_snapshot(),
             };
@@ -1640,6 +2379,7 @@ impl TextUi {
                 kind: AsyncRasterKind::Rich(request_spans),
                 options: options.clone(),
                 width_points_opt,
+                max_texture_side_px: self.max_texture_side_px,
                 scale,
                 typography: self.typography_snapshot(),
             };
@@ -1897,8 +2637,8 @@ fn async_rasterize_request(
     if let Some(width_points) = req.width_points_opt {
         measured_width_px = (width_points * req.scale).ceil() as usize;
     }
-    let width_px = measured_width_px.max(1);
-    let height_px = measured_height_px.max(1);
+    let width_px = measured_width_px.clamp(1, req.max_texture_side_px.max(1));
+    let height_px = measured_height_px.clamp(1, req.max_texture_side_px.max(1));
 
     let mut image = ColorImage::new(
         [width_px, height_px],
@@ -1992,6 +2732,39 @@ fn input_texture_fingerprint(
     has_focus.hash(&mut hasher);
     hash_cursor(editor.cursor(), &mut hasher);
     hash_selection(editor.selection(), &mut hasher);
+    editor.with_buffer(|buffer| hash_scroll(buffer.scroll(), &mut hasher));
+    hasher.finish()
+}
+
+fn rich_viewer_texture_fingerprint(
+    editor: &Editor<'static>,
+    text: &str,
+    spans: &[RichTextSpan],
+    options: &InputOptions,
+    has_focus: bool,
+    wrap: bool,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    "rich_viewer".hash(&mut hasher);
+    text.hash(&mut hasher);
+    options.font_size.to_bits().hash(&mut hasher);
+    options.line_height.to_bits().hash(&mut hasher);
+    options.text_color.hash(&mut hasher);
+    options.cursor_color.hash(&mut hasher);
+    options.selection_color.hash(&mut hasher);
+    options.selected_text_color.hash(&mut hasher);
+    wrap.hash(&mut hasher);
+    has_focus.hash(&mut hasher);
+    for span in spans {
+        span.text.hash(&mut hasher);
+        span.style.color.hash(&mut hasher);
+        span.style.monospace.hash(&mut hasher);
+        span.style.italic.hash(&mut hasher);
+        span.style.weight.hash(&mut hasher);
+    }
+    hash_cursor(editor.cursor(), &mut hasher);
+    hash_selection(editor.selection(), &mut hasher);
+    editor.with_buffer(|buffer| hash_scroll(buffer.scroll(), &mut hasher));
     hasher.finish()
 }
 
@@ -1999,6 +2772,12 @@ fn hash_cursor<H: Hasher>(cursor: Cursor, state: &mut H) {
     cursor.line.hash(state);
     cursor.index.hash(state);
     format!("{:?}", cursor.affinity).hash(state);
+}
+
+fn hash_scroll<H: Hasher>(scroll: cosmic_text::Scroll, state: &mut H) {
+    scroll.line.hash(state);
+    scroll.vertical.to_bits().hash(state);
+    scroll.horizontal.to_bits().hash(state);
 }
 
 fn hash_selection<H: Hasher>(selection: Selection, state: &mut H) {
@@ -2019,6 +2798,10 @@ fn hash_selection<H: Hasher>(selection: Selection, state: &mut H) {
             hash_cursor(cursor, state);
         }
     }
+}
+
+fn editor_horizontal_scroll(editor: &Editor<'static>) -> f32 {
+    editor.with_buffer(|buffer| buffer.scroll().horizontal.max(0.0))
 }
 
 fn clamp_cursor_to_editor(editor: &Editor<'static>, cursor: Cursor) -> Cursor {
@@ -2111,6 +2894,53 @@ fn handle_editor_key_event(
             true
         }
     }
+}
+
+fn handle_read_only_editor_key_event(
+    font_system: &mut FontSystem,
+    editor: &mut Editor<'static>,
+    key: Key,
+    modifiers: egui::Modifiers,
+) -> bool {
+    if modifiers.command && key == Key::A {
+        return select_all(editor);
+    }
+
+    if cfg!(target_os = "macos") && modifiers.ctrl && !modifiers.shift {
+        if let Some(motion) = mac_control_motion(key) {
+            return handle_editor_motion_key(font_system, editor, key, modifiers, motion);
+        }
+    }
+
+    let Some(action) = key_to_action(key, modifiers, true) else {
+        if key == Key::Escape && editor.selection() != Selection::None {
+            editor.set_selection(Selection::None);
+            return true;
+        }
+        return false;
+    };
+
+    match action {
+        Action::Motion(motion) => {
+            handle_editor_motion_key(font_system, editor, key, modifiers, motion)
+        }
+        Action::Escape => {
+            if editor.selection() != Selection::None {
+                editor.set_selection(Selection::None);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
+fn scroll_editor_to_buffer_end(font_system: &mut FontSystem, editor: &mut Editor<'static>) {
+    editor.set_selection(Selection::None);
+    editor
+        .borrow_with(font_system)
+        .action(Action::Motion(Motion::BufferEnd));
 }
 
 fn handle_editor_motion_key(
@@ -2433,6 +3263,166 @@ fn measure_buffer_pixels(buffer: &Buffer) -> (usize, usize) {
     )
 }
 
+fn measure_borrowed_buffer_scroll_metrics(
+    buffer: &mut BorrowedWithFontSystem<'_, Buffer>,
+) -> EditorScrollMetrics {
+    let metrics = buffer.metrics();
+    let scroll = buffer.scroll();
+    let mut max_right = 0.0_f32;
+    let mut max_bottom = 0.0_f32;
+    let mut line_top = 0.0_f32;
+    let mut current_vertical_scroll_px = 0.0_f32;
+    let line_count = buffer.lines.len();
+
+    for line_i in 0..line_count {
+        if line_i == scroll.line {
+            current_vertical_scroll_px = line_top + scroll.vertical.max(0.0);
+        }
+
+        let Some(layout_lines) = buffer.line_layout(line_i) else {
+            continue;
+        };
+        for layout_line in layout_lines {
+            let line_height = layout_line.line_height_opt.unwrap_or(metrics.line_height);
+            max_bottom = max_bottom.max(line_top + line_height);
+            for glyph in &layout_line.glyphs {
+                max_right = max_right.max(glyph.x + glyph.w);
+            }
+            line_top += line_height;
+        }
+    }
+
+    if scroll.line >= line_count {
+        current_vertical_scroll_px = max_bottom.max(0.0);
+    }
+
+    if max_bottom <= 0.0 {
+        max_bottom = metrics.line_height.max(1.0);
+    }
+
+    let content_width_px = max_right.ceil().max(1.0);
+    let content_height_px = max_bottom.ceil().max(1.0);
+    let viewport_width_px = buffer.size().0.unwrap_or(content_width_px).max(1.0);
+    let viewport_height_px = buffer.size().1.unwrap_or(content_height_px).max(1.0);
+    let max_horizontal_scroll_px = (content_width_px - viewport_width_px).max(0.0);
+    let max_vertical_scroll_px = (content_height_px - viewport_height_px).max(0.0);
+
+    EditorScrollMetrics {
+        current_horizontal_scroll_px: scroll.horizontal.clamp(0.0, max_horizontal_scroll_px),
+        max_horizontal_scroll_px,
+        current_vertical_scroll_px: current_vertical_scroll_px.clamp(0.0, max_vertical_scroll_px),
+        max_vertical_scroll_px,
+    }
+}
+
+fn clamp_borrowed_buffer_scroll(
+    buffer: &mut BorrowedWithFontSystem<'_, Buffer>,
+) -> EditorScrollMetrics {
+    let mut scroll_metrics = measure_borrowed_buffer_scroll_metrics(buffer);
+    let mut scroll = buffer.scroll();
+    let clamped_horizontal = scroll
+        .horizontal
+        .clamp(0.0, scroll_metrics.max_horizontal_scroll_px);
+    if (clamped_horizontal - scroll.horizontal).abs() > f32::EPSILON {
+        scroll.horizontal = clamped_horizontal;
+        buffer.set_scroll(scroll);
+        buffer.shape_until_scroll(true);
+    }
+    scroll_metrics.current_horizontal_scroll_px = clamped_horizontal;
+    scroll_metrics
+}
+
+fn viewer_scrollbar_track_rects(
+    scroll_style: egui::style::ScrollStyle,
+    widget_hovered: bool,
+    widget_active: bool,
+    content_rect: Rect,
+    scroll_metrics: EditorScrollMetrics,
+) -> ViewerScrollbarTracks {
+    let show_horizontal = scroll_metrics.max_horizontal_scroll_px > f32::EPSILON;
+    let show_vertical = scroll_metrics.max_vertical_scroll_px > f32::EPSILON;
+    if !show_horizontal && !show_vertical {
+        return ViewerScrollbarTracks::default();
+    }
+
+    let bar_width = if scroll_style.floating && !widget_hovered && !widget_active {
+        scroll_style
+            .floating_width
+            .max(scroll_style.floating_allocated_width)
+            .max(2.0)
+    } else {
+        scroll_style.bar_width.max(2.0)
+    };
+    let inner_margin = if scroll_style.floating {
+        scroll_style.bar_inner_margin
+    } else {
+        scroll_style.bar_inner_margin.max(1.0)
+    };
+    let outer_margin = if scroll_style.floating {
+        0.0
+    } else {
+        scroll_style.bar_outer_margin
+    };
+
+    ViewerScrollbarTracks {
+        vertical: if show_vertical {
+            let min_x = content_rect.max.x - outer_margin - bar_width;
+            let max_x = content_rect.max.x - outer_margin;
+            let max_y = if show_horizontal {
+                content_rect.max.y - outer_margin - bar_width - inner_margin
+            } else {
+                content_rect.max.y - outer_margin
+            };
+            let min_y = content_rect.min.y + inner_margin;
+            Some(Rect::from_min_max(
+                Pos2::new(min_x, min_y),
+                Pos2::new(max_x, max_y),
+            ))
+        } else {
+            None
+        },
+        horizontal: if show_horizontal {
+            let min_y = content_rect.max.y - outer_margin - bar_width;
+            let max_y = content_rect.max.y - outer_margin;
+            let max_x = if show_vertical {
+                content_rect.max.x - outer_margin - bar_width - inner_margin
+            } else {
+                content_rect.max.x - outer_margin
+            };
+            let min_x = content_rect.min.x + inner_margin;
+            Some(Rect::from_min_max(
+                Pos2::new(min_x, min_y),
+                Pos2::new(max_x, max_y),
+            ))
+        } else {
+            None
+        },
+    }
+}
+
+fn viewer_visible_text_rect(
+    content_rect: Rect,
+    scroll_metrics: EditorScrollMetrics,
+) -> Option<Rect> {
+    let viewport_width = content_rect.width().max(1.0);
+    let viewport_height = content_rect.height().max(1.0);
+    let content_width = viewport_width + scroll_metrics.max_horizontal_scroll_px;
+    let content_height = viewport_height + scroll_metrics.max_vertical_scroll_px;
+    let visible_width =
+        (content_width - scroll_metrics.current_horizontal_scroll_px).clamp(0.0, viewport_width);
+    let visible_height =
+        (content_height - scroll_metrics.current_vertical_scroll_px).clamp(0.0, viewport_height);
+
+    if visible_width <= f32::EPSILON || visible_height <= f32::EPSILON {
+        None
+    } else {
+        Some(Rect::from_min_size(
+            content_rect.min,
+            egui::vec2(visible_width, visible_height),
+        ))
+    }
+}
+
 fn paint_texture(ui: &Ui, texture: &TextureHandle, rect: Rect) {
     ui.painter().image(
         texture.id(),
@@ -2469,6 +3459,52 @@ fn blend_rect(image: &mut ColorImage, x: i32, y: i32, w: i32, h: i32, src: Color
             let dst = image.pixels[index];
             image.pixels[index] = alpha_blend(src, dst);
         }
+    }
+}
+
+fn blend_rect_into_tiles(
+    tiles: &mut [(usize, usize, ColorImage)],
+    total_width: usize,
+    total_height: usize,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    src: Color32,
+) {
+    let total_width = total_width as i32;
+    let total_height = total_height as i32;
+    let x0 = x.max(0).min(total_width);
+    let y0 = y.max(0).min(total_height);
+    let x1 = (x + w).max(0).min(total_width);
+    let y1 = (y + h).max(0).min(total_height);
+
+    if x0 >= x1 || y0 >= y1 {
+        return;
+    }
+
+    for (origin_x, origin_y, image) in tiles.iter_mut() {
+        let tile_x0 = *origin_x as i32;
+        let tile_y0 = *origin_y as i32;
+        let tile_x1 = tile_x0 + image.size[0] as i32;
+        let tile_y1 = tile_y0 + image.size[1] as i32;
+
+        let overlap_x0 = x0.max(tile_x0);
+        let overlap_y0 = y0.max(tile_y0);
+        let overlap_x1 = x1.min(tile_x1);
+        let overlap_y1 = y1.min(tile_y1);
+        if overlap_x0 >= overlap_x1 || overlap_y0 >= overlap_y1 {
+            continue;
+        }
+
+        blend_rect(
+            image,
+            overlap_x0 - tile_x0,
+            overlap_y0 - tile_y0,
+            overlap_x1 - overlap_x0,
+            overlap_y1 - overlap_y0,
+            src,
+        );
     }
 }
 

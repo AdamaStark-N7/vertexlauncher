@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/centos:7}"
 WORK_ROOT="${REPO_ROOT}/.cache/appimage-x86_64-container"
 CARGO_REGISTRY_DIR="${WORK_ROOT}/cargo-registry"
 CARGO_GIT_DIR="${WORK_ROOT}/cargo-git"
@@ -61,25 +61,45 @@ podman "${PODMAN_ARGS[@]}" \
     export XDG_DATA_HOME=/cache/xdg-data
     mkdir -p "${HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 
+    configure_centos_vault() {
+      rm -f /etc/yum.repos.d/*.repo
+      cat >/etc/yum.repos.d/CentOS-Vault.repo <<EOF
+[base]
+name=CentOS-7 - Base
+baseurl=http://vault.centos.org/7.9.2009/os/\$basearch/
+gpgcheck=0
+enabled=1
+[updates]
+name=CentOS-7 - Updates
+baseurl=http://vault.centos.org/7.9.2009/updates/\$basearch/
+gpgcheck=0
+enabled=1
+[extras]
+name=CentOS-7 - Extras
+baseurl=http://vault.centos.org/7.9.2009/extras/\$basearch/
+gpgcheck=0
+enabled=1
+EOF
+    }
+
     echo "[appimage-x86_64] installing native packaging dependencies..."
-    apt-get update >/dev/null
-    apt-get install -y --no-install-recommends \
+    configure_centos_vault
+    yum -y install \
       ca-certificates \
       curl \
-      pkg-config \
+      pkgconfig \
       patchelf \
       file \
       desktop-file-utils \
-      libglib2.0-dev \
-      libgtk-3-dev \
-      libgdk-pixbuf-2.0-dev \
-      libpango1.0-dev \
-      libatk1.0-dev \
-      libcairo2-dev \
-      libsysprof-4-dev \
-      libsoup-3.0-dev \
-      libwebkit2gtk-4.1-dev \
-      libjavascriptcoregtk-4.1-dev >/dev/null
+      glib2-devel \
+      gtk3-devel \
+      gdk-pixbuf2-devel \
+      pango-devel \
+      atk-devel \
+      cairo-devel \
+      libsoup-devel \
+      webkitgtk4-devel \
+      webkitgtk4-jsc-devel >/dev/null
 
     if [[ ! -f /workspace/target/x86_64-unknown-linux-gnu/release/vertexlauncher ]]; then
       echo "[appimage-x86_64] ensuring Rust toolchain..."
@@ -100,10 +120,12 @@ podman "${PODMAN_ARGS[@]}" \
       rustup default stable >/dev/null
       rustup target add x86_64-unknown-linux-gnu >/dev/null
 
+      bash /workspace/scripts/patch-wry-source.sh
+
       echo "[appimage-x86_64] building native x86_64 binary..."
       cargo build --release --target x86_64-unknown-linux-gnu -p vertexlauncher
     fi
 
-    echo "[appimage-x86_64] packaging AppImage inside Debian container..."
+    echo "[appimage-x86_64] packaging AppImage inside CentOS 7 container..."
     bash /workspace/scripts/build-appimage.sh
   '

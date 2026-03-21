@@ -13,6 +13,8 @@ instances.json
 .cache
 /.flatpak-builder
 /flatpak/build-dir
+/flatpak/generated
 /flatpak/repo
+/flatpak/.generated-*.yaml
 /flatpak/vendor
 /target/release/io.github.SturdyFool10.VertexLauncher*.flatpak

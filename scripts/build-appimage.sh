@@ -49,11 +49,11 @@ maybe_delegate_container_build() {
       ;;
   esac
 
-  if [[ ! -x "${helper_script}" ]]; then
+  if [[ ! -f "${helper_script}" ]]; then
     return 1
   fi
 
-  echo "[appimage] packaging ${requested_arch} AppImage inside Debian container..."
+  echo "[appimage] packaging ${requested_arch} AppImage inside container..."
   exec bash "${helper_script}"
 }
 
@@ -365,6 +365,156 @@ bundle_foreign_arch_libraries() {
   patchelf --set-rpath '$ORIGIN/../lib' "${appdir}/usr/bin/${PACKAGE}"
 }
 
+find_first_existing_path() {
+  local candidate=""
+
+  for candidate in "$@"; do
+    if [[ -e "${candidate}" ]]; then
+      printf "%s\n" "${candidate}"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+copy_tree_contents_if_present() {
+  local source_path="$1"
+  local dest_path="$2"
+
+  if [[ ! -d "${source_path}" ]]; then
+    return 1
+  fi
+
+  mkdir -p "${dest_path}"
+  cp -a "${source_path}/." "${dest_path}/"
+}
+
+set_rpath_if_elf() {
+  local target_path="$1"
+  local rpath_value="$2"
+
+  if ! command -v patchelf >/dev/null 2>&1; then
+    return 0
+  fi
+  if [[ ! -f "${target_path}" ]]; then
+    return 0
+  fi
+  if ! file -b "${target_path}" | grep -q "ELF"; then
+    return 0
+  fi
+
+  patchelf --set-rpath "${rpath_value}" "${target_path}"
+}
+
+patch_binary_path_literal() {
+  local binary_path="$1"
+  local old_value="$2"
+  local new_value="$3"
+
+  python - "$binary_path" "$old_value" "$new_value" <<'PY'
+import sys
+
+binary_path = sys.argv[1]
+old = sys.argv[2].encode("utf-8")
+new = sys.argv[3].encode("utf-8")
+
+if len(new) > len(old):
+    raise SystemExit(
+        "replacement path '{}' is longer than '{}'".format(sys.argv[3], sys.argv[2])
+    )
+
+with open(binary_path, "rb") as handle:
+    payload = handle.read()
+index = payload.find(old)
+if index == -1:
+    raise SystemExit(0)
+
+replacement = new + (b"\x00" * (len(old) - len(new)))
+payload = payload.replace(old, replacement)
+with open(binary_path, "wb") as handle:
+    handle.write(payload)
+PY
+}
+
+bundle_runtime_support_assets() {
+  local appdir="$1"
+  local webkit_helper_dir=""
+  local webkit_bundle_dir=""
+  local gdk_pixbuf_dir=""
+  local gtk_modules_dir=""
+  local schema_dir="/usr/share/glib-2.0/schemas"
+  local default_theme_dir="/usr/share/themes/Default/gtk-3.0"
+  local helper_file=""
+
+  webkit_helper_dir="$(find_first_existing_path \
+    /usr/libexec/webkit2gtk-4.0 \
+    /usr/lib/x86_64-linux-gnu/webkit2gtk-4.0 \
+    /usr/lib/aarch64-linux-gnu/webkit2gtk-4.0 || true)"
+  webkit_bundle_dir="$(find_first_existing_path \
+    /usr/lib64/webkit2gtk-4.0 \
+    /usr/lib/x86_64-linux-gnu/webkit2gtk-4.0 \
+    /usr/lib/aarch64-linux-gnu/webkit2gtk-4.0 || true)"
+  gdk_pixbuf_dir="$(find_first_existing_path \
+    /usr/lib64/gdk-pixbuf-2.0/2.10.0 \
+    /usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0 \
+    /usr/lib/aarch64-linux-gnu/gdk-pixbuf-2.0/2.10.0 || true)"
+  gtk_modules_dir="$(find_first_existing_path \
+    /usr/lib64/gtk-3.0/3.0.0 \
+    /usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0 \
+    /usr/lib/aarch64-linux-gnu/gtk-3.0/3.0.0 || true)"
+
+  if [[ -n "${webkit_helper_dir}" ]]; then
+    copy_tree_contents_if_present "${webkit_helper_dir}" "${appdir}/usr/libexec/webkit2gtk-4.0"
+  fi
+  if [[ -n "${webkit_bundle_dir}" ]]; then
+    copy_tree_contents_if_present "${webkit_bundle_dir}" "${appdir}/usr/lib64/webkit2gtk-4.0"
+  fi
+  if [[ -n "${gdk_pixbuf_dir}" ]]; then
+    copy_tree_contents_if_present "${gdk_pixbuf_dir}" "${appdir}/usr/lib64/gdk-pixbuf-2.0/2.10.0"
+  fi
+  if [[ -n "${gtk_modules_dir}" ]]; then
+    copy_tree_contents_if_present "${gtk_modules_dir}" "${appdir}/usr/lib64/gtk-3.0/3.0.0"
+  fi
+  copy_tree_contents_if_present "${schema_dir}" "${appdir}/usr/share/glib-2.0/schemas" || true
+  copy_tree_contents_if_present "${default_theme_dir}" "${appdir}/usr/share/themes/Default/gtk-3.0" || true
+
+  if command -v glib-compile-schemas >/dev/null 2>&1 && [[ -d "${appdir}/usr/share/glib-2.0/schemas" ]]; then
+    glib-compile-schemas "${appdir}/usr/share/glib-2.0/schemas"
+  fi
+
+  for helper_file in \
+    "${appdir}/usr/libexec/webkit2gtk-4.0/WebKitNetworkProcess" \
+    "${appdir}/usr/libexec/webkit2gtk-4.0/WebKitPluginProcess" \
+    "${appdir}/usr/libexec/webkit2gtk-4.0/WebKitWebProcess" \
+    "${appdir}/usr/libexec/webkit2gtk-4.0/jsc" \
+    "${appdir}/usr/lib64/webkit2gtk-4.0/injected-bundle/libwebkit2gtkinjectedbundle.so"
+  do
+    set_rpath_if_elf "${helper_file}" '$ORIGIN/../../lib:$ORIGIN/../../lib64/webkit2gtk-4.0'
+  done
+
+  if [[ -d "${appdir}/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders" ]]; then
+    while IFS= read -r -d "" helper_file; do
+      set_rpath_if_elf "${helper_file}" '$ORIGIN/../../../../lib'
+    done < <(find "${appdir}/usr/lib64/gdk-pixbuf-2.0/2.10.0/loaders" -type f -print0)
+  fi
+
+  if [[ -d "${appdir}/usr/lib64/gtk-3.0/3.0.0/immodules" ]]; then
+    while IFS= read -r -d "" helper_file; do
+      set_rpath_if_elf "${helper_file}" '$ORIGIN/../../../../lib'
+    done < <(find "${appdir}/usr/lib64/gtk-3.0/3.0.0/immodules" -type f -print0)
+  fi
+
+  if [[ -f "${appdir}/usr/lib/libwebkit2gtk-4.0.so.37" ]]; then
+    patch_binary_path_literal "${appdir}/usr/lib/libwebkit2gtk-4.0.so.37" \
+      "/usr/libexec/webkit2gtk-4.0" \
+      "libexec/webkit2gtk-4.0"
+    patch_binary_path_literal "${appdir}/usr/lib/libwebkit2gtk-4.0.so.37" \
+      "/usr/lib64/webkit2gtk-4.0/injected-bundle/" \
+      "lib64/webkit2gtk-4.0/injected-bundle/"
+  fi
+}
+
 machine_arch="$(uname -m)"
 host_arch="$(normalize_arch "${machine_arch}")" || {
   echo "Unsupported AppImage host architecture: ${machine_arch}" >&2
@@ -483,13 +633,19 @@ if (( manual_library_bundle )); then
   echo "[appimage] bundling ${requested_arch} shared libraries without linuxdeploy auto-detection..."
   bundle_foreign_arch_libraries "${source_binary}" "${appdir}"
 else
-  run_tool "${linuxdeploy_tool}" \
-    --appdir "${appdir}" \
-    --desktop-file "${appdir}/${APP_ID}.desktop" \
-    --icon-file "${icon_path}" \
-    --executable "${appdir}/usr/bin/${PACKAGE}" \
-    "${plugin_args[@]}"
+  linuxdeploy_args=(
+    --appdir "${appdir}"
+    --desktop-file "${appdir}/${APP_ID}.desktop"
+    --icon-file "${icon_path}"
+    --executable "${appdir}/usr/bin/${PACKAGE}"
+  )
+  if (( ${#plugin_args[@]} > 0 )); then
+    linuxdeploy_args+=("${plugin_args[@]}")
+  fi
+  run_tool "${linuxdeploy_tool}" "${linuxdeploy_args[@]}"
 fi
+
+bundle_runtime_support_assets "${appdir}"
 
 install -Dm755 "${SCRIPT_DIR}/resources/AppRun" "${appdir}/AppRun"
 

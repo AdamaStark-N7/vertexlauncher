@@ -82,13 +82,11 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
                         } else {
                             eframe::egui_wgpu::wgpu::Limits::default()
                         };
+                        let adapter_limits = adapter.limits();
 
                         eframe::egui_wgpu::wgpu::DeviceDescriptor {
                             label: Some("egui wgpu device"),
-                            required_limits: eframe::egui_wgpu::wgpu::Limits {
-                                max_texture_dimension_2d: 8192,
-                                ..base_limits
-                            },
+                            required_limits: base_limits.using_resolution(adapter_limits),
                             ..Default::default()
                         }
                     }),

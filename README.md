@@ -26,7 +26,7 @@ Windows release artifacts must use the MSVC targets. `windows-gnu` is not part o
 
 ## Native Linux Prerequisites
 
-On Linux, native launcher builds require GTK, GLib, Soup, and WebKit development packages.
+On Linux, native launcher builds require GTK, GLib, libsoup 2.4, and the WebKitGTK 4.0 stack that matches the embedded Microsoft sign-in webview.
 
 For Debian/Ubuntu:
 
@@ -40,15 +40,12 @@ sudo apt-get install -y --no-install-recommends \
   libpango1.0-dev \
   libatk1.0-dev \
   libcairo2-dev \
-  libsoup-3.0-dev \
-  libwebkit2gtk-4.1-dev \
-  libjavascriptcoregtk-4.1-dev
+  libsoup2.4-dev \
+  libwebkit2gtk-4.0-dev \
+  libjavascriptcoregtk-4.0-dev
 ```
 
-If your distro only ships the `4.0` WebKit packages, use:
-
-- `libwebkit2gtk-4.0-dev`
-- `libjavascriptcoregtk-4.0-dev`
+If your distro has dropped `libsoup2.4` / `webkit2gtk-4.0`, use the containerized Linux release scripts or Flatpak instead of a host-native build.
 
 Basic native builds:
 
@@ -56,9 +53,9 @@ Basic native builds:
 cargo build --release
 ```
 
-Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that will inherit the host glibc baseline and the host GTK/WebKit stack. The release scripts build Linux x86-64 in a Debian-based container so the binary is linked against a stable distro baseline instead of your rolling host.
+Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that will inherit the host glibc baseline and the host GTK/WebKit stack. The x86-64 release scripts build Linux in a CentOS 7 container so the binary is linked against a `glibc 2.17` baseline instead of your rolling host.
 
-The current Linux UI stack still depends on distro WebKitGTK/GTK libraries, so the final glibc floor is constrained by those packages. The x86-64 container helper now prints the highest required glibc symbol version after each build and defaults to enforcing `VERTEX_MAX_GLIBC_VERSION=2.42`, which matches the lower end of current Fedora-derived gaming distros such as Bazzite and Nobara. Override `VERTEX_MAX_GLIBC_VERSION=<version>` if you want a stricter or looser ceiling.
+The current Linux UI stack still depends on distro WebKitGTK/GTK libraries, so the final glibc floor is constrained by those packages. To preserve the embedded Microsoft sign-in webview while restoring a `glibc 2.17` floor on x86-64, the launcher is pinned to the last `wry` line that still uses `libsoup2.4` with WebKitGTK 4.0, and the Linux container scripts target CentOS 7 where that WebKitGTK stack is still available. That upstream `wry` line currently needs a one-line compatibility patch against the modern `webkit2gtk` Rust bindings, so native Linux builds should run `bash scripts/patch-wry-source.sh` once before `cargo build`. The containerized Linux/AppImage helpers run that patch step automatically. The x86-64 container helper prints the highest required glibc symbol version after each build and now defaults to enforcing `VERTEX_MAX_GLIBC_VERSION=2.17`.
 
 Windows MSVC example:
 
@@ -98,7 +95,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1
 
 ## Flatpak
 
-Linux users who need the broadest cross-distro compatibility should use the Flatpak package instead of the raw host-linked binary. The Flatpak package carries its own GNOME runtime, so it does not rely on the host distro's glibc, GTK, Soup, or WebKitGTK stack. That is the packaging path intended for current gaming-oriented distros such as Bazzite, Nobara, CachyOS, and similar systems that already support Flatpak.
+Linux users who want a sandboxed portable package can use the Flatpak bundle. Vertex now packages Flatpak around the same CentOS 7-built Linux AppDir used for AppImage, so the launcher ELF staged into the bundle is checked against a `GLIBC_2.17` ceiling before Flatpak export. The Flatpak still runs against its selected runtime at launch time, but the packaged launcher binary itself stays aligned with the Linux `glibc 2.17+` target.
 
 The Flatpak manifest grants home-directory filesystem access so the launcher can detect and import existing Minecraft / Modrinth / launcher install folders by path instead of being limited to its sandbox-private storage. It also exposes both Wayland and X11 sockets and sets `GDK_BACKEND=wayland,x11`, so the launcher prefers Wayland when available while still allowing Minecraft clients and Java mods to fall back to X11 when needed.
 
@@ -110,8 +107,9 @@ bash scripts/build-flatpak.sh
 
 This script will:
 
-- vendor Rust dependencies into `flatpak/vendor`
-- build the app with `flatpak-builder` against the Flatpak runtime instead of host desktop libraries
+- build or reuse the matching prebuilt Linux AppDir from the CentOS 7 packaging pipeline
+- reject the build if the staged launcher binary exceeds `VERTEX_MAX_GLIBC_VERSION` (defaults to `2.17`)
+- stage the AppDir into a Flatpak build directory and export an arch-specific bundle
 - export an arch-specific local Flatpak repo under `flatpak/repo/<arch>`
 - emit distributable bundles under `target/release/io.github.SturdyFool10.VertexLauncher-<arch>.flatpak`
 
@@ -121,11 +119,13 @@ The release scripts also invoke the Flatpak helper. On Linux x86-64 they now def
 
 The Flatpak app id is `io.github.SturdyFool10.VertexLauncher`.
 
-If you only have an x86-64 Linux builder but want an ARM64 Flatpak, set `VERTEX_FLATPAK_ARCHES=aarch64` and `VERTEX_ENABLE_ARM64_EMULATION=1`. That path delegates the build to `scripts/build-flatpak-arm64-container.sh`, which runs an emulated ARM64 Podman container. It is much slower than a native ARM64 host and depends on working `podman` plus host `binfmt_misc` / QEMU user emulation.
+The checked-in manifest at `flatpak/io.github.SturdyFool10.VertexLauncher.yaml` is now a reference/template for the staged source layout. Native host exports still generate arch-specific manifests under `flatpak/generated/`, while the ARM64 emulated export path stages the build directory directly to avoid `flatpak-builder` sandbox issues under emulation.
+
+If you only have an x86-64 Linux builder but want an ARM64 Flatpak, set `VERTEX_FLATPAK_ARCHES=aarch64` and `VERTEX_ENABLE_ARM64_EMULATION=1`. That path first cross-compiles the ARM64 launcher on the host against a cached CentOS 7 ARM64 sysroot, then reuses the generated AppDir and performs only the final Flatpak export under emulation. It still depends on working `podman` plus host `binfmt_misc` / QEMU user emulation, but it is much faster than emulating the full Rust build.
 
 ## AppImage
 
-Linux users who want a single-file portable launcher can also build an AppImage. Unlike the Flatpak bundle, the AppImage path still depends on `linuxdeploy` to collect the launcher's native GTK/WebKit stack from the build host, so it should be produced on the same Linux architecture you plan to ship.
+Linux users who want a single-file portable launcher can also build an AppImage. Vertex now assembles AppImages around a CentOS 7-built AppDir so the launcher and bundled GTK/WebKit stack stay aligned with the `glibc 2.17+` target instead of inheriting a newer host distro baseline.
 
 When Vertex runs from an AppImage, it now defaults to portable storage beside the AppImage itself unless `VERTEX_CONFIG_LOCATION` is already set. For example, running `VertexLauncher-x86_64.AppImage` will use `VertexLauncher-x86_64.AppImage.data/` for config, instances, cache, logs, and themes.
 
@@ -149,9 +149,11 @@ The staged AppImage artifact is written to `target/release` as one of:
 - `vertexlauncher-linuxx86-64.AppImage`
 - `vertexlauncher-linuxarm64.AppImage`
 
-On Linux, the AppImage helper now prefers packaging inside a Debian Bookworm container when `podman` is available. That avoids `linuxdeploy` failures on rolling hosts whose system libraries use newer ELF features such as RELR relocations. Set `VERTEX_APPIMAGE_USE_CONTAINER=0` if you need to force host packaging.
+On Linux x86-64, the AppImage helper now prefers packaging inside a CentOS 7 container when `podman` is available. That keeps the bundled GTK/WebKit runtime aligned with the `glibc 2.17` baseline instead of inheriting a newer host stack. Set `VERTEX_APPIMAGE_USE_CONTAINER=0` if you need to force host packaging.
 
-If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper delegates to `scripts/build-appimage-arm64-container.sh`, which runs an emulated ARM64 Podman container and will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
+During staging, the AppImage helper now also copies the WebKitGTK helper binaries, injected bundle, GTK IM modules, GDK Pixbuf loaders, schemas, and default theme assets into the AppDir, then patches the bundled WebKitGTK library to resolve those helper paths from inside the AppImage instead of the original CentOS system locations.
+
+If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper now cross-compiles the ARM64 launcher on the host against a cached CentOS 7 ARM64 sysroot, then runs only the final AppImage packaging step inside an emulated ARM64 Podman container. It will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
 
 The release scripts now default to building both `vertexlauncher-linuxx86-64.AppImage` and `vertexlauncher-linuxarm64.AppImage` on Linux x86-64. Override that with `VERTEX_RELEASE_APPIMAGE_ARCHES=<comma-separated arches>` or the legacy single-arch `VERTEX_RELEASE_APPIMAGE_ARCH`.
 
@@ -168,8 +170,8 @@ Staged artifacts are written to `target/release` as:
 ## Cross-Build Notes
 
 - Windows cross-builds use `cargo xwin` with the `clang` backend and scrub host-specific compiler flags.
-- Linux x86-64 release builds use a containerized Debian userspace so release binaries do not inherit the builder's host glibc and desktop libraries.
-- Linux ARM64 release builds use a cross sysroot path. The current helper script can assemble that sysroot for release builds.
+- Linux x86-64 release builds use a CentOS 7 container so release binaries and portable bundles stay at a `glibc 2.17` floor.
+- Linux ARM64 release builds now cross-compile on the host against a cached CentOS 7 ARM64 sysroot, then use emulation only for the final AppImage/Flatpak packaging steps.
 - macOS ARM64 release builds require a usable Apple SDK. The scripts detect `SDKROOT`, `DEVELOPER_DIR`, `xcrun`, and `~/.local/share/macos-sdk/MacOSX*.sdk`.
 
 ## What The Launcher Can Do

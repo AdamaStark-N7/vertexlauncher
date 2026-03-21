@@ -1,11 +1,9 @@
 use std::hash::Hash;
 
-use egui::Ui;
-use textui::{ButtonOptions, LabelOptions, TextUi};
+use egui::{Color32, Stroke, Ui};
+use textui::{ButtonOptions, InputOptions, RichTextSpan, RichTextStyle, TextUi};
 
 use crate::{console, ui::style};
-
-const CONSOLE_TEXT_TILE_CHARS: usize = 512;
 
 pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
     let snapshot = console::snapshot();
@@ -56,42 +54,32 @@ pub(crate) fn render_log_buffer(
     lines: &[String],
     empty_message: &str,
     stick_to_bottom: bool,
-    text_redraw_generation: u64,
+    _text_redraw_generation: u64,
 ) {
     let viewport_height = ui.available_height().max(1.0);
-    let scroll_area_id = ui.make_persistent_id((&id_source, "scroll_area"));
-    let text_base_id = ui.make_persistent_id((&id_source, "text", text_redraw_generation));
+    let text_base_id = ui.make_persistent_id((&id_source, "text"));
     ui.set_min_height(viewport_height);
-    egui::ScrollArea::both()
-        .id_salt(scroll_area_id)
-        .auto_shrink([false, false])
-        .max_height(viewport_height)
-        .stick_to_bottom(stick_to_bottom)
-        .show(ui, |ui| {
-            if lines.is_empty() {
-                let mut empty_style = style::muted(ui);
-                empty_style.wrap = false;
-                let _ = text_ui.label(ui, (text_base_id, "empty"), empty_message, &empty_style);
-                let _ = ui.allocate_exact_size(
-                    egui::vec2(1.0, (viewport_height - 24.0).max(1.0)),
-                    egui::Sense::hover(),
-                );
-                return;
-            }
+    if lines.is_empty() {
+        let mut empty_style = style::muted(ui);
+        empty_style.wrap = false;
+        let _ = text_ui.label(ui, (text_base_id, "empty"), empty_message, &empty_style);
+        let _ = ui.allocate_exact_size(
+            egui::vec2(1.0, (viewport_height - 24.0).max(1.0)),
+            egui::Sense::hover(),
+        );
+        return;
+    }
 
-            let mut context = LogParseContext::default();
-            for (index, line) in lines.iter().enumerate() {
-                let resolved_level = resolve_log_level(line, &mut context);
-                let mut line_style = style::body(ui);
-                line_style.wrap = false;
-                line_style.color = color_for_level(ui, resolved_level);
-                line_style.padding = egui::Vec2::ZERO;
-                if matches!(resolved_level, Some(LogLevel::Error | LogLevel::Fatal)) {
-                    line_style.weight = 700;
-                }
-                render_tiled_console_line(ui, text_ui, (text_base_id, index), line, &line_style);
-            }
-        });
+    let viewer_options = log_viewer_options(ui, viewport_height);
+    let spans = build_log_spans(ui, lines);
+    let _ = text_ui.multiline_rich_viewer(
+        ui,
+        (text_base_id, "viewer"),
+        &spans,
+        &viewer_options,
+        stick_to_bottom,
+        false,
+    );
 }
 
 fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::ConsoleSnapshot) {
@@ -173,6 +161,62 @@ fn color_for_level(ui: &Ui, level: Option<LogLevel>) -> egui::Color32 {
         Some(LogLevel::Debug | LogLevel::Trace) => ui.visuals().weak_text_color(),
         None => ui.visuals().text_color(),
     }
+}
+
+fn log_viewer_options(ui: &Ui, viewport_height: f32) -> InputOptions {
+    let body_style = style::body(ui);
+    let selection = ui.visuals().selection;
+    InputOptions {
+        font_size: body_style.font_size,
+        line_height: body_style.line_height,
+        text_color: body_style.color,
+        cursor_color: ui.visuals().text_cursor.stroke.color,
+        selection_color: Color32::from_rgba_premultiplied(
+            selection.bg_fill.r(),
+            selection.bg_fill.g(),
+            selection.bg_fill.b(),
+            110,
+        ),
+        selected_text_color: selection.stroke.color,
+        background_color: Color32::TRANSPARENT,
+        background_color_hovered: Some(Color32::TRANSPARENT),
+        background_color_focused: Some(Color32::TRANSPARENT),
+        stroke: Stroke::NONE,
+        stroke_hovered: Some(Stroke::NONE),
+        stroke_focused: Some(Stroke::NONE),
+        corner_radius: 0,
+        padding: egui::Vec2::ZERO,
+        monospace: false,
+        min_width: 1.0,
+        desired_width: Some(ui.available_width().max(1.0)),
+        desired_rows: ((viewport_height / body_style.line_height).ceil() as usize).max(1),
+    }
+}
+
+fn build_log_spans(ui: &Ui, lines: &[String]) -> Vec<RichTextSpan> {
+    let mut context = LogParseContext::default();
+    let mut spans = Vec::with_capacity(lines.len());
+    for (index, line) in lines.iter().enumerate() {
+        let level = resolve_log_level(line, &mut context);
+        let mut text = line.clone();
+        if index + 1 < lines.len() {
+            text.push('\n');
+        }
+        spans.push(RichTextSpan {
+            text,
+            style: RichTextStyle {
+                color: color_for_level(ui, level),
+                monospace: false,
+                italic: false,
+                weight: if matches!(level, Some(LogLevel::Error | LogLevel::Fatal)) {
+                    700
+                } else {
+                    400
+                },
+            },
+        });
+    }
+    spans
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -327,38 +371,4 @@ fn looks_like_minecraft_timestamp(value: &str) -> bool {
     [hours, minutes, seconds]
         .iter()
         .all(|part| part.len() == 2 && part.as_bytes().iter().all(u8::is_ascii_digit))
-}
-
-fn render_tiled_console_line(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    line_id_source: impl Hash + Copy,
-    line: &str,
-    line_style: &LabelOptions,
-) {
-    if line.is_empty() {
-        let _ = text_ui.label_async(ui, (line_id_source, 0usize), "", line_style);
-        return;
-    }
-
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 0.0;
-        let mut start = 0usize;
-        let mut tile_index = 0usize;
-        while start < line.len() {
-            let end = tile_end_at_char_limit(line, start, CONSOLE_TEXT_TILE_CHARS);
-            let segment = &line[start..end];
-            let _ = text_ui.label_async(ui, (line_id_source, tile_index), segment, line_style);
-            start = end;
-            tile_index = tile_index.saturating_add(1);
-        }
-    });
-}
-
-fn tile_end_at_char_limit(line: &str, start: usize, max_chars: usize) -> usize {
-    line[start..]
-        .char_indices()
-        .nth(max_chars)
-        .map(|(offset, _)| start + offset)
-        .unwrap_or(line.len())
 }

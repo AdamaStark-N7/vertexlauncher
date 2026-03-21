@@ -41,6 +41,8 @@ cosmic-text = "*"
 glyphon = "*"
 pulldown-cmark = "*"
 syntect = "*"
+base64 = "0.22"
+raw-window-handle = "0.6"
 tokio = { version = "*", features = ["rt-multi-thread", "sync", "time"] }
 tracing = "*"
 tracing-subscriber = { version = "*", features = ["fmt", "env-filter"] }

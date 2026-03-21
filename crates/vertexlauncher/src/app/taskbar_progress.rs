@@ -22,7 +22,6 @@ mod platform {
     use eframe::Frame;
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use std::cell::RefCell;
-    use std::ffi::c_void;
     use std::thread_local;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::System::Com::{
@@ -37,7 +36,7 @@ mod platform {
         let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
             return Ok(());
         };
-        let hwnd = HWND(handle.hwnd.get() as *mut c_void);
+        let hwnd = HWND(handle.hwnd.get());
 
         TASKBAR.with(|cell| {
             let mut cached = cell.borrow_mut();
@@ -67,7 +66,7 @@ mod platform {
 
     fn init_taskbar() -> Option<ITaskbarList4> {
         unsafe {
-            let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+            let _ = CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED);
             CoCreateInstance(&TaskbarList, None, CLSCTX_SERVER).ok()
         }
     }

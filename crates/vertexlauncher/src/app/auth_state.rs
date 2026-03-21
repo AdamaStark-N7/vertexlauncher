@@ -826,9 +826,8 @@ fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent, st
                 privacy::redact_account_label(streamer_mode, &display_name);
             tracing::warn!(
                 target: "vertexlauncher/auth/renew",
-                profile_id,
-                display_name,
-                error,
+                profile_fingerprint = %webview_sign_in::fingerprint_for_log(&profile_id),
+                error = %webview_sign_in::sanitize_message_for_log(&error),
                 "Auto-renew login notification reported an error."
             );
             notification::emit_replace(
@@ -850,13 +849,32 @@ fn renewal_replace_key(profile_id: &str) -> String {
 }
 
 fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
+    let started_at = std::time::Instant::now();
+    tracing::info!(
+        target: "vertexlauncher/auth/signin",
+        "Starting Microsoft sign-in flow."
+    );
+
     let flow = match auth::login_begin(client_id) {
         Ok(flow) => flow,
         Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
+                "Failed to initialize Microsoft sign-in flow."
+            );
             let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
             return;
         }
     };
+
+    tracing::info!(
+        target: "vertexlauncher/auth/signin",
+        auth_url = %webview_sign_in::sanitize_url_for_log(&flow.auth_request_uri),
+        redirect_url = %webview_sign_in::sanitize_url_for_log(auth::oauth_redirect_uri()),
+        expected_state = %webview_sign_in::fingerprint_for_log(flow.expected_state()),
+        "Microsoft sign-in flow initialized; opening embedded webview."
+    );
 
     let _ = sender.send(AuthFlowEvent::AwaitingBrowser);
 
@@ -867,18 +885,42 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
     ) {
         Ok(auth_code) => auth_code,
         Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = %webview_sign_in::sanitize_message_for_log(&err),
+                "Microsoft sign-in webview failed before returning a callback URL."
+            );
             let _ = sender.send(AuthFlowEvent::Failed(err));
             return;
         }
     };
 
+    tracing::info!(
+        target: "vertexlauncher/auth/signin",
+        elapsed_ms = started_at.elapsed().as_millis() as u64,
+        callback_url = %webview_sign_in::sanitize_url_for_log(&callback_url),
+        "Microsoft sign-in webview returned a callback URL; exchanging tokens."
+    );
+
     let _ = sender.send(AuthFlowEvent::WaitingForAuthorization);
 
     match auth::login_finish(&callback_url, flow) {
         Ok(account) => {
+            tracing::info!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "Microsoft sign-in flow completed successfully."
+            );
             let _ = sender.send(AuthFlowEvent::Completed(account));
         }
         Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
+                "Microsoft sign-in callback exchange failed."
+            );
             let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
         }
     }

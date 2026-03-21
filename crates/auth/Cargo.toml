@@ -1,6 +1,6 @@
 [package]
 name = "auth"
-version = "0.1.8-Alpha"
+version = "0.1.9-Alpha"
 edition = "2024"
 
 [dependencies]
@@ -8,7 +8,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 image.workspace = true
-base64 = "*"
+base64.workspace = true
 ureq.workspace = true
 tokio.workspace = true
 tracing.workspace = true

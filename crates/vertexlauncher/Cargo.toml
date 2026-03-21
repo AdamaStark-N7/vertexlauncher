@@ -1,6 +1,6 @@
 [package]
 name = "vertexlauncher"
-version = "0.1.8-Alpha"
+version = "0.1.9-Alpha"
 edition = "2024"
 build = "build.rs"
 
@@ -39,19 +39,19 @@ zip = { version = "*", default-features = false, features = ["deflate"] }
 rfd = "*"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-wry = "*"
-tao = "*"
+wry = "=0.24.11"
+tao = "=0.16.10"
 raw-window-handle = "*"
 windows = { version = "*", features = ["Win32_Foundation", "Win32_System_Com", "Win32_System_SystemInformation", "Win32_UI_Shell"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rfd = { version = "*", default-features = false, features = ["gtk3"] }
-wry = "*"
-tao = "*"
+wry = "=0.24.11"
+tao = "=0.16.10"
 
 [target.'cfg(target_os = "macos")'.dependencies]
-wry = "*"
-tao = "*"
+wry = "=0.24.11"
+tao = "=0.16.10"
 objc = "*"
 
 [build-dependencies]

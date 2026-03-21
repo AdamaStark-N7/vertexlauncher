@@ -2,4 +2,15 @@
 set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-exec "${HERE}/usr/bin/vertexlauncher" "$@"
+cd "${HERE}/usr"
+
+export LD_LIBRARY_PATH="${PWD}/lib:${PWD}/lib64/webkit2gtk-4.0${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+export XDG_DATA_DIRS="${PWD}/share${XDG_DATA_DIRS:+:${XDG_DATA_DIRS}}"
+export GSETTINGS_SCHEMA_DIR="${PWD}/share/glib-2.0/schemas"
+export GDK_PIXBUF_MODULEDIR="${PWD}/lib64/gdk-pixbuf-2.0/2.10.0/loaders"
+export GDK_PIXBUF_MODULE_FILE="${PWD}/lib64/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+export GTK_IM_MODULE_FILE="${PWD}/lib64/gtk-3.0/3.0.0/immodules.cache"
+export GTK_EXE_PREFIX="${PWD}"
+export GTK_DATA_PREFIX="${PWD}"
+
+exec "${PWD}/bin/vertexlauncher" "$@"

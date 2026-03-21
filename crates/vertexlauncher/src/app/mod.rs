@@ -42,6 +42,7 @@ mod platform;
 mod single_instance;
 mod taskbar_progress;
 mod tracing_setup;
+mod webview_runtime;
 mod webview_sign_in;
 
 pub use single_instance::{SingleInstanceError, acquire_single_instance};
@@ -157,6 +158,7 @@ impl VertexApp {
         let theme = theme_catalog.resolve(config.theme_id()).clone();
 
         let mut text_ui = TextUi::new();
+        text_ui.begin_frame(&cc.egui_ctx);
         FontController::register_included_fonts(&mut text_ui);
 
         let instance_store = match load_store() {

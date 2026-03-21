@@ -202,7 +202,7 @@ where
                     });
                     tracing::warn!(
                         target: "vertexlauncher/auth/renew",
-                        profile_id = %account.minecraft_profile.id,
+                        profile_fingerprint = %util::fingerprint_for_log(&account.minecraft_profile.id),
                         "secure storage was unavailable while loading the refresh token; skipping renewal"
                     );
                     continue;
@@ -261,7 +261,7 @@ where
                 });
                 tracing::warn!(
                     target: "vertexlauncher/auth/renew",
-                    error = %err,
+                    error = %util::sanitize_message_for_log(&err.to_string()),
                     "Failed to renew cached account session; falling back to offline token state."
                 );
                 if account.minecraft_access_token.take().is_some() {

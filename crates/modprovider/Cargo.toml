@@ -1,6 +1,6 @@
 [package]
 name = "modprovider"
-version = "0.1.8-Alpha"
+version = "0.1.9-Alpha"
 edition = "2024"
 
 [dependencies]

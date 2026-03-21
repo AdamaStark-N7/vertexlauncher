@@ -68,7 +68,7 @@ fn report_startup_message(message: impl Into<String>, level: rfd::MessageLevel) 
     eprintln!("{message}");
     let _ = rfd::MessageDialog::new()
         .set_title("Vertex Launcher")
-        .set_description(message)
+        .set_description(&message)
         .set_level(level)
         .set_buttons(rfd::MessageButtons::Ok)
         .show();
