@@ -210,11 +210,100 @@ fn run_webview_window_with_retries(
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux", target_os = "macos"))]
+/// Launch a webview sign-in window. On Linux this will attempt to
+/// discover the correct WebKitGTK helper directory (`WebKitWebProcess` and
+/// siblings) and set the `WEBKIT_EXEC_PATH` environment variable if it
+/// is not already defined. This helps avoid failures where the
+/// underlying `webkit2gtk` stack is installed in a non-standard location
+/// such as `/usr/lib/webkit2gtk-4.0` instead of `/usr/libexec/webkit2gtk-4.0`.
 fn run_webview_window_attempt(
     auth_request_uri: &str,
     redirect_uri: &str,
     attempt: usize,
 ) -> Result<String, AttemptFailure> {
+    // On Linux the wry backend uses WebKitGTK to implement webviews.  When
+    // spawning WebKit's helper processes it relies on the `WEBKIT_EXEC_PATH`
+    // environment variable to locate `WebKitWebProcess` and related
+    // executables.  Distros package these helpers in a variety of
+    // directories – for example `/usr/libexec/webkit2gtk-4.0` on
+    // Debian/Ubuntu, `/usr/lib64/webkit2gtk-4.0` on some RPM-based
+    // distributions, and `/usr/lib/webkit2gtk-4.0` on Arch/CachyOS.  If the
+    // variable is unset and the default relative lookup fails, the
+    // authentication window will crash immediately with an error like
+    // "Unable to fork a new child process: Failed to execute child process
+    // \"libexec/webkit2gtk-4.0/WebKitWebProcess\" (No such file or
+    // directory)".  To make the launcher robust across distributions
+    // install WebKitGTK in different locations, we proactively search for
+    // the helpers and populate `WEBKIT_EXEC_PATH` on Linux.
+    #[cfg(target_os = "linux")]
+    {
+        use std::path::Path;
+        // Only override the variable if it is currently unset to respect
+        // callers that already configured a custom path.
+        if std::env::var_os("WEBKIT_EXEC_PATH").is_none() {
+            // Prepare a list of candidate directories that commonly contain
+            // WebKitGTK helper executables.  These include the standard
+            // `libexec` directory as well as distribution-specific
+            // locations such as Arch's `/usr/lib/webkit2gtk-4.0`.
+            // In a Flatpak bundle the contents of the original AppDir are
+            // relocated under `/app` rather than `/usr`, so include
+            // `/app/libexec`, `/app/lib` and `/app/lib64` variants as
+            // candidate locations.  Without these the launcher may fail to
+            // locate the helpers when running inside a Flatpak built from
+            // our AppDir.  See build scripts for bundling details.
+            let mut candidate_dirs: Vec<String> = vec![
+                "/usr/libexec/webkit2gtk-4.0".to_string(),
+                "/usr/lib/webkit2gtk-4.0".to_string(),
+                "/usr/lib64/webkit2gtk-4.0".to_string(),
+                "/usr/lib/x86_64-linux-gnu/webkit2gtk-4.0".to_string(),
+                "/usr/lib/aarch64-linux-gnu/webkit2gtk-4.0".to_string(),
+                "/app/libexec/webkit2gtk-4.0".to_string(),
+                "/app/lib/webkit2gtk-4.0".to_string(),
+                "/app/lib64/webkit2gtk-4.0".to_string(),
+            ];
+            // Additionally scan some common parent directories for any
+            // directories that start with `webkit2gtk-` to catch new
+            // versions (e.g. webkit2gtk-4.1) or vendor-specific layouts.
+            for base in ["/usr/libexec", "/usr/lib", "/usr/lib64", "/app/libexec", "/app/lib", "/app/lib64"].iter() {
+                if let Ok(entries) = std::fs::read_dir(base) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            if name.starts_with("webkit2gtk-") {
+                                candidate_dirs.push(path.to_string_lossy().into_owned());
+                            }
+                        }
+                    }
+                }
+            }
+            // Find the first directory containing the helper executable.
+            let mut chosen: Option<String> = None;
+            for dir in candidate_dirs {
+                let helper = Path::new(&dir).join("WebKitWebProcess");
+                if helper.exists() {
+                    chosen = Some(dir);
+                    break;
+                }
+            }
+            if let Some(dir) = chosen {
+                // std::env::set_var is unsafe as of Rust 1.94 because the POSIX
+                // environment is not thread safe.  The documentation states
+                // that it is only safe to call in single-threaded programs or
+                // on Windows【584495416157657†L74-L87】.  We call it here
+                // prior to spawning any new threads to configure the
+                // environment for WebKitGTK helper processes.  See the
+                // `std::env::set_var` docs for the full safety discussion【584495416157657†L74-L87】.
+                unsafe {
+                    std::env::set_var("WEBKIT_EXEC_PATH", &dir);
+                }
+                tracing::info!(
+                    target: "vertexlauncher/auth/webview/helper",
+                    path = %dir,
+                    "Discovered WebKitGTK helper directory and set WEBKIT_EXEC_PATH."
+                );
+            }
+        }
+    }
     let mut event_loop = EventLoop::<UserEvent>::with_user_event();
     let proxy = event_loop.create_proxy();
     let result = Arc::new(Mutex::new(None::<AttemptOutcome>));

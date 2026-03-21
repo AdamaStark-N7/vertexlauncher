@@ -505,6 +505,85 @@ bundle_runtime_support_assets() {
     done < <(find "${appdir}/usr/lib64/gtk-3.0/3.0.0/immodules" -type f -print0)
   fi
 
+  #-----------------------------------------------------------------------
+  # Copy GLib GIO modules into the bundle so that networking functions
+  # (including TLS via glib-networking) work correctly.  Without the
+  # `libgio` modules, WebKitGTK will display an error such as
+  # "TLS/SSL support not available; install glib-networking" when
+  # attempting to load HTTPS content.  We search for the system's
+  # `gio/modules` directory across several common locations and copy
+  # everything into our AppDir.  Afterwards we run `gio-querymodules`
+  # to generate the module cache; this ensures GLib picks up the
+  # bundled modules at runtime.
+  # Discover GIO module directories for glib-networking (TLS support).  Copy
+  # them into both lib and lib64 destinations so that GLib can find
+  # modules regardless of architecture-specific directory.  We prefer the
+  # first existing directory but may fall back to others.
+  local gio_modules_dir=""
+  gio_modules_dir="$(find_first_existing_path \
+    /usr/lib/gio/modules \
+    /usr/lib64/gio/modules \
+    /usr/lib/x86_64-linux-gnu/gio/modules \
+    /usr/lib/aarch64-linux-gnu/gio/modules || true)"
+  if [[ -n "${gio_modules_dir}" ]]; then
+    # Copy into /usr/lib/gio/modules
+    copy_tree_contents_if_present "${gio_modules_dir}" "${appdir}/usr/lib/gio/modules"
+    # Also copy into /usr/lib64/gio/modules for completeness on multiarch systems
+    copy_tree_contents_if_present "${gio_modules_dir}" "${appdir}/usr/lib64/gio/modules"
+  fi
+  # Generate the module cache for each destination; this ensures GLib uses
+  # the bundled modules instead of system modules.  Only run the
+  # querymodules tool if it exists.
+  if command -v gio-querymodules >/dev/null 2>&1; then
+    if [[ -d "${appdir}/usr/lib/gio/modules" ]]; then
+      gio-querymodules "${appdir}/usr/lib/gio/modules"
+    fi
+    if [[ -d "${appdir}/usr/lib64/gio/modules" ]]; then
+      gio-querymodules "${appdir}/usr/lib64/gio/modules"
+    fi
+  fi
+
+  # Copy WebKitGTK runtime libraries into the bundle when using the
+  # Freedesktop runtime.  The FreeDesktop base does not ship WebKitGTK,
+  # so our Flatpak will fail to start unless we bundle the core
+  # libwebkit2gtk library (and its JavaScriptCore companion).  Search for
+  # the appropriate shared libraries on the build system and install
+  # them into `usr/lib` within the AppDir so that the wrapper can find
+  # them via LD_LIBRARY_PATH.  Different distributions name the files
+  # differently, so probe several common patterns.
+  local webkit_lib=""
+  for candidate in \
+    /usr/lib64/libwebkit2gtk-4.0.so.37 \
+    /usr/lib/libwebkit2gtk-4.0.so.37 \
+    /usr/lib64/libwebkit2gtk-4.0.so \
+    /usr/lib/libwebkit2gtk-4.0.so; do
+    if [[ -f "${candidate}" ]]; then
+      webkit_lib="${candidate}"
+      break
+    fi
+  done
+  if [[ -n "${webkit_lib}" ]]; then
+    install -Dm755 "${webkit_lib}" "${appdir}/usr/lib/$(basename "${webkit_lib}")"
+  fi
+
+  # Also bundle JavaScriptCore GTK if present; this is often a direct
+  # dependency of WebKitGTK.  Without it the launcher may still fail
+  # to locate its JSC dependency.
+  local jsc_lib=""
+  for candidate in \
+    /usr/lib64/libjavascriptcoregtk-4.0.so.18 \
+    /usr/lib/libjavascriptcoregtk-4.0.so.18 \
+    /usr/lib64/libjavascriptcoregtk-4.0.so \
+    /usr/lib/libjavascriptcoregtk-4.0.so; do
+    if [[ -f "${candidate}" ]]; then
+      jsc_lib="${candidate}"
+      break
+    fi
+  done
+  if [[ -n "${jsc_lib}" ]]; then
+    install -Dm755 "${jsc_lib}" "${appdir}/usr/lib/$(basename "${jsc_lib}")"
+  fi
+
   if [[ -f "${appdir}/usr/lib/libwebkit2gtk-4.0.so.37" ]]; then
     patch_binary_path_literal "${appdir}/usr/lib/libwebkit2gtk-4.0.so.37" \
       "/usr/libexec/webkit2gtk-4.0" \
@@ -649,7 +728,11 @@ else
     --icon-file "${icon_path}"
     --executable "${appdir}/usr/bin/${PACKAGE}"
   )
-  if (( ${#plugin_args[@]} > 0 )); then
+  # Only append plugin arguments when the array is defined and non-empty.  When
+  # using `set -u`, referencing an unset array variable will cause an
+  # unbound-variable error.  Guard the check so that we skip adding the
+  # plugin arguments entirely if the `plugin_args` array was never defined.
+  if [[ -n "${plugin_args+x}" ]] && (( ${#plugin_args[@]} > 0 )); then
     linuxdeploy_args+=("${plugin_args[@]}")
   fi
   run_tool "${linuxdeploy_tool}" "${linuxdeploy_args[@]}"

@@ -32,6 +32,13 @@ PODMAN_ARGS=(
   -e VERTEX_APPIMAGE_ARCH=x86_64
   -e VERTEX_APPIMAGE_TARGET=x86_64-unknown-linux-gnu
   -e VERTEX_IN_APPIMAGE_CONTAINER=1
+  # Forward pkg‑config environment so that the build script can find
+  # libsoup and other development packages in the container.  Without
+  # PKG_CONFIG_PATH and the *_ALLOW_SYSTEM_* flags `soup2‑sys` fails to
+  # locate libsoup even though it is installed.
+  -e PKG_CONFIG_PATH=/usr/lib64/pkgconfig:/usr/share/pkgconfig
+  -e PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+  -e PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
 )
 
 mount_external_tool() {
@@ -93,6 +100,25 @@ podman "${PODMAN_ARGS[@]}" \
       bash /workspace/scripts/patch-wry-source.sh
 
       echo "[appimage-x86_64] building native x86_64 binary..."
+
+      # Clean up any previously compiled artifacts to avoid glibc
+      # mismatches.  Stale build script binaries linked against a newer
+      # glibc on the host can end up in the shared `target` directory and
+      # will fail when executed in this CentOS 7 container (which only
+      # provides glibc 2.17).  Running `cargo clean` forces a fresh build
+      # of all build scripts and dependencies against the container
+      # (which provides glibc 2.17), preserving the portability of the resulting binary.
+      echo "[appimage-x86_64] cleaning stale build artifacts..."
+      cargo clean --package vertexlauncher || true
+      # Export pkg‑config hints within the container as well.  See
+      # comment in the Podman arguments above.  Explicitly setting
+      # PKG_CONFIG_PATH and allowing system CFLAGS/LIBS ensures that
+      # pkg‑config can locate libsoup and other development files during
+      # the build of `soup2‑sys` and related crates.
+      export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/usr/lib64/pkgconfig:/usr/share/pkgconfig}"
+      export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+      export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
+
       cargo build --release --target x86_64-unknown-linux-gnu -p vertexlauncher
     fi
 

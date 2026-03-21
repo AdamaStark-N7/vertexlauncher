@@ -28,6 +28,9 @@ podman run --rm \
   -v "${RUSTUP_HOME_DIR}:/usr/local/rustup" \
   -w /workspace \
   -e MAX_GLIBC_VERSION="${MAX_GLIBC_VERSION}" \
+  -e PKG_CONFIG_PATH="/usr/lib64/pkgconfig:/usr/share/pkgconfig" \
+  -e PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1 \
+  -e PKG_CONFIG_ALLOW_SYSTEM_LIBS=1 \
   "${CONTAINER_IMAGE}" \
   bash -lc '
     set -euo pipefail
@@ -57,7 +60,27 @@ podman run --rm \
     rustup default stable >/dev/null
     rustup target add x86_64-unknown-linux-gnu >/dev/null
 
+    # Export pkg‑config hints within the container as well.  Without these
+    # variables the `soup2‑sys` crate sometimes fails to locate the libsoup
+    # 2.4 development files even though `libsoup-devel` is installed.  Explicitly
+    # populating PKG_CONFIG_PATH and allowing system CFLAGS/LIBS resolves the
+    # build failure by pointing pkg‑config at CentOSʼ default search paths and
+    # permitting the use of system includes and libraries during the build.
+    export PKG_CONFIG_PATH="${PKG_CONFIG_PATH:-/usr/lib64/pkgconfig:/usr/share/pkgconfig}"
+    export PKG_CONFIG_ALLOW_SYSTEM_CFLAGS=1
+    export PKG_CONFIG_ALLOW_SYSTEM_LIBS=1
+
     bash /workspace/scripts/patch-wry-source.sh
+
+    # Purge any stale build artifacts that may have been compiled against a
+    # newer glibc version on the host. Without cleaning the `target` directory
+    # the build script executables might be reused across runs and require
+    # GLIBC_2.18+ when executed inside this CentOS 7 container (which only
+    # provides glibc 2.17).  A clean build ensures that all Rust build
+    # scripts are compiled within the container and link against the 2.17
+    # runtime, preserving the desired glibc floor.
+    echo "[linux-x86_64] cleaning stale build artifacts..."
+    cargo clean --package vertexlauncher || true
 
     echo "[linux-x86_64] building release artifact..."
     cargo build --release --target x86_64-unknown-linux-gnu -p vertexlauncher

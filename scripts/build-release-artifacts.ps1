@@ -1,17 +1,3 @@
-$TargetFilters = @()
-$remainingArgs = @()
-foreach ($arg in $args) {
-    if ($arg -and -not $arg.StartsWith("-")) {
-        $TargetFilters += $arg.Trim()
-    }
-    else {
-        $remainingArgs += $arg
-    }
-}
-if ($remainingArgs.Count -gt 0) {
-    throw "Unsupported arguments: $($remainingArgs -join ', ')"
-}
-
 $ErrorActionPreference = "Stop"
 
 $scriptDir = $PSScriptRoot
@@ -55,58 +41,6 @@ $linuxTargets = @(
 $macosTargets = @(
     @{ Target = "aarch64-apple-darwin"; Platform = "macos"; Arch = "arm64"; Extension = ""; Builder = "zigbuild" }
 )
-
-function Resolve-RequestedTargets {
-    $rawTargets = @()
-
-    if ($TargetFilters.Count -gt 0) {
-        $rawTargets += $TargetFilters
-    }
-
-    if ($env:VERTEX_RELEASE_TARGETS) {
-        $rawTargets += $env:VERTEX_RELEASE_TARGETS.Split(",", [System.StringSplitOptions]::RemoveEmptyEntries)
-    }
-
-    $requestedTargets = @()
-    foreach ($target in $rawTargets) {
-        $trimmed = $target.Trim()
-        if ($trimmed -and $requestedTargets -notcontains $trimmed) {
-            $requestedTargets += $trimmed
-        }
-    }
-
-    return $requestedTargets
-}
-
-function Validate-RequestedTargets {
-    param(
-        [Parameter(Mandatory = $true)]$AllSpecs,
-        [Parameter(Mandatory = $true)][string[]]$RequestedTargets
-    )
-
-    if ($RequestedTargets.Count -eq 0) {
-        return
-    }
-
-    $knownTargets = @($AllSpecs | ForEach-Object { $_.Target })
-    $unknownTargets = @($RequestedTargets | Where-Object { $knownTargets -notcontains $_ })
-    if ($unknownTargets.Count -gt 0) {
-        throw "Unsupported target filter(s): $($unknownTargets -join ', ')"
-    }
-}
-
-function Filter-TargetSpecs {
-    param(
-        [Parameter(Mandatory = $true)]$Specs,
-        [Parameter(Mandatory = $true)][string[]]$RequestedTargets
-    )
-
-    if ($RequestedTargets.Count -eq 0) {
-        return @($Specs)
-    }
-
-    return @($Specs | Where-Object { $RequestedTargets -contains $_.Target })
-}
 
 function Require-CargoSubcommand {
     param(
@@ -610,13 +544,6 @@ function Build-AppImageArtifacts {
 
 Push-Location $repoRoot
 try {
-    $requestedTargets = Resolve-RequestedTargets
-    $allTargets = @($windowsTargets + $linuxTargets + $macosTargets)
-    Validate-RequestedTargets -AllSpecs $allTargets -RequestedTargets $requestedTargets
-    $selectedWindowsTargets = Filter-TargetSpecs -Specs $windowsTargets -RequestedTargets $requestedTargets
-    $selectedLinuxTargets = Filter-TargetSpecs -Specs $linuxTargets -RequestedTargets $requestedTargets
-    $selectedMacosTargets = Filter-TargetSpecs -Specs $macosTargets -RequestedTargets $requestedTargets
-
     New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
     Clear-StagedArtifacts
 
@@ -624,7 +551,7 @@ try {
     Require-CargoSubcommand -Subcommand "zigbuild" -InstallHint "Install it with: cargo install --locked cargo-zigbuild"
 
     $failures = @()
-    foreach ($spec in $selectedWindowsTargets) {
+    foreach ($spec in $windowsTargets) {
         try {
             Build-And-StageArtifact -Spec $spec
         }
@@ -632,7 +559,7 @@ try {
             $failures += "$($spec.Platform) $($spec.Arch): $($_.Exception.Message)"
         }
     }
-    foreach ($spec in $selectedLinuxTargets) {
+    foreach ($spec in $linuxTargets) {
         try {
             Build-And-StageArtifact -Spec $spec
         }
@@ -640,7 +567,7 @@ try {
             $failures += "$($spec.Platform) $($spec.Arch): $($_.Exception.Message)"
         }
     }
-    foreach ($spec in $selectedMacosTargets) {
+    foreach ($spec in $macosTargets) {
         try {
             Build-And-StageArtifact -Spec $spec
         }
@@ -649,34 +576,30 @@ try {
         }
     }
 
-    if ($requestedTargets.Count -eq 0) {
-        try {
-            Build-FlatpakArtifacts
-        }
-        catch {
-            $failures += "flatpak: $($_.Exception.Message)"
-        }
+    try {
+        Build-FlatpakArtifacts
+    }
+    catch {
+        $failures += "flatpak: $($_.Exception.Message)"
+    }
 
-        try {
-            Build-AppImageArtifacts
-        }
-        catch {
-            $failures += "appimage: $($_.Exception.Message)"
-        }
+    try {
+        Build-AppImageArtifacts
+    }
+    catch {
+        $failures += "appimage: $($_.Exception.Message)"
     }
 
     Write-Host ""
     Write-Host "Artifacts ready:"
-    foreach ($spec in ($selectedWindowsTargets + $selectedLinuxTargets + $selectedMacosTargets)) {
+    foreach ($spec in ($windowsTargets + $linuxTargets + $macosTargets)) {
         Write-Host "  $(Get-StagedArtifactPath -Platform $spec.Platform -Arch $spec.Arch -Extension $spec.Extension)"
     }
-    if ($requestedTargets.Count -eq 0) {
-        foreach ($arch in $flatpakArtifactArches) {
-            Write-Host "  $(Get-FlatpakArtifactPath -Arch $arch)"
-        }
-        foreach ($arch in $appImageArtifactArches) {
-            Write-Host "  $(Get-AppImageArtifactPath -Arch $arch)"
-        }
+    foreach ($arch in $flatpakArtifactArches) {
+        Write-Host "  $(Get-FlatpakArtifactPath -Arch $arch)"
+    }
+    foreach ($arch in $appImageArtifactArches) {
+        Write-Host "  $(Get-AppImageArtifactPath -Arch $arch)"
     }
 
     if ($failures.Count -gt 0) {

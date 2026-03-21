@@ -1,7 +1,7 @@
 [
   {
     "label": "[WINDOWS] target windows x86_64",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 x86_64-pc-windows-msvc",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\" x86_64-pc-windows-msvc",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -9,7 +9,7 @@
   },
   {
     "label": "[WINDOWS] target windows arm64",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-pc-windows-msvc",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\" aarch64-pc-windows-msvc",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -17,7 +17,7 @@
   },
   {
     "label": "[WINDOWS] target linux x86_64",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 x86_64-unknown-linux-gnu",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\" x86_64-unknown-linux-gnu",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -25,7 +25,7 @@
   },
   {
     "label": "[WINDOWS] target linux arm64",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-unknown-linux-gnu",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\" aarch64-unknown-linux-gnu",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -33,7 +33,7 @@
   },
   {
     "label": "[WINDOWS] target macos arm64",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-apple-darwin",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\" aarch64-apple-darwin",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -41,7 +41,7 @@
   },
   {
     "label": "[LINUX] target windows x86_64",
-    "command": "fish scripts/build-release-artifacts.fish x86_64-pc-windows-msvc",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\" x86_64-pc-windows-msvc",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -49,7 +49,7 @@
   },
   {
     "label": "[LINUX] target windows arm64",
-    "command": "fish scripts/build-release-artifacts.fish aarch64-pc-windows-msvc",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\" aarch64-pc-windows-msvc",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -57,7 +57,7 @@
   },
   {
     "label": "[LINUX] target linux x86_64",
-    "command": "fish scripts/build-release-artifacts.fish x86_64-unknown-linux-gnu",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\" x86_64-unknown-linux-gnu",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -65,7 +65,7 @@
   },
   {
     "label": "[LINUX] target linux arm64",
-    "command": "fish scripts/build-release-artifacts.fish aarch64-unknown-linux-gnu",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\" aarch64-unknown-linux-gnu",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -73,7 +73,7 @@
   },
   {
     "label": "[LINUX] target macos arm64",
-    "command": "fish scripts/build-release-artifacts.fish aarch64-apple-darwin",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\" aarch64-apple-darwin",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -81,7 +81,7 @@
   },
   {
     "label": "[LINUX] appimage x86_64",
-    "command": "env VERTEX_APPIMAGE_ARCH=x86_64 bash scripts/build-appimage.sh",
+    "command": "env VERTEX_APPIMAGE_ARCH=x86_64 bash \"$ZED_WORKTREE_ROOT/scripts/build-appimage.sh\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -89,7 +89,7 @@
   },
   {
     "label": "[LINUX] appimage arm64",
-    "command": "env VERTEX_APPIMAGE_ARCH=aarch64 bash scripts/build-appimage.sh",
+    "command": "env VERTEX_APPIMAGE_ARCH=aarch64 bash \"$ZED_WORKTREE_ROOT/scripts/build-appimage.sh\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -97,7 +97,7 @@
   },
   {
     "label": "[LINUX] flatpak x86_64",
-    "command": "env VERTEX_FLATPAK_ARCHES=x86_64 bash scripts/build-flatpak.sh",
+    "command": "env VERTEX_FLATPAK_ARCHES=x86_64 bash \"$ZED_WORKTREE_ROOT/scripts/build-flatpak.sh\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -105,7 +105,7 @@
   },
   {
     "label": "[LINUX] flatpak arm64",
-    "command": "env VERTEX_FLATPAK_ARCHES=aarch64 bash scripts/build-flatpak.sh",
+    "command": "env VERTEX_FLATPAK_ARCHES=aarch64 bash \"$ZED_WORKTREE_ROOT/scripts/build-flatpak.sh\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -113,7 +113,7 @@
   },
   {
     "label": "[WINDOWS] compile all",
-    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.ps1\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
@@ -121,7 +121,7 @@
   },
   {
     "label": "[LINUX] compile all",
-    "command": "fish scripts/build-release-artifacts.fish",
+    "command": "fish \"$ZED_WORKTREE_ROOT/scripts/build-release-artifacts.fish\"",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,

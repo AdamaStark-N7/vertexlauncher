@@ -1,0 +1,20 @@
+id: io.github.SturdyFool10.VertexLauncher
+runtime: org.gnome.Platform
+runtime-version: '45'
+sdk: org.gnome.Sdk
+command: vertexlauncher
+finish-args:
+  - --share=network
+  - --socket=x11
+  - --socket=wayland
+  - --device=all
+  - --filesystem=host
+modules:
+  - name: vertexlauncher
+    buildsystem: simple
+    build-commands:
+      - install -D vertexlauncher /app/bin/vertexlauncher
+    sources:
+      - type: file
+        path: /mnt/E/Projects/vertexlauncher/target/x86_64-unknown-linux-gnu/release/vertexlauncher
+        dest: vertexlauncher
