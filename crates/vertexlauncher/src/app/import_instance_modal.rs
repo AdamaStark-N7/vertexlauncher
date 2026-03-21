@@ -925,8 +925,7 @@ struct ModrinthProfileMetadata {
 
 fn infer_modrinth_profile_metadata(path: &Path) -> ModrinthProfileMetadata {
     let mut metadata = ModrinthProfileMetadata::default();
-    metadata.game_version = infer_modrinth_game_version_from_telemetry(path)
-        .or_else(|| infer_modrinth_game_version_from_filenames(path));
+    metadata.game_version = infer_modrinth_game_version_from_telemetry(path);
 
     let (modloader, modloader_version) = infer_modrinth_loader_from_profile(path);
     metadata.modloader = modloader;
@@ -934,6 +933,10 @@ fn infer_modrinth_profile_metadata(path: &Path) -> ModrinthProfileMetadata {
 
     if let Some(app_root) = modrinth_app_root(path) {
         refine_modrinth_metadata_from_meta_cache(app_root.as_path(), &mut metadata);
+    }
+
+    if metadata.game_version.is_none() {
+        metadata.game_version = infer_modrinth_game_version_from_filenames(path);
     }
 
     metadata
@@ -954,9 +957,8 @@ fn infer_modrinth_game_version_from_telemetry(path: &Path) -> Option<String> {
             if let Ok(value) = serde_json::from_str::<Value>(line)
                 && let Some(game_version) = value.get("game_version").and_then(Value::as_str)
             {
-                let trimmed = game_version.trim();
-                if !trimmed.is_empty() {
-                    return Some(trimmed.to_owned());
+                if let Some(normalized) = normalize_minecraft_game_version(game_version) {
+                    return Some(normalized);
                 }
             }
         }
@@ -1068,8 +1070,10 @@ fn find_minecraft_version_in_text(text: &str) -> Option<String> {
         }
         if dot_count >= 2 {
             let candidate = chars[start..end].iter().collect::<String>();
-            if candidate.split('.').all(|segment| !segment.is_empty()) {
-                return Some(candidate);
+            if candidate.split('.').all(|segment| !segment.is_empty())
+                && let Some(normalized) = normalize_minecraft_game_version(&candidate)
+            {
+                return Some(normalized);
             }
         }
     }
@@ -1117,12 +1121,23 @@ fn refine_modrinth_metadata_from_meta_cache(
             }
         }
 
-        if metadata.game_version.is_none()
-            && let Some(id) = version_json.get("id").and_then(Value::as_str)
-            && let Some(version) = id.split('-').next()
-            && !version.trim().is_empty()
-        {
-            metadata.game_version = Some(version.to_owned());
+        if metadata.game_version.is_none() {
+            if let Some(version) = normalize_minecraft_game_version(&version_name)
+                .or_else(|| {
+                    version_json
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(normalize_minecraft_game_version)
+                })
+                .or_else(|| {
+                    version_json
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .and_then(find_minecraft_version_in_text)
+                })
+            {
+                metadata.game_version = Some(version);
+            }
         }
 
         if metadata.game_version.is_some()
@@ -2235,10 +2250,15 @@ fn read_mrpack_manifest(path: &Path) -> Result<MrpackManifest, String> {
 fn resolve_mrpack_dependencies(
     dependencies: &HashMap<String, String>,
 ) -> Result<MrpackDependencyInfo, String> {
-    let game_version = dependencies
+    let raw_game_version = dependencies
         .get("minecraft")
-        .cloned()
         .ok_or_else(|| "Modrinth pack is missing the required minecraft dependency.".to_owned())?;
+    let game_version = normalize_minecraft_game_version(raw_game_version).ok_or_else(|| {
+        format!(
+            "Modrinth pack declared an invalid Minecraft version: {}",
+            raw_game_version.trim()
+        )
+    })?;
 
     let loader_candidates = [
         ("neoforge", "NeoForge"),
@@ -2315,6 +2335,64 @@ fn default_if_blank(value: &str, fallback: String) -> String {
     non_empty(value).unwrap_or(fallback)
 }
 
+fn normalize_minecraft_game_version(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if looks_like_minecraft_release_version(trimmed)
+        || looks_like_minecraft_pre_release_version(trimmed)
+        || looks_like_minecraft_snapshot_version(trimmed)
+    {
+        return Some(trimmed.to_owned());
+    }
+    None
+}
+
+fn looks_like_minecraft_release_version(value: &str) -> bool {
+    let mut segments = value.split('.');
+    let Some(major) = segments.next() else {
+        return false;
+    };
+    let Some(minor) = segments.next() else {
+        return false;
+    };
+    if major != "1" || minor.is_empty() || !minor.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    match segments.next() {
+        Some(patch) if !patch.is_empty() && patch.chars().all(|ch| ch.is_ascii_digit()) => {
+            segments.next().is_none()
+        }
+        None => true,
+        _ => false,
+    }
+}
+
+fn looks_like_minecraft_pre_release_version(value: &str) -> bool {
+    for marker in ["-pre", "-rc"] {
+        if let Some((base, suffix)) = value.split_once(marker) {
+            return looks_like_minecraft_release_version(base)
+                && !suffix.is_empty()
+                && suffix.chars().all(|ch| ch.is_ascii_digit());
+        }
+    }
+    false
+}
+
+fn looks_like_minecraft_snapshot_version(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 6
+        && bytes.len() <= 7
+        && bytes[0].is_ascii_digit()
+        && bytes[1].is_ascii_digit()
+        && bytes[2] == b'w'
+        && bytes[3].is_ascii_digit()
+        && bytes[4].is_ascii_digit()
+        && bytes[5].is_ascii_lowercase()
+        && bytes.get(6).is_none()
+}
+
 fn format_loader_label(modloader: &str, version: &str) -> String {
     let version = version.trim();
     if version.is_empty() {
@@ -2383,8 +2461,48 @@ mod tests {
     }
 
     #[test]
+    fn rejects_invalid_mrpack_game_version() {
+        let dependencies = HashMap::from([
+            (
+                "minecraft".to_owned(),
+                "fabric-loader-0.16.10-1.21.1".to_owned(),
+            ),
+            ("fabric-loader".to_owned(), "0.16.10".to_owned()),
+        ]);
+
+        let result = resolve_mrpack_dependencies(&dependencies);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn safe_join_rejects_parent_traversal() {
         let result = join_safe(Path::new("/tmp/root"), "../mods/evil.jar");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn normalizes_real_minecraft_versions_only() {
+        assert_eq!(
+            normalize_minecraft_game_version("1.21.1").as_deref(),
+            Some("1.21.1")
+        );
+        assert_eq!(
+            normalize_minecraft_game_version("24w14a").as_deref(),
+            Some("24w14a")
+        );
+        assert_eq!(
+            normalize_minecraft_game_version("1.20.5-rc1").as_deref(),
+            Some("1.20.5-rc1")
+        );
+        assert!(normalize_minecraft_game_version("fabric-loader-0.16.10-1.21.1").is_none());
+        assert!(normalize_minecraft_game_version("2.4.0").is_none());
+    }
+
+    #[test]
+    fn extracts_game_version_from_meta_style_identifiers() {
+        assert_eq!(
+            find_minecraft_version_in_text("fabric-loader-0.16.10-1.21.1").as_deref(),
+            Some("1.21.1")
+        );
     }
 }

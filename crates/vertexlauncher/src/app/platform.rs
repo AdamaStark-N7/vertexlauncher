@@ -8,17 +8,6 @@ pub(crate) struct StartupGraphicsConfig {
 }
 
 pub(crate) fn startup_graphics_config() -> StartupGraphicsConfig {
-    #[cfg(target_os = "macos")]
-    {
-        if !macos_force_wgpu() {
-            return StartupGraphicsConfig {
-                renderer: eframe::Renderer::Glow,
-                hardware_acceleration: eframe::HardwareAcceleration::Preferred,
-                backends: wgpu::Backends::METAL,
-            };
-        }
-    }
-
     StartupGraphicsConfig {
         renderer: eframe::Renderer::Wgpu,
         hardware_acceleration: eframe::HardwareAcceleration::Required,
@@ -27,20 +16,7 @@ pub(crate) fn startup_graphics_config() -> StartupGraphicsConfig {
 }
 
 pub(crate) fn log_startup_graphics_choice(config: StartupGraphicsConfig) {
-    #[cfg(target_os = "macos")]
-    {
-        if matches!(config.renderer, eframe::Renderer::Glow) {
-            tracing::warn!(
-                target: "vertexlauncher/app/graphics",
-                "Using Glow renderer on macOS by default to avoid native Metal startup aborts. Set VERTEX_MACOS_WGPU=1 to force wgpu/Metal."
-            );
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = config;
-    }
+    let _ = config;
 }
 
 pub(crate) fn detect_cpu_name() -> String {
@@ -94,7 +70,7 @@ pub(crate) fn detect_total_memory() -> String {
         };
 
         return unsafe {
-            if GlobalMemoryStatusEx(&mut memory_status).as_bool() {
+            if GlobalMemoryStatusEx(&mut memory_status).is_ok() {
                 format_memory_from_bytes(memory_status.ullTotalPhys)
             } else {
                 "Unknown".to_owned()
@@ -104,19 +80,6 @@ pub(crate) fn detect_total_memory() -> String {
 
     #[allow(unreachable_code)]
     "Unknown".to_owned()
-}
-
-#[cfg(target_os = "macos")]
-fn macos_force_wgpu() -> bool {
-    std::env::var("VERTEX_MACOS_WGPU")
-        .ok()
-        .map(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
 }
 
 fn startup_backends() -> wgpu::Backends {

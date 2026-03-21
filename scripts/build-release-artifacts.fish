@@ -2,6 +2,26 @@
 
 set -g script_dir (path dirname (status filename))
 set -g repo_root (path resolve $script_dir/..)
+set -g requested_targets
+for arg in $argv
+    if test -n "$arg"
+        set -ga requested_targets (string trim -- $arg)
+    end
+end
+if set -q VERTEX_RELEASE_TARGETS
+    for arg in (string split , -- $VERTEX_RELEASE_TARGETS)
+        if test -n "$arg"
+            set -ga requested_targets (string trim -- $arg)
+        end
+    end
+end
+set -l deduped_requested_targets
+for target in $requested_targets
+    if test -n "$target"; and not contains -- $target $deduped_requested_targets
+        set -a deduped_requested_targets $target
+    end
+end
+set -g requested_targets $deduped_requested_targets
 
 set -g package vertexlauncher
 set -g release_dir $repo_root/target/release
@@ -94,6 +114,28 @@ end
 
 function note_failure
     set -g build_failures $build_failures $argv[1]
+end
+
+function target_is_requested
+    set -l target $argv[1]
+    if test (count $requested_targets) -eq 0
+        return 0
+    end
+    contains -- $target $requested_targets
+end
+
+function validate_requested_targets
+    if test (count $requested_targets) -eq 0
+        return 0
+    end
+
+    set -l known_targets $windows_targets $linux_targets $macos_targets
+    for target in $requested_targets
+        if not contains -- $target $known_targets
+            echo "Unsupported target filter: $target" >&2
+            return 1
+        end
+    end
 end
 
 function clear_staged_artifacts
@@ -435,6 +477,8 @@ cd $repo_root; or exit 1
 mkdir -p $release_dir
 or exit $status
 clear_staged_artifacts
+validate_requested_targets
+or exit $status
 
 require_command cargo "Install Rust/Cargo first."
 
@@ -449,6 +493,8 @@ if not cargo zigbuild --help >/dev/null 2>&1
 end
 
 for target in $windows_targets
+    target_is_requested $target
+    or continue
     switch $target
         case x86_64-pc-windows-msvc
             build_windows_target $target x86-64
@@ -460,6 +506,8 @@ for target in $windows_targets
 end
 
 for target in $linux_targets
+    target_is_requested $target
+    or continue
     switch $target
         case x86_64-unknown-linux-gnu
             build_linux_target $target x86-64
@@ -471,6 +519,8 @@ for target in $linux_targets
 end
 
 for target in $macos_targets
+    target_is_requested $target
+    or continue
     switch $target
         case aarch64-apple-darwin
             build_macos_target $target arm64
@@ -478,24 +528,51 @@ for target in $macos_targets
     end
 end
 
-build_flatpak_artifacts
-or note_failure "Flatpak build failed."
+if test (count $requested_targets) -eq 0
+    build_flatpak_artifacts
+    or note_failure "Flatpak build failed."
 
-build_appimage_artifacts
-or note_failure "AppImage build failed."
+    build_appimage_artifacts
+    or note_failure "AppImage build failed."
+end
 
 echo ""
 echo "Artifacts ready:"
-echo "  "(artifact_name windows x86-64 .exe)
-echo "  "(artifact_name windows arm64 .exe)
-echo "  "(artifact_name linux x86-64 "")
-echo "  "(artifact_name linux arm64 "")
-echo "  "(artifact_name macos arm64 "")
-for arch in $flatpak_artifact_arches
-    echo "  "(flatpak_artifact_name $arch)
+for target in $windows_targets
+    target_is_requested $target
+    or continue
+    switch $target
+        case x86_64-pc-windows-msvc
+            echo "  "(artifact_name windows x86-64 .exe)
+        case aarch64-pc-windows-msvc
+            echo "  "(artifact_name windows arm64 .exe)
+    end
 end
-for arch in $appimage_artifact_arches
-    echo "  "(appimage_artifact_name $arch)
+for target in $linux_targets
+    target_is_requested $target
+    or continue
+    switch $target
+        case x86_64-unknown-linux-gnu
+            echo "  "(artifact_name linux x86-64 "")
+        case aarch64-unknown-linux-gnu
+            echo "  "(artifact_name linux arm64 "")
+    end
+end
+for target in $macos_targets
+    target_is_requested $target
+    or continue
+    switch $target
+        case aarch64-apple-darwin
+            echo "  "(artifact_name macos arm64 "")
+    end
+end
+if test (count $requested_targets) -eq 0
+    for arch in $flatpak_artifact_arches
+        echo "  "(flatpak_artifact_name $arch)
+    end
+    for arch in $appimage_artifact_arches
+        echo "  "(appimage_artifact_name $arch)
+    end
 end
 
 if test (count $build_failures) -gt 0

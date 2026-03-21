@@ -1,26 +1,98 @@
 [
   {
-    "label": "[WINDOWS] compile all",
-    "command": "powershell",
-    "args": [
-      "-NoProfile",
-      "-ExecutionPolicy",
-      "Bypass",
-      "-File",
-      "scripts/build-release-artifacts.ps1",
-    ],
+    "label": "[WINDOWS] target windows x86_64",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 x86_64-pc-windows-msvc",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
-    "use_new_terminal": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[WINDOWS] target windows arm64",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-pc-windows-msvc",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[WINDOWS] target linux x86_64",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 x86_64-unknown-linux-gnu",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[WINDOWS] target linux arm64",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-unknown-linux-gnu",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[WINDOWS] target macos arm64",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1 aarch64-apple-darwin",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[LINUX] target windows x86_64",
+    "command": "fish scripts/build-release-artifacts.fish x86_64-pc-windows-msvc",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[LINUX] target windows arm64",
+    "command": "fish scripts/build-release-artifacts.fish aarch64-pc-windows-msvc",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[LINUX] target linux x86_64",
+    "command": "fish scripts/build-release-artifacts.fish x86_64-unknown-linux-gnu",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[LINUX] target linux arm64",
+    "command": "fish scripts/build-release-artifacts.fish aarch64-unknown-linux-gnu",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[LINUX] target macos arm64",
+    "command": "fish scripts/build-release-artifacts.fish aarch64-apple-darwin",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
+  },
+  {
+    "label": "[WINDOWS] compile all",
+    "command": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-artifacts.ps1",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "reveal": "always",
+    "allow_concurrent_runs": false,
+    "use_new_terminal": false
   },
   {
     "label": "[LINUX] compile all",
-    "command": "fish",
-    "args": ["scripts/build-release-artifacts.fish"],
+    "command": "fish scripts/build-release-artifacts.fish",
     "cwd": "$ZED_WORKTREE_ROOT",
     "reveal": "always",
     "allow_concurrent_runs": false,
-    "use_new_terminal": false,
-  },
+    "use_new_terminal": false
+  }
 ]

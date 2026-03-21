@@ -36,7 +36,7 @@ jobs:
             libpango1.0-dev
             libatk1.0-dev
             libcairo2-dev
-            libsoup-3.0-dev
+            libsoup2.4-dev
           )
 
           if apt-cache show libwebkit2gtk-4.1-dev >/dev/null 2>&1; then
