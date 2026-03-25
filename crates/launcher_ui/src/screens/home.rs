@@ -20,9 +20,10 @@ use textui::{
 };
 
 use crate::{
-    assets, notification,
+    assets, desktop, notification,
     ui::{
         components::lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
+        instance_context_menu::{self, InstanceContextAction},
         modal, style,
     },
 };
@@ -53,6 +54,7 @@ const SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
 pub struct HomeOutput {
     pub requested_screen: Option<AppScreen>,
     pub selected_instance_id: Option<String>,
+    pub delete_requested_instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -592,7 +594,7 @@ pub fn render(
             }
 
             let mut requested_rescan = false;
-            render_instance_usage(ui, text_ui, instances, &mut output);
+            render_instance_usage(ui, text_ui, instances, config, &mut output);
             ui.add_space(12.0);
             render_activity_feed(
                 ui,
@@ -1521,6 +1523,7 @@ fn render_instance_usage(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     instances: &InstanceStore,
+    config: &Config,
     output: &mut HomeOutput,
 ) {
     let mut title_style = LabelOptions::default();
@@ -1603,6 +1606,8 @@ fn render_instance_usage(
                         });
                     },
                 );
+                let context_id = ui.make_persistent_id(("home_instance_context", instance.id.as_str()));
+
                 if row_response.clicked() {
                     queue_launch_intent(
                         ui.ctx(),
@@ -1616,6 +1621,36 @@ fn render_instance_usage(
                     output.selected_instance_id = Some(instance.id.clone());
                     output.requested_screen = Some(AppScreen::Library);
                 }
+
+                if row_response.secondary_clicked() {
+                    let anchor = row_response
+                        .interact_pointer_pos()
+                        .or_else(|| ui.ctx().pointer_latest_pos())
+                        .unwrap_or(row_response.rect.left_bottom());
+                    instance_context_menu::request_for_instance(ui.ctx(), context_id, anchor, true);
+                }
+
+                if let Some(action) = instance_context_menu::take(ui.ctx(), context_id) {
+                    match action {
+                        InstanceContextAction::OpenInstance => {
+                            open_home_instance(output, instance.id.as_str());
+                        }
+                        InstanceContextAction::OpenFolder => {
+                            if let Err(err) = open_home_instance_folder(instance.id.as_str(), instances, config) {
+                                notification::emit_replace(
+                                    notification::Severity::Error,
+                                    format!("home-instance-folder-{}", instance.id),
+                                    format!("Failed to open instance folder: {err}"),
+                                    format!("home-instance-folder/{}/error", instance.id),
+                                );
+                            }
+                        }
+                        InstanceContextAction::Delete => {
+                            output.delete_requested_instance_id = Some(instance.id.clone());
+                        }
+                    }
+                }
+
                 ui.add_space(3.0);
             }
         });
@@ -3237,4 +3272,18 @@ fn format_time_ago(timestamp_ms: Option<u64>, now_ms: u64) -> String {
     }
     let days = hours / 24;
     format!("{days}d ago")
+}
+
+
+fn open_home_instance_folder(instance_id: &str, instances: &InstanceStore, config: &Config) -> Result<(), String> {
+    let Some(instance) = instances.instances.iter().find(|instance| instance.id == instance_id) else {
+        return Err(format!("unknown instance id: {instance_id}"));
+    };
+    let root = instance_root_path(Path::new(config.minecraft_installations_root()), instance);
+    desktop::open_in_file_manager(root.as_path())
+}
+
+fn open_home_instance(output: &mut HomeOutput, instance_id: &str) {
+    output.selected_instance_id = Some(instance_id.to_owned());
+    output.requested_screen = Some(AppScreen::Instance);
 }

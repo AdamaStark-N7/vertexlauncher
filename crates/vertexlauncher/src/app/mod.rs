@@ -369,6 +369,36 @@ impl VertexApp {
             self.show_import_instance_modal = true;
             self.import_instance_state.error = None;
         }
+        for (instance_id, action) in sidebar_output.instance_context_actions {
+            match action {
+                ui::instance_context_menu::InstanceContextAction::OpenInstance => {
+                    self.selected_instance_id = Some(instance_id);
+                    self.active_screen = screens::AppScreen::Instance;
+                }
+                ui::instance_context_menu::InstanceContextAction::OpenFolder => {
+                    if let Some(instance) = self
+                        .instance_store
+                        .instances
+                        .iter()
+                        .find(|instance| instance.id == instance_id)
+                    {
+                        let instance_root =
+                            instance_root_path(std::path::Path::new(self.config.minecraft_installations_root()), instance);
+                        if let Err(err) = launcher_ui::desktop::open_in_file_manager(instance_root.as_path()) {
+                            notification::error!(
+                                "instance_store",
+                                "Failed to open instance folder for '{}': {err}",
+                                instance.name
+                            );
+                        }
+                    }
+                }
+                ui::instance_context_menu::InstanceContextAction::Delete => {
+                    screens::request_delete_instance(ctx, instance_id);
+                    self.active_screen = screens::AppScreen::Library;
+                }
+            }
+        }
 
         let mut screen_output = screens::ScreenOutput::default();
         let wgpu_target_format = frame.wgpu_render_state().map(|state| state.target_format);

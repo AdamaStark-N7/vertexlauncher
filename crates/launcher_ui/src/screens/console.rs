@@ -4,7 +4,7 @@ use egui::{Color32, CornerRadius, Margin, Ui, pos2, vec2};
 use textui::{ButtonOptions, RichTextSpan, RichTextStyle, TextUi};
 
 use crate::{
-    console,
+    assets, console,
     ui::{context_menu, style},
 };
 
@@ -502,12 +502,24 @@ fn render_virtualized_log_lines(
 
                     let items = if selection_active {
                         vec![
-                            context_menu::ContextMenuItem::new(ACTION_COPY_SELECTION, "Copy selection"),
-                            context_menu::ContextMenuItem::new(ACTION_CLEAR_SELECTION, "Clear selection"),
+                            context_menu::ContextMenuItem::new_with_icon(
+                                ACTION_COPY_SELECTION,
+                                "Copy selection",
+                                assets::COPY_SVG,
+                            ),
+                            context_menu::ContextMenuItem::new_with_icon(
+                                ACTION_CLEAR_SELECTION,
+                                "Clear selection",
+                                assets::X_SVG,
+                            ),
                         ]
                     } else if let Some(line_index) = current_hovered_line {
                         ui.ctx().data_mut(|data| data.insert_temp(menu_line_id, Some(line_index)));
-                        vec![context_menu::ContextMenuItem::new(ACTION_COPY_LINE, "Copy line")]
+                        vec![context_menu::ContextMenuItem::new_with_icon(
+                            ACTION_COPY_LINE,
+                            "Copy line",
+                            assets::COPY_SVG,
+                        )]
                     } else {
                         Vec::new()
                     };

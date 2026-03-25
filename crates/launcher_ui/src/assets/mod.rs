@@ -17,7 +17,7 @@ pub const COPY_SVG: &[u8] = include_bytes!("copy.svg");
 pub const CREDIT_CARD_SVG: &[u8] = include_bytes!("credit-card.svg");
 pub const DOWNLOAD_SVG: &[u8] = include_bytes!("download.svg");
 pub const EDIT_SVG: &[u8] = include_bytes!("edit.svg");
-pub const ERROR_SVG: &[u8] = include_bytes!("error.svg");
+pub const ERROR_SVG: &[u8] = include_bytes!("error.svg"); pub const FOLDER_SVG: &[u8] = include_bytes!("folder.svg");
 pub const HOME_SVG: &[u8] = include_bytes!("home.svg");
 pub const INFO_CIRCLE_SVG: &[u8] = include_bytes!("info-circle.svg");
 pub const LEGAL_SVG: &[u8] = include_bytes!("legal.svg");

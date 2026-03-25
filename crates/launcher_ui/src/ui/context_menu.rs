@@ -1,6 +1,6 @@
 use egui::{
-    pos2, vec2, Align2, Area, Color32, Context, CornerRadius, CursorIcon, FontId, Id, Key,
-    Order, Pos2, Rect, Sense,
+    pos2, vec2, Align2, Area, Color32, Context, CornerRadius, CursorIcon, FontId, Id, Key, Order,
+    Pos2, Rect, Sense,
 };
 
 use crate::ui::{motion, style};
@@ -9,6 +9,8 @@ use crate::ui::{motion, style};
 pub struct ContextMenuItem {
     pub action_id: String,
     pub label: String,
+    pub icon_svg: Option<Vec<u8>>,
+    pub danger: bool,
 }
 
 impl ContextMenuItem {
@@ -16,7 +18,31 @@ impl ContextMenuItem {
         Self {
             action_id: action_id.into(),
             label: label.into(),
+            icon_svg: None,
+            danger: false,
         }
+    }
+
+    pub fn new_with_icon(
+        action_id: impl Into<String>,
+        label: impl Into<String>,
+        icon_svg: impl Into<Vec<u8>>,
+    ) -> Self {
+        Self::new(action_id, label).with_icon(icon_svg)
+    }
+
+    pub fn with_icon(mut self, icon_svg: impl Into<Vec<u8>>) -> Self {
+        self.icon_svg = Some(icon_svg.into());
+        self
+    }
+
+    pub fn with_svg(self, icon_svg: impl Into<Vec<u8>>) -> Self {
+        self.with_icon(icon_svg)
+    }
+
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
     }
 }
 
@@ -52,15 +78,15 @@ struct ContextMenuState {
 const STATE_ID: &str = "app_context_menu_state";
 const INVOCATION_ID: &str = "app_context_menu_invocation";
 const ANIM_ID: &str = "app_context_menu_anim";
-
 const MENU_MIN_WIDTH: f32 = 140.0;
-const MENU_MAX_WIDTH: f32 = 360.0;
 const MENU_MARGIN: f32 = 8.0;
 const MENU_PADDING: f32 = 8.0;
 const MENU_ITEM_HEIGHT: f32 = 30.0;
-const MENU_ITEM_HORIZONTAL_PADDING: f32 = 10.0;
 const MENU_SLIDE_DISTANCE: f32 = 14.0;
 const MENU_COLLAPSED_HEIGHT: f32 = 2.0;
+const MENU_MAX_HEIGHT: f32 = 420.0;
+const MENU_MAX_HEIGHT_SCREEN_FRACTION: f32 = 0.55;
+const SCROLLBAR_WIDTH_ALLOWANCE: f32 = 12.0;
 
 fn linear_in_out(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
@@ -81,24 +107,35 @@ fn resolved_anchor_pos(ctx: &Context, requested: Pos2) -> Pos2 {
         && requested.y.is_finite()
         && requested.x > content_rect.left() - 1.0
         && requested.y > content_rect.top() - 1.0;
-
     let fallback = ctx.input(|i| {
         i.pointer
             .latest_pos()
             .or(i.pointer.interact_pos())
             .or(i.pointer.press_origin())
     });
-
     let pos = if requested_ok {
         requested
     } else {
         fallback.unwrap_or(content_rect.center())
     };
-
     pos2(
-        pos.x.clamp(content_rect.left() + MENU_MARGIN, content_rect.right() - MENU_MARGIN),
-        pos.y.clamp(content_rect.top() + MENU_MARGIN, content_rect.bottom() - MENU_MARGIN),
+        pos.x
+            .clamp(content_rect.left() + MENU_MARGIN, content_rect.right() - MENU_MARGIN),
+        pos.y
+            .clamp(content_rect.top() + MENU_MARGIN, content_rect.bottom() - MENU_MARGIN),
     )
+}
+
+fn icon_slot_width(ctx: &Context, row_height: f32) -> f32 {
+    let pixels_per_point = ctx.pixels_per_point();
+    let scaled = row_height * pixels_per_point * 0.58;
+    (scaled / pixels_per_point).clamp(14.0, 22.0)
+}
+
+fn menu_max_height(screen_rect: Rect) -> f32 {
+    (screen_rect.height() * MENU_MAX_HEIGHT_SCREEN_FRACTION)
+        .min(MENU_MAX_HEIGHT)
+        .max(MENU_ITEM_HEIGHT + MENU_PADDING * 2.0)
 }
 
 pub fn request(ctx: &Context, request: ContextMenuRequest) {
@@ -136,7 +173,7 @@ pub fn take_invocation(ctx: &Context, source_id: Id) -> Option<String> {
     if let Some(invocation) = invocation {
         if invocation.source_id == source_id {
             ctx.data_mut(|data| {
-                data.insert_temp(Id::new(INVOCATION_ID), None::<ContextMenuInvocation>)
+                data.insert_temp(Id::new(INVOCATION_ID), None::<ContextMenuInvocation>);
             });
             return Some(invocation.action_id);
         }
@@ -171,33 +208,66 @@ pub fn show(ctx: &Context) {
     let screen_rect = ctx.content_rect();
     let anchor_pos = resolved_anchor_pos(ctx, request.anchor_pos);
     let label_font = FontId::proportional(14.0);
-    let label_color = ctx.style().visuals.text_color();
+    let visuals = ctx.style().visuals.clone();
+    let normal_label_color = visuals.text_color();
+    let danger_color = visuals.error_fg_color;
+
+    let row_left_spacing = style::SPACE_XS;
+    let row_gap_spacing = style::SPACE_XS;
+    let row_right_spacing = style::SPACE_XS;
+
+    let has_any_icon = request.items.iter().any(|item| item.icon_svg.is_some());
+    let shared_icon_width = if has_any_icon {
+        icon_slot_width(ctx, MENU_ITEM_HEIGHT)
+    } else {
+        0.0
+    };
 
     let widest_label = ctx.fonts_mut(|fonts| {
         request
             .items
             .iter()
             .map(|item| {
+                let color = if item.danger {
+                    danger_color
+                } else {
+                    normal_label_color
+                };
                 fonts
-                    .layout_no_wrap(item.label.clone(), label_font.clone(), label_color)
+                    .layout_no_wrap(item.label.clone(), label_font.clone(), color)
                     .size()
                     .x
             })
             .fold(0.0, f32::max)
     });
 
-    let width = (widest_label + MENU_PADDING * 2.0 + MENU_ITEM_HORIZONTAL_PADDING * 2.0)
+    let row_content_width = widest_label
+        + row_left_spacing
+        + row_right_spacing
+        + if has_any_icon {
+            row_gap_spacing + shared_icon_width
+        } else {
+            0.0
+        };
+
+    let visible_max_height = (screen_rect.height() - MENU_MARGIN * 2.0)
+        .max(MENU_ITEM_HEIGHT + MENU_PADDING * 2.0);
+    let max_height = menu_max_height(screen_rect).min(visible_max_height);
+
+    let full_content_height = request.items.len() as f32 * MENU_ITEM_HEIGHT;
+    let needs_scroll = full_content_height + MENU_PADDING * 2.0 > max_height;
+    let scrollbar_allowance = if needs_scroll {
+        SCROLLBAR_WIDTH_ALLOWANCE
+    } else {
+        0.0
+    };
+
+    let desired_width = MENU_PADDING * 2.0 + row_content_width + scrollbar_allowance;
+    let width = desired_width
         .max(MENU_MIN_WIDTH)
-        .min(MENU_MAX_WIDTH)
         .min((screen_rect.width() - MENU_MARGIN * 2.0).max(MENU_MIN_WIDTH));
 
-    let available_below = (screen_rect.bottom() - anchor_pos.y - MENU_MARGIN)
-        .max(MENU_ITEM_HEIGHT + MENU_PADDING * 2.0);
-    let full_content_height = request.items.len() as f32 * MENU_ITEM_HEIGHT;
-    let final_height = (full_content_height + MENU_PADDING * 2.0)
-        .min(available_below)
-        .min(screen_rect.height() - MENU_MARGIN * 2.0);
-
+    let final_height = (full_content_height + MENU_PADDING * 2.0).min(max_height);
     let current_height = MENU_COLLAPSED_HEIGHT + (final_height - MENU_COLLAPSED_HEIGHT) * eased;
 
     let left = anchor_pos.x.clamp(
@@ -228,7 +298,6 @@ pub fn show(ctx: &Context) {
         ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state.clone()));
     }
 
-    let visuals = ctx.style().visuals.clone();
     let fill = opaque(visuals.panel_fill);
     let stroke = visuals.widgets.noninteractive.bg_stroke;
     let hover_fill = opaque(visuals.widgets.hovered.weak_bg_fill);
@@ -262,7 +331,6 @@ pub fn show(ctx: &Context) {
             let shadow_rect = area_rect.expand(6.0);
             ui.painter()
                 .rect_filled(shadow_rect, corner_radius, shadow_color);
-
             ui.painter().rect_filled(area_rect, corner_radius, fill);
             ui.painter()
                 .rect_stroke(area_rect, corner_radius, stroke, egui::StrokeKind::Outside);
@@ -272,10 +340,8 @@ pub fn show(ctx: &Context) {
                 inner_rect.min,
                 pos2(inner_rect.max.x, area_rect.max.y - MENU_PADDING),
             );
-
             let mut selected_action: Option<String> = None;
             let content_offset_y = (1.0 - eased) * MENU_SLIDE_DISTANCE;
-
             let builder = egui::UiBuilder::new()
                 .max_rect(Rect::from_min_size(
                     pos2(inner_rect.min.x, inner_rect.min.y + content_offset_y),
@@ -314,17 +380,48 @@ pub fn show(ctx: &Context) {
                                 item_fill,
                             );
 
-                            let text_pos = pos2(
-                                item_rect.min.x + MENU_ITEM_HORIZONTAL_PADDING,
-                                item_rect.center().y,
-                            );
+                            let item_color = if item.danger {
+                                danger_color
+                            } else {
+                                normal_label_color
+                            };
+
+                            let text_left = item_rect.min.x + row_left_spacing;
+                            let icon_right = item_rect.max.x - row_right_spacing;
+                            let icon_left = if has_any_icon {
+                                icon_right - shared_icon_width
+                            } else {
+                                icon_right
+                            };
+
+                            if let Some(icon_svg) = item.icon_svg.as_ref() {
+                                let icon_rect = Rect::from_min_size(
+                                    pos2(
+                                        icon_left,
+                                        item_rect.center().y - shared_icon_width * 0.5,
+                                    ),
+                                    vec2(shared_icon_width, shared_icon_width),
+                                );
+                                let icon = egui::Image::from_bytes(
+                                    format!(
+                                        "bytes://context-menu/{}-{:02x}{:02x}{:02x}.svg",
+                                        item.action_id,
+                                        item_color.r(),
+                                        item_color.g(),
+                                        item_color.b(),
+                                    ),
+                                    apply_color_to_svg(icon_svg, item_color),
+                                )
+                                .fit_to_exact_size(icon_rect.size());
+                                let _ = ui.put(icon_rect, icon);
+                            }
 
                             ui.painter().text(
-                                text_pos,
+                                pos2(text_left, item_rect.center().y),
                                 Align2::LEFT_CENTER,
                                 item.label.as_str(),
                                 label_font.clone(),
-                                label_color,
+                                item_color,
                             );
 
                             if response.clicked() {
@@ -351,4 +448,10 @@ pub fn show(ctx: &Context) {
         });
 
     ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state));
+}
+
+fn apply_color_to_svg(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
+    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
+    svg.into_bytes()
 }

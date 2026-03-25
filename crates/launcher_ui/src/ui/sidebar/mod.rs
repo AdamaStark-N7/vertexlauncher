@@ -3,6 +3,7 @@ use textui::{ButtonOptions, TextUi};
 
 use crate::assets;
 use crate::screens::AppScreen;
+use crate::ui::instance_context_menu::InstanceContextAction;
 use crate::ui::components::icon_button;
 use crate::ui::style;
 
@@ -21,11 +22,21 @@ pub struct ProfileShortcut {
 }
 
 #[derive(Debug, Default)]
+/// User interactions emitted by the sidebar for the app shell to handle.
 pub struct SidebarOutput {
+    /// Requests navigation to a fixed application screen.
     pub selected_screen: Option<AppScreen>,
+    /// Requests that the main view open a specific instance.
     pub selected_profile_id: Option<String>,
+    /// Requests opening the create-instance flow.
     pub create_instance_clicked: bool,
+    /// Requests opening the import-instance flow.
     pub import_instance_clicked: bool,
+    /// Context-menu actions requested for a specific instance shortcut.
+    ///
+    /// The shell handles these centrally so sidebar interactions can reuse the
+    /// same instance-open and delete-confirmation flows as the library screen.
+    pub instance_context_actions: Vec<(String, InstanceContextAction)>,
 }
 
 pub fn render(

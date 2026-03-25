@@ -21,11 +21,13 @@ use textui::{LabelOptions, TextUi};
 
 use crate::app::tokio_runtime;
 use crate::{
+ desktop,
     assets, console, notification,
     ui::{modal, style},
 };
 
 use super::{AppScreen, LaunchAuthContext, peek_launch_intent};
+use crate::ui::instance_context_menu::{self, InstanceContextAction};
 
 const TILE_WIDTH: f32 = 300.0;
 const TILE_HEIGHT: f32 = 430.0;
@@ -35,6 +37,7 @@ const TILE_DESCRIPTION_SCROLL_HEIGHT: f32 = 96.0;
 const TILE_DELETE_BUTTON_HEIGHT: f32 = style::CONTROL_HEIGHT;
 
 #[derive(Debug, Default, Clone)]
+/// Actions emitted by the library screen for the app shell to process.
 pub struct LibraryOutput {
     pub selected_instance_id: Option<String>,
     pub requested_screen: Option<AppScreen>,
@@ -42,6 +45,25 @@ pub struct LibraryOutput {
 
 fn library_runtime_state_id() -> egui::Id {
     egui::Id::new("library_runtime_state")
+}
+
+/// Requests that the library delete-confirmation flow open for the given instance.
+///
+/// This routes deletion requests from outside the library screen, such as the
+/// sidebar context menu, back through the same confirmation and async-delete
+/// machinery used by the library itself.
+pub fn request_delete_instance(ctx: &egui::Context, instance_id: impl Into<String>) {
+    let state_id = library_runtime_state_id();
+    let instance_id = instance_id.into();
+    ctx.data_mut(|data| {
+        let mut state = data
+            .get_temp::<LibraryRuntimeState>(state_id)
+            .unwrap_or_default();
+        state.delete_target_instance_id = Some(instance_id);
+        state.delete_error = None;
+        data.insert_temp(state_id, state);
+    });
+    ctx.request_repaint();
 }
 
 pub(super) fn handle_escape(ctx: &egui::Context) -> bool {
@@ -229,6 +251,15 @@ pub fn render(
                             state.delete_target_instance_id = Some(instance.id.clone());
                             state.delete_error = None;
                         }
+                        RuntimeAction::OpenFolderRequested => {
+                            if let Err(err) = desktop::open_in_file_manager(instance_root.as_path()) {
+                                state.status_by_instance.insert(instance.id.clone(), format!("Failed to open folder: {err}"));
+                            }
+                        }
+                        RuntimeAction::OpenInstanceRequested => {
+                            output.selected_instance_id = Some(instance.id.clone());
+                            output.requested_screen = Some(AppScreen::Instance);
+                        }
                     }
 
                     if let Some(intent) = pending_launch_intent
@@ -317,7 +348,8 @@ fn render_instance_tile(
         .inner_margin(egui::Margin::same(style::SPACE_XL as i8));
 
     let mut action = RuntimeAction::None;
-    frame.show(ui, |ui| {
+
+    let frame_response = frame.show(ui, |ui| {
         ui.set_min_width(TILE_WIDTH);
         ui.set_max_width(TILE_WIDTH);
         ui.set_min_height(TILE_HEIGHT);
@@ -440,7 +472,25 @@ fn render_instance_tile(
                 );
             }
         });
-    });
+    }).response;
+
+    let context_id = ui.make_persistent_id(("library_instance_context", instance.id.as_str()));
+    if frame_response.secondary_clicked() {
+        let anchor = frame_response
+            .interact_pointer_pos()
+            .or_else(|| ui.ctx().pointer_latest_pos())
+            .unwrap_or(frame_response.rect.left_bottom());
+        instance_context_menu::request_for_instance(ui.ctx(), context_id, anchor, true);
+    }
+
+    if let Some(action_id) = instance_context_menu::take(ui.ctx(), context_id) {
+        action = match action_id {
+            InstanceContextAction::OpenInstance => RuntimeAction::OpenInstanceRequested,
+            InstanceContextAction::OpenFolder => RuntimeAction::OpenFolderRequested,
+            InstanceContextAction::Delete => RuntimeAction::DeleteRequested,
+        };
+    }
+
     action
 }
 
@@ -825,6 +875,8 @@ enum RuntimeAction {
     LaunchRequested,
     StopRequested,
     DeleteRequested,
+    OpenFolderRequested,
+    OpenInstanceRequested,
 }
 
 #[derive(Debug, Clone, Default)]

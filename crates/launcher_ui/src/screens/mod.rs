@@ -20,6 +20,7 @@ mod settings;
 mod skins;
 
 pub use content_browser::ContentBrowserState;
+pub use library::request_delete_instance;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
@@ -58,6 +59,7 @@ impl AppScreen {
 }
 
 #[derive(Debug, Clone, Default)]
+/// Actions emitted by the active screen for the application shell to handle.
 pub struct ScreenOutput {
     pub instances_changed: bool,
     pub requested_screen: Option<AppScreen>,
