@@ -311,7 +311,6 @@ pub fn render(
             });
             ui.add_space(style::SPACE_MD);
         });
-    render_delete_instance_modal(ui.ctx(), text_ui, &mut state, instances, installations_root);
     ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
     output
 }
@@ -708,6 +707,27 @@ fn render_running_user_avatar(
     )
     .fit_to_exact_size(rect.size());
     let _ = ui.put(rect, fallback);
+}
+
+pub fn render_global_overlays(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    instances: &mut InstanceStore,
+    installations_root: &Path,
+) {
+    let state_id = library_runtime_state_id();
+    let mut state = ctx
+        .data_mut(|data| data.get_temp::<LibraryRuntimeState>(state_id))
+        .unwrap_or_default();
+
+    poll_delete_instance_results(&mut state, instances);
+    if state.delete_in_flight {
+        ctx.request_repaint_after(Duration::from_millis(100));
+    }
+
+    render_delete_instance_modal(ctx, text_ui, &mut state, instances, installations_root);
+
+    ctx.data_mut(|data| data.insert_temp(state_id, state));
 }
 
 fn render_delete_instance_modal(

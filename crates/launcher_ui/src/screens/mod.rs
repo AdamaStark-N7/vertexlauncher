@@ -20,7 +20,7 @@ mod settings;
 mod skins;
 
 pub use content_browser::ContentBrowserState;
-pub use library::request_delete_instance;
+pub use library::{render_global_overlays, request_delete_instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
@@ -64,6 +64,7 @@ pub struct ScreenOutput {
     pub instances_changed: bool,
     pub requested_screen: Option<AppScreen>,
     pub selected_instance_id: Option<String>,
+    pub delete_requested_instance_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +161,7 @@ pub fn render(
                 instances_changed: false,
                 requested_screen: output.requested_screen,
                 selected_instance_id: output.selected_instance_id,
+                delete_requested_instance_id: output.delete_requested_instance_id,
             }
         }
         AppScreen::Library => {
@@ -182,6 +184,7 @@ pub fn render(
                 instances_changed: false,
                 requested_screen: output.requested_screen,
                 selected_instance_id: output.selected_instance_id,
+                delete_requested_instance_id: None,
             }
         }
         AppScreen::ContentBrowser => {
@@ -198,6 +201,7 @@ pub fn render(
                 instances_changed: false,
                 requested_screen: output.requested_screen,
                 selected_instance_id: None,
+                delete_requested_instance_id: None,
             }
         }
         AppScreen::Skins => {
@@ -256,10 +260,17 @@ pub fn render(
                 instances_changed: output.instances_changed,
                 requested_screen: output.requested_screen,
                 selected_instance_id: None,
+                delete_requested_instance_id: None,
             }
         }
     };
 
+    render_global_overlays(
+        ui.ctx(),
+        text_ui,
+        instances,
+        std::path::Path::new(config.minecraft_installations_root()),
+    );
     context_menu::show(ui.ctx());
     output
 }

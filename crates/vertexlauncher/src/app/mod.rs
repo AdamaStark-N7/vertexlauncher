@@ -395,7 +395,6 @@ impl VertexApp {
                 }
                 ui::instance_context_menu::InstanceContextAction::Delete => {
                     screens::request_delete_instance(ctx, instance_id);
-                    self.active_screen = screens::AppScreen::Library;
                 }
             }
         }
@@ -473,6 +472,9 @@ impl VertexApp {
         }
         if let Some(instance_id) = screen_output.selected_instance_id {
             self.selected_instance_id = Some(instance_id);
+        }
+        if let Some(instance_id) = screen_output.delete_requested_instance_id {
+            screens::request_delete_instance(ctx, instance_id);
         }
         if let Some(requested_screen) = screen_output.requested_screen {
             self.active_screen = requested_screen;

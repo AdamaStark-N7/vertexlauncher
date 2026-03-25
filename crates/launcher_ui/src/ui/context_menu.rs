@@ -302,6 +302,18 @@ pub fn show(ctx: &Context) {
     let stroke = visuals.widgets.noninteractive.bg_stroke;
     let hover_fill = opaque(visuals.widgets.hovered.weak_bg_fill);
     let active_fill = opaque(visuals.widgets.active.weak_bg_fill);
+    let danger_hover_fill = Color32::from_rgba_unmultiplied(
+        danger_color.r(),
+        danger_color.g(),
+        danger_color.b(),
+        26,
+    );
+    let danger_active_fill = Color32::from_rgba_unmultiplied(
+        danger_color.r(),
+        danger_color.g(),
+        danger_color.b(),
+        44,
+    );
     let shadow_color = Color32::from_black_alpha((56.0 * eased) as u8);
     let corner_radius = CornerRadius::same(style::CORNER_RADIUS_MD);
 
@@ -366,7 +378,15 @@ pub fn show(ctx: &Context) {
                                 Sense::click(),
                             );
 
-                            let item_fill = if response.is_pointer_button_down_on() {
+                            let item_fill = if item.danger {
+                                if response.is_pointer_button_down_on() {
+                                    danger_active_fill
+                                } else if response.hovered() {
+                                    danger_hover_fill
+                                } else {
+                                    Color32::TRANSPARENT
+                                }
+                            } else if response.is_pointer_button_down_on() {
                                 active_fill
                             } else if response.hovered() {
                                 hover_fill
@@ -423,6 +443,10 @@ pub fn show(ctx: &Context) {
                                 label_font.clone(),
                                 item_color,
                             );
+
+                            if response.hovered() {
+                                ui.ctx().set_cursor_icon(CursorIcon::Default);
+                            }
 
                             if response.clicked() {
                                 selected_action = Some(item.action_id.clone());
