@@ -6,7 +6,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 APP_ID="io.github.SturdyFool10.VertexLauncher"
 BRANCH="${VERTEX_FLATPAK_BRANCH:-stable}"
-ARCH="${VERTEX_FLATPAK_ARCH:-$(flatpak --default-arch 2>/dev/null || uname -m)}"
+ARCHES="${VERTEX_FLATPAK_ARCHES:-${VERTEX_FLATPAK_ARCH:-$(flatpak --default-arch 2>/dev/null || uname -m)}}"
 
 RUNTIME="org.gnome.Platform"
 RUNTIME_VERSION="49"
@@ -16,10 +16,7 @@ RUST_EXT_TAG="25.08"
 
 GEN_DIR="${REPO_ROOT}/flatpak/generated"
 SOURCE_TREE="${GEN_DIR}/source-tree"
-BUILD_DIR="${REPO_ROOT}/flatpak/build/${ARCH}"
-REPO_DIR="${REPO_ROOT}/flatpak/repo/${ARCH}"
 DIST_DIR="${REPO_ROOT}/target/release"
-MANIFEST_PATH="${GEN_DIR}/${APP_ID}-${ARCH}.yaml"
 CARGO_SOURCES_PATH="${GEN_DIR}/cargo-sources.json"
 GENERATOR_PATH="${GEN_DIR}/flatpak-cargo-generator.py"
 
@@ -110,9 +107,11 @@ generate_cargo_sources() {
 }
 
 write_manifest() {
+    local arch="$1"
+    local manifest_path="${GEN_DIR}/${APP_ID}-${arch}.yaml"
     mkdir -p "${GEN_DIR}"
 
-    cat > "${MANIFEST_PATH}" <<MANIFEST
+    cat > "${manifest_path}" <<MANIFEST
 app-id: ${APP_ID}
 runtime: ${RUNTIME}
 runtime-version: "${RUNTIME_VERSION}"
@@ -182,31 +181,36 @@ MANIFEST
 }
 
 build_flatpak() {
-    rm -rf "${BUILD_DIR}" "${REPO_DIR}"
-    mkdir -p "${BUILD_DIR}" "${REPO_DIR}" "${DIST_DIR}"
+    local arch="$1"
+    local build_dir="${REPO_ROOT}/flatpak/build/${arch}"
+    local repo_dir="${REPO_ROOT}/flatpak/repo/${arch}"
+    local manifest_path="${GEN_DIR}/${APP_ID}-${arch}.yaml"
 
-    log "Building Flatpak from clean source tree"
+    rm -rf "${build_dir}" "${repo_dir}"
+    mkdir -p "${build_dir}" "${repo_dir}" "${DIST_DIR}"
+
+    log "Building Flatpak from clean source tree (arch: ${arch})"
     flatpak-builder \
         --user \
         --force-clean \
-        --arch="${ARCH}" \
-        --repo="${REPO_DIR}" \
-        "${BUILD_DIR}" \
-        "${MANIFEST_PATH}"
+        --arch="${arch}" \
+        --repo="${repo_dir}" \
+        "${build_dir}" \
+        "${manifest_path}"
 
     log "Updating local repo metadata"
-    flatpak build-update-repo "${REPO_DIR}" >/dev/null
+    flatpak build-update-repo "${repo_dir}" >/dev/null
 
     local app_ref
     app_ref="$(
-        ostree --repo="${REPO_DIR}" refs 2>/dev/null \
-            | awk -v app="${APP_ID}" -v arch="${ARCH}" '
+        ostree --repo="${repo_dir}" refs 2>/dev/null \
+            | awk -v app="${APP_ID}" -v arch="${arch}" '
                 $0 ~ "^app/" app "/" arch "/" { print; exit }
             '
     )"
 
     [[ -n "${app_ref}" ]] || {
-        ostree --repo="${REPO_DIR}" refs >&2 || true
+        ostree --repo="${repo_dir}" refs >&2 || true
         die "No exported Flatpak ref found after build"
     }
 
@@ -215,15 +219,13 @@ build_flatpak() {
 
     log "Bundling ${app_ref}"
     flatpak build-bundle \
-        "${REPO_DIR}" \
-        "${DIST_DIR}/${APP_ID}-${ARCH}.flatpak" \
+        "${repo_dir}" \
+        "${DIST_DIR}/${APP_ID}-${arch}.flatpak" \
         "${APP_ID}" \
         "${exported_branch}"
 }
 
 main() {
-    ARCH="$(normalize_arch "${ARCH}")"
-
     need_cmd bash
     need_cmd flatpak
     need_cmd flatpak-builder
@@ -240,15 +242,38 @@ main() {
     [[ -f "${REPO_ROOT}/Vertex.svg" ]] || die "Missing Vertex.svg"
 
     ensure_flathub_remote
-    ensure_runtime_bits
-    prepare_clean_source_tree
-    generate_cargo_sources
-    write_manifest
-    build_flatpak
+
+    # Parse comma-separated arch list
+    IFS=',' read -ra ARCH_LIST <<< "${ARCHES}"
+
+    local source_prepared=0
+    for raw_arch in "${ARCH_LIST[@]}"; do
+        local arch
+        arch="$(normalize_arch "${raw_arch}")"
+
+        # For aarch64 on a non-arm64 host, delegate to the container helper
+        if [[ "${arch}" == "aarch64" && -z "${VERTEX_IN_ARM64_CONTAINER:-}" ]]; then
+            log "Delegating aarch64 build to ARM64 container helper"
+            VERTEX_FLATPAK_BRANCH="${BRANCH}" bash "${SCRIPT_DIR}/build-flatpak-arm64-container.sh"
+            log "Bundle: ${DIST_DIR}/${APP_ID}-aarch64.flatpak"
+            continue
+        fi
+
+        ensure_runtime_bits
+
+        if [[ "${source_prepared}" -eq 0 ]]; then
+            prepare_clean_source_tree
+            generate_cargo_sources
+            source_prepared=1
+        fi
+
+        write_manifest "${arch}"
+        build_flatpak "${arch}"
+
+        log "Bundle: ${DIST_DIR}/${APP_ID}-${arch}.flatpak"
+    done
 
     log "Done"
-    log "Bundle: ${DIST_DIR}/${APP_ID}-${ARCH}.flatpak"
-    log "Repo:   ${REPO_DIR}"
 }
 
 main "$@"
