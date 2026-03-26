@@ -1,4 +1,3 @@
-use config::SvgAaMode;
 use egui::{Button, Color32, ColorImage, Image, Response, Stroke, TextureHandle, Ui, vec2};
 use image::{RgbaImage, imageops::FilterType};
 
@@ -107,20 +106,22 @@ fn rasterized_svg_image(
         aa_mode,
     ));
 
-    let texture = if let Some(texture) = ui.ctx().data_mut(|d| d.get_temp::<TextureHandle>(cache_id)) {
-        texture
-    } else {
-        let texture_name = format!(
-            "vertex-svg-raster-{icon_id}-{edge}-{:02x}{:02x}{:02x}-{:?}",
-            text_color.r(),
-            text_color.g(),
-            text_color.b(),
-            aa_mode
-        );
-        let texture = rasterize_svg_texture(ui, &texture_name, svg_bytes, edge, aa_mode)?;
-        ui.ctx().data_mut(|d| d.insert_temp(cache_id, texture.clone()));
-        texture
-    };
+    let texture =
+        if let Some(texture) = ui.ctx().data_mut(|d| d.get_temp::<TextureHandle>(cache_id)) {
+            texture
+        } else {
+            let texture_name = format!(
+                "vertex-svg-raster-{icon_id}-{edge}-{:02x}{:02x}{:02x}-{:?}",
+                text_color.r(),
+                text_color.g(),
+                text_color.b(),
+                aa_mode
+            );
+            let texture = rasterize_svg_texture(ui, &texture_name, svg_bytes, edge, aa_mode)?;
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(cache_id, texture.clone()));
+            texture
+        };
 
     Some(Image::new((texture.id(), vec2(icon_size, icon_size))))
 }
@@ -150,10 +151,8 @@ fn rasterize_svg_texture(
     } else {
         rgba
     };
-    let color_image = ColorImage::from_rgba_premultiplied(
-        [edge as usize, edge as usize],
-        final_rgba.as_raw(),
-    );
+    let color_image =
+        ColorImage::from_rgba_premultiplied([edge as usize, edge as usize], final_rgba.as_raw());
 
     Some(ui.ctx().load_texture(
         texture_name.to_owned(),

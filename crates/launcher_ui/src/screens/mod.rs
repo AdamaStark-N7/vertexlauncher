@@ -11,6 +11,7 @@ use crate::ui::{context_menu, theme::Theme};
 
 mod console;
 mod content_browser;
+mod discover;
 mod home;
 mod instance;
 mod legal;
@@ -20,12 +21,14 @@ mod settings;
 mod skins;
 
 pub use content_browser::ContentBrowserState;
+pub use discover::DiscoverState;
 pub use library::{render_global_overlays, request_delete_instance};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {
     Home,
     Library,
+    Discover,
     ContentBrowser,
     Skins,
     Settings,
@@ -35,9 +38,10 @@ pub enum AppScreen {
 }
 
 impl AppScreen {
-    pub const FIXED_NAV: [AppScreen; 6] = [
+    pub const FIXED_NAV: [AppScreen; 7] = [
         AppScreen::Home,
         AppScreen::Library,
+        AppScreen::Discover,
         AppScreen::Skins,
         AppScreen::Settings,
         AppScreen::Legal,
@@ -48,6 +52,7 @@ impl AppScreen {
         match self {
             AppScreen::Home => "Home",
             AppScreen::Library => "Library",
+            AppScreen::Discover => "Discover",
             AppScreen::ContentBrowser => "Content Browser",
             AppScreen::Skins => "Skin Manager",
             AppScreen::Settings => "Settings",
@@ -137,6 +142,7 @@ pub fn render(
     available_themes: &[Theme],
     settings_info: &SettingsInfo,
     content_browser_state: &mut ContentBrowserState,
+    discover_state: &mut DiscoverState,
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
     let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
@@ -203,6 +209,10 @@ pub fn render(
                 selected_instance_id: None,
                 delete_requested_instance_id: None,
             }
+        }
+        AppScreen::Discover => {
+            discover::render(ui, text_ui, discover_state);
+            ScreenOutput::default()
         }
         AppScreen::Skins => {
             skins::render(

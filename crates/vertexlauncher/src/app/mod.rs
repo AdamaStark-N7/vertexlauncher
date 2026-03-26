@@ -10,8 +10,8 @@ use installation::{
     running_instance_roots,
 };
 use instances::{
-    InstanceRecord, InstanceStore, create_instance, delete_instance as delete_instance_record,
-    instance_root_path, load_store, save_store as save_instance_store,
+    InstanceRecord, InstanceStore, create_instance, instance_root_path, load_store,
+    save_store as save_instance_store,
 };
 use launcher_runtime as tokio_runtime;
 use launcher_ui::ui::svg_aa;
@@ -88,6 +88,7 @@ struct VertexApp {
     selected_instance_id: Option<String>,
     instance_store: InstanceStore,
     content_browser_state: screens::ContentBrowserState,
+    discover_state: screens::DiscoverState,
     show_create_instance_modal: bool,
     create_instance_state: create_instance_modal::CreateInstanceState,
     show_import_instance_modal: bool,
@@ -195,6 +196,7 @@ impl VertexApp {
             selected_instance_id: None,
             instance_store,
             content_browser_state: screens::ContentBrowserState::default(),
+            discover_state: screens::DiscoverState::default(),
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
             show_import_instance_modal: false,
@@ -459,6 +461,7 @@ impl VertexApp {
                             self.theme_catalog.themes(),
                             &settings_info,
                             &mut self.content_browser_state,
+                            &mut self.discover_state,
                             &mut self.text_ui,
                         );
                     },
@@ -623,17 +626,6 @@ impl VertexApp {
                 "instance_context_menu",
                 "Failed to open instance folder: {err}"
             );
-        }
-    }
-
-    fn delete_instance_from_sidebar(&mut self, instance_id: &str) {
-        let installations_root = PathBuf::from(self.config.minecraft_installations_root());
-        if let Err(err) = delete_instance_record(
-            &mut self.instance_store,
-            instance_id,
-            installations_root.as_path(),
-        ) {
-            notification::error!("instance_context_menu", "Failed to delete instance: {err}");
         }
     }
 
