@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
-MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.17}"
+MAX_GLIBC_VERSION="${VERTEX_MAX_GLIBC_VERSION:-2.35}"
 WORK_ROOT="${REPO_ROOT}/.cache/linux-x86_64-container"
 TOOLCHAIN_CACHE_ROOT="${REPO_ROOT}/.cache/linux-x86_64-toolchain"
 CARGO_HOME_DIR="${TOOLCHAIN_CACHE_ROOT}/cargo-home"
