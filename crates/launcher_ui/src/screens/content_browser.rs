@@ -288,6 +288,7 @@ enum SearchUpdate {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct BrowserSearchRequest {
     query: Option<String>,
+    tags: Vec<String>,
     game_version: Option<String>,
     loader: BrowserLoader,
     content_scope: ContentScope,
@@ -370,6 +371,7 @@ struct DetailVersionsResult {
 #[derive(Clone, Debug)]
 pub struct ContentBrowserState {
     query_input: String,
+    search_tags: Vec<String>,
     minecraft_version_filter: String,
     content_scope: ContentScope,
     mod_sort_mode: ModSortMode,
@@ -421,6 +423,7 @@ impl Default for ContentBrowserState {
     fn default() -> Self {
         Self {
             query_input: String::new(),
+            search_tags: Vec::new(),
             minecraft_version_filter: String::new(),
             content_scope: ContentScope::All,
             mod_sort_mode: ModSortMode::Popularity,
@@ -621,9 +624,11 @@ pub fn render(
             if state.auto_populated_instance_id.as_deref() != Some(instance.id.as_str())
                 && !state.search_in_flight
                 && state.query_input.trim().is_empty()
+                && state.search_tags.is_empty()
             {
                 let request = BrowserSearchRequest {
                     query: None,
+                    tags: Vec::new(),
                     game_version: normalize_optional(state.minecraft_version_filter.as_str()),
                     loader: state.loader,
                     content_scope: ContentScope::Mods,
@@ -717,11 +722,19 @@ fn render_controls(
                 .hint_text("Search project names, summaries, and tags")
                 .desired_width((ui.available_width() - 460.0).max(160.0));
             let response = ui.add(edit);
-            let run_search = response.lost_focus()
-                && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                && !state.search_in_flight;
-            if run_search {
-                request_search_for_current_filters(state, true);
+            let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let submit_pressed = enter_pressed && (response.has_focus() || response.lost_focus());
+            if submit_pressed {
+                if ui.input(|input| input.modifiers.shift) {
+                    if add_search_tag(&mut state.search_tags, state.query_input.as_str()) {
+                        state.query_input.clear();
+                        if !state.search_in_flight {
+                            request_search_for_current_filters(state, true);
+                        }
+                    }
+                } else if !state.search_in_flight {
+                    request_search_for_current_filters(state, true);
+                }
             }
 
             egui::ComboBox::from_id_salt(("content_browser_loader", instance_id))
@@ -768,6 +781,12 @@ fn render_controls(
                 }
             }
         });
+        if !state.search_tags.is_empty() {
+            ui.add_space(style::SPACE_SM);
+            if render_search_tag_chips(ui, &mut state.search_tags) {
+                request_search_for_current_filters(state, true);
+            }
+        }
         ui.add_space(style::SPACE_MD);
         let gap = ui.spacing().item_spacing.x;
         let column_width = ((ui.available_width() - (gap * 2.0)) / 3.0).max(140.0);
@@ -1327,7 +1346,11 @@ fn request_search_for_current_filters(state: &mut ContentBrowserState, reset_pag
     request_search(
         state,
         BrowserSearchRequest {
-            query: normalize_optional(state.query_input.as_str()),
+            query: normalize_optional(compose_search_query(
+                state.query_input.as_str(),
+                state.search_tags.as_slice(),
+            )),
+            tags: state.search_tags.clone(),
             game_version: normalize_optional(state.minecraft_version_filter.as_str()),
             loader: state.loader,
             content_scope: state.content_scope,
@@ -1362,6 +1385,93 @@ fn render_chip(
                 },
             );
         });
+}
+
+fn render_search_tag_chips(ui: &mut Ui, search_tags: &mut Vec<String>) -> bool {
+    let mut removed_index: Option<usize> = None;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
+        for (index, tag) in search_tags.iter().enumerate() {
+            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
+            let stroke = egui::Stroke::new(1.0, ui.visuals().selection.bg_fill.gamma_multiply(0.7));
+            let text_color = ui.visuals().text_color();
+            let themed_svg = themed_svg_bytes(assets::X_SVG, text_color);
+            let uri = format!(
+                "bytes://content-browser/tag-remove/{index}-{:02x}{:02x}{:02x}.svg",
+                text_color.r(),
+                text_color.g(),
+                text_color.b()
+            );
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_height(24.0);
+                        let icon_button = egui::Button::image(
+                            egui::Image::from_bytes(uri, themed_svg)
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                        )
+                        .frame(false)
+                        .min_size(egui::vec2(22.0, 22.0));
+                        if ui
+                            .add(icon_button)
+                            .on_hover_text(format!("Remove tag: {tag}"))
+                            .clicked()
+                        {
+                            removed_index = Some(index);
+                        }
+                        ui.label(tag.as_str());
+                    });
+                });
+        }
+    });
+    if let Some(index) = removed_index {
+        search_tags.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn add_search_tag(search_tags: &mut Vec<String>, candidate: &str) -> bool {
+    let Some(normalized) = normalize_search_tag(candidate) else {
+        return false;
+    };
+    if search_tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(&normalized))
+    {
+        return false;
+    }
+    search_tags.push(normalized);
+    true
+}
+
+fn normalize_search_tag(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn compose_search_query(input: &str, tags: &[String]) -> String {
+    let mut parts = Vec::with_capacity(tags.len() + 1);
+    for tag in tags {
+        let trimmed = tag.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_owned());
+        }
+    }
+    let trimmed_input = input.trim();
+    if !trimmed_input.is_empty() {
+        parts.push(trimmed_input.to_owned());
+    }
+    parts.join(" ")
 }
 
 fn open_detail_page(state: &mut ContentBrowserState, entry: &BrowserProjectEntry) {
@@ -4717,8 +4827,8 @@ fn browser_entry_from_curseforge_dependency_project(
     })
 }
 
-fn normalize_optional(value: &str) -> Option<String> {
-    let trimmed = value.trim();
+fn normalize_optional(value: impl AsRef<str>) -> Option<String> {
+    let trimmed = value.as_ref().trim();
     if trimmed.is_empty() {
         None
     } else {

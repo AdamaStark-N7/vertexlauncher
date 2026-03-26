@@ -25,6 +25,7 @@ const DISCOVER_CARD_IMAGE_HEIGHT: f32 = 124.0;
 #[derive(Debug, Clone)]
 pub struct DiscoverState {
     query_input: String,
+    search_tags: Vec<String>,
     game_version_filter: String,
     provider_filter: DiscoverProviderFilter,
     loader_filter: DiscoverLoaderFilter,
@@ -65,6 +66,7 @@ impl Default for DiscoverState {
     fn default() -> Self {
         Self {
             query_input: String::new(),
+            search_tags: Vec::new(),
             game_version_filter: String::new(),
             provider_filter: DiscoverProviderFilter::default(),
             loader_filter: DiscoverLoaderFilter::default(),
@@ -277,6 +279,7 @@ impl DiscoverSource {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct DiscoverSearchRequest {
     query: String,
+    tags: Vec<String>,
     game_version: Option<String>,
     provider_filter: DiscoverProviderFilter,
     loader_filter: DiscoverLoaderFilter,
@@ -431,8 +434,24 @@ fn render_discover_browse_content(
                 egui::TextEdit::singleline(&mut state.query_input)
                     .hint_text("Search modpacks and press Enter"),
             );
-            let search_submitted = search_response.lost_focus()
-                && ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let mut search_submitted = false;
+            let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+            let submit_pressed =
+                enter_pressed && (search_response.has_focus() || search_response.lost_focus());
+            if submit_pressed {
+                if ui.input(|input| input.modifiers.shift) {
+                    if add_search_tag(&mut state.search_tags, state.query_input.as_str()) {
+                        state.query_input.clear();
+                        search_submitted = true;
+                    }
+                } else {
+                    search_submitted = true;
+                }
+            }
+            if !state.search_tags.is_empty() && render_search_tag_chips(ui, &mut state.search_tags)
+            {
+                search_submitted = true;
+            }
             ui.add_space(style::SPACE_SM);
 
             let dropdown_width =
@@ -1172,15 +1191,15 @@ fn poll_search_results(state: &mut DiscoverState) {
 }
 
 fn current_request(state: &DiscoverState, mode: SearchMode) -> DiscoverSearchRequest {
+    let combined_query =
+        compose_search_query(state.query_input.as_str(), state.search_tags.as_slice());
     DiscoverSearchRequest {
-        query: {
-            let trimmed = state.query_input.trim();
-            if trimmed.is_empty() {
-                "modpack".to_owned()
-            } else {
-                trimmed.to_owned()
-            }
+        query: if combined_query.is_empty() {
+            "modpack".to_owned()
+        } else {
+            combined_query
         },
+        tags: state.search_tags.clone(),
         game_version: non_empty(state.game_version_filter.as_str()),
         provider_filter: state.provider_filter,
         loader_filter: state.loader_filter,
@@ -1456,6 +1475,101 @@ fn non_empty(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_owned())
     }
+}
+
+fn add_search_tag(search_tags: &mut Vec<String>, candidate: &str) -> bool {
+    let Some(normalized) = normalize_search_tag(candidate) else {
+        return false;
+    };
+    if search_tags
+        .iter()
+        .any(|tag| tag.eq_ignore_ascii_case(normalized.as_str()))
+    {
+        return false;
+    }
+    search_tags.push(normalized);
+    true
+}
+
+fn normalize_search_tag(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+fn compose_search_query(input: &str, tags: &[String]) -> String {
+    let mut parts = Vec::with_capacity(tags.len() + 1);
+    for tag in tags {
+        let trimmed = tag.trim();
+        if !trimmed.is_empty() {
+            parts.push(trimmed.to_owned());
+        }
+    }
+    let trimmed_input = input.trim();
+    if !trimmed_input.is_empty() {
+        parts.push(trimmed_input.to_owned());
+    }
+    parts.join(" ")
+}
+
+fn render_search_tag_chips(ui: &mut Ui, search_tags: &mut Vec<String>) -> bool {
+    let mut removed_index: Option<usize> = None;
+    ui.add_space(style::SPACE_SM);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
+        for (index, tag) in search_tags.iter().enumerate() {
+            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
+            let stroke = egui::Stroke::new(1.0, ui.visuals().selection.bg_fill.gamma_multiply(0.7));
+            let text_color = ui.visuals().text_color();
+            let themed_svg = themed_svg_bytes(assets::X_SVG, text_color);
+            let uri = format!(
+                "bytes://discover/tag-remove/{index}-{:02x}{:02x}{:02x}.svg",
+                text_color.r(),
+                text_color.g(),
+                text_color.b()
+            );
+            egui::Frame::new()
+                .fill(fill)
+                .stroke(stroke)
+                .corner_radius(egui::CornerRadius::same(8))
+                .inner_margin(egui::Margin::symmetric(8, 5))
+                .show(ui, |ui| {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.set_min_height(24.0);
+                        let icon_button = egui::Button::image(
+                            egui::Image::from_bytes(uri, themed_svg)
+                                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
+                        )
+                        .frame(false)
+                        .min_size(egui::vec2(22.0, 22.0));
+                        if ui
+                            .add(icon_button)
+                            .on_hover_text(format!("Remove tag: {tag}"))
+                            .clicked()
+                        {
+                            removed_index = Some(index);
+                        }
+                        let _ = ui.label(tag.as_str());
+                    });
+                });
+        }
+    });
+    if let Some(index) = removed_index {
+        search_tags.remove(index);
+        true
+    } else {
+        false
+    }
+}
+
+fn themed_svg_bytes(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
+    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
+    String::from_utf8_lossy(svg_bytes)
+        .replace("currentColor", color_hex.as_str())
+        .into_bytes()
 }
 
 fn sized_combo_box(
