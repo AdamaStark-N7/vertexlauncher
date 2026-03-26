@@ -8,7 +8,7 @@ command: vertexlauncher
 
 finish-args:
   - --socket=wayland
-  - --socket=fallback-x11
+  - --socket=x11
   - --device=dri
   - --share=ipc
   - --share=network

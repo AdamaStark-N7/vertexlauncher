@@ -17,7 +17,9 @@ finish-args:
   - --socket=x11
   - --socket=pulseaudio
   - --device=dri
-  - --filesystem=home
+  - --filesystem=host
+  - --filesystem=host-os
+  - --filesystem=host-etc
   - --talk-name=org.freedesktop.secrets
   - --env=GDK_BACKEND=wayland,x11
 modules:

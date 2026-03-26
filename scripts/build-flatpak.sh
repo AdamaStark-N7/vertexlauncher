@@ -129,7 +129,7 @@ finish-args:
 
   - --socket=wayland
 
-  - --socket=fallback-x11
+  - --socket=x11
 
   - --socket=pulseaudio
 

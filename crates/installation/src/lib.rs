@@ -950,17 +950,8 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
 
     command.arg(format!("-Xmx{}M", request.max_memory_mib.max(512)));
     let user_jvm_args = parse_user_args(request.extra_jvm_args.as_deref());
-    let user_sets_awt_headless = jvm_arg_sets_property(
-        user_jvm_args.iter().map(String::as_str),
-        "java.awt.headless",
-    );
     for arg in user_jvm_args {
         command.arg(arg);
-    }
-    if should_force_headless_awt_for_flatpak() && !user_sets_awt_headless {
-        // Some Java mods use AWT only for off-screen image work. In Flatpak,
-        // forcing headless mode avoids hard X11 dependency failures.
-        command.arg("-Djava.awt.headless=true");
     }
 
     let launch_context = build_launch_context(
@@ -1057,21 +1048,6 @@ fn apply_linux_opengl_driver_env(
         command.env("MESA_LOADER_DRIVER_OVERRIDE", "zink");
         command.env("GALLIUM_DRIVER", "zink");
     }
-}
-
-fn jvm_arg_sets_property<'a>(args: impl IntoIterator<Item = &'a str>, property_name: &str) -> bool {
-    let prefix = format!("-D{property_name}=");
-    args.into_iter().any(|arg| arg.starts_with(prefix.as_str()))
-}
-
-#[cfg(target_os = "linux")]
-fn should_force_headless_awt_for_flatpak() -> bool {
-    std::path::Path::new("/.flatpak-info").is_file()
-}
-
-#[cfg(not(target_os = "linux"))]
-fn should_force_headless_awt_for_flatpak() -> bool {
-    false
 }
 
 #[cfg(not(target_os = "linux"))]
