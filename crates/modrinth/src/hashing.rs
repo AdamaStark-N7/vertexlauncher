@@ -1,5 +1,5 @@
-use sha1::Sha1;
-use sha2::{Digest, Sha512};
+use sha1::{Digest as Sha1Digest, Sha1};
+use sha2::{Digest as Sha2Digest, Sha512};
 use std::io::Read as _;
 use std::path::Path;
 
@@ -27,14 +27,27 @@ pub fn hash_file_sha1_and_sha512_hex(path: &Path) -> Result<(String, String), st
             break;
         }
         let chunk = &buffer[..bytes_read];
-        sha1.update(chunk);
-        sha512.update(chunk);
+        Sha1Digest::update(&mut sha1, chunk);
+        Sha2Digest::update(&mut sha512, chunk);
     }
 
+    let sha1_bytes = Sha1Digest::finalize(sha1);
+    let sha512_bytes = Sha2Digest::finalize(sha512);
+
     Ok((
-        format!("{:x}", sha1.finalize()),
-        format!("{:x}", sha512.finalize()),
+        bytes_to_lower_hex(sha1_bytes.as_slice()),
+        bytes_to_lower_hex(sha512_bytes.as_slice()),
     ))
+}
+
+fn bytes_to_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
 }
 
 #[cfg(test)]
