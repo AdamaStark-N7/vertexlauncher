@@ -9,7 +9,7 @@ use content_resolver::{InstalledContentHashCache, InstalledContentKind, Resolved
 use installation::{
     InstallProgress, LoaderSupportIndex, LoaderVersionIndex, MinecraftVersionEntry, VersionCatalog,
 };
-use vtmpack::VtmpackExportOptions;
+use vtmpack::{VtmpackExportOptions, VtmpackExportProgress, VtmpackExportStats};
 
 use super::{
     ContentApplyResult, ContentLookupResult, INSTALLED_CONTENT_PAGE_SIZES, InstalledContentCache,
@@ -65,6 +65,13 @@ pub(super) struct InstanceLogEntry {
     pub(super) file_name: String,
     pub(super) modified_at_ms: Option<u64>,
     pub(super) size_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct VtmpackExportOutcome {
+    pub(super) instance_name: String,
+    pub(super) output_path: PathBuf,
+    pub(super) result: Result<VtmpackExportStats, String>,
 }
 
 #[derive(Clone, Debug)]
@@ -192,6 +199,14 @@ pub(super) struct InstanceScreenState {
     pub(super) show_settings_modal: bool,
     pub(super) show_export_vtmpack_modal: bool,
     pub(super) export_vtmpack_options: VtmpackExportOptions,
+    pub(super) export_vtmpack_in_flight: bool,
+    pub(super) export_vtmpack_output_path: Option<PathBuf>,
+    pub(super) export_vtmpack_progress_tx: Option<mpsc::Sender<VtmpackExportProgress>>,
+    pub(super) export_vtmpack_progress_rx:
+        Option<Arc<Mutex<mpsc::Receiver<VtmpackExportProgress>>>>,
+    pub(super) export_vtmpack_latest_progress: Option<VtmpackExportProgress>,
+    pub(super) export_vtmpack_results_tx: Option<mpsc::Sender<VtmpackExportOutcome>>,
+    pub(super) export_vtmpack_results_rx: Option<Arc<Mutex<mpsc::Receiver<VtmpackExportOutcome>>>>,
     pub(super) launch_username: Option<String>,
     pub(super) launch_user_key: Option<String>,
 }
@@ -305,6 +320,13 @@ impl InstanceScreenState {
             show_settings_modal: false,
             show_export_vtmpack_modal: false,
             export_vtmpack_options: VtmpackExportOptions::default(),
+            export_vtmpack_in_flight: false,
+            export_vtmpack_output_path: None,
+            export_vtmpack_progress_tx: None,
+            export_vtmpack_progress_rx: None,
+            export_vtmpack_latest_progress: None,
+            export_vtmpack_results_tx: None,
+            export_vtmpack_results_rx: None,
             launch_username: None,
             launch_user_key: None,
         }

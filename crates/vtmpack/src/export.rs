@@ -12,8 +12,8 @@ use managed_content::{
 
 use crate::constants::VTMPACK_MANIFEST_VERSION;
 use crate::{
-    VtmpackDownloadableEntry, VtmpackExportOptions, VtmpackExportStats, VtmpackInstanceMetadata,
-    VtmpackManifest, VtmpackProviderMode,
+    VtmpackDownloadableEntry, VtmpackExportOptions, VtmpackExportProgress, VtmpackExportStats,
+    VtmpackInstanceMetadata, VtmpackManifest, VtmpackProviderMode,
 };
 
 pub fn sanitize_managed_manifest_for_export(
@@ -44,6 +44,20 @@ pub fn export_instance_as_vtmpack(
     output_path: &Path,
     options: &VtmpackExportOptions,
 ) -> Result<VtmpackExportStats, String> {
+    export_instance_as_vtmpack_with_progress(instance, instance_root, output_path, options, |_| {})
+}
+
+pub fn export_instance_as_vtmpack_with_progress<F>(
+    instance: &VtmpackInstanceMetadata,
+    instance_root: &Path,
+    output_path: &Path,
+    options: &VtmpackExportOptions,
+    mut progress: F,
+) -> Result<VtmpackExportStats, String>
+where
+    F: FnMut(VtmpackExportProgress),
+{
+    progress(progress_update("Reading managed content manifest...", 0, 1));
     let managed_manifest = load_content_manifest(instance_root);
     let sanitized_managed_manifest =
         sanitize_managed_manifest_for_export(&managed_manifest, options);
@@ -85,6 +99,8 @@ pub fn export_instance_as_vtmpack(
         .iter()
         .filter_map(|(entry, included)| included.then_some(entry.as_str()))
         .collect::<HashSet<_>>();
+
+    progress(progress_update("Scanning exportable files...", 1, 1));
 
     let mods_dir = instance_root.join("mods");
     let mut bundled_mod_files = Vec::<PathBuf>::new();
@@ -214,30 +230,56 @@ pub fn export_instance_as_vtmpack(
         .map_err(|err| format!("failed to create {}: {err}", output_path.display()))?;
     let encoder = xz2::write::XzEncoder::new(output_file, 9);
     let mut archive = tar::Builder::new(encoder);
+    let total_steps = 3 + bundled_mod_files.len() + config_files.len() + additional_files.len();
+    let mut completed_steps = 0usize;
 
     let manifest_bytes = toml::to_string_pretty(&pack_manifest)
         .map_err(|err| format!("failed to serialize vtmpack manifest: {err}"))?
         .into_bytes();
+    progress(progress_update(
+        "Writing pack manifest...",
+        completed_steps,
+        total_steps,
+    ));
     append_bytes_to_archive(&mut archive, "manifest.toml", manifest_bytes.as_slice())?;
+    completed_steps += 1;
 
     if !sanitized_managed_manifest.projects.is_empty() {
         let raw = toml::to_string_pretty(&sanitized_managed_manifest)
             .map_err(|err| format!("failed to serialize export content manifest: {err}"))?;
+        progress(progress_update(
+            "Writing content metadata...",
+            completed_steps,
+            total_steps,
+        ));
         append_bytes_to_archive(
             &mut archive,
             "metadata/vertex-content-manifest.toml",
             raw.as_bytes(),
         )?;
+    } else {
+        progress(progress_update(
+            "Skipping empty content metadata...",
+            completed_steps,
+            total_steps,
+        ));
     }
+    completed_steps += 1;
 
     for file in bundled_mod_files {
         let relative = file
             .strip_prefix(mods_dir.as_path())
             .unwrap_or(file.as_path());
         let target = Path::new("bundled_mods").join(relative);
+        progress(progress_update(
+            &format!("Bundling mod {}", target.display()),
+            completed_steps,
+            total_steps,
+        ));
         archive
             .append_path_with_name(file.as_path(), target.as_path())
             .map_err(|err| format!("failed to append bundled mod {}: {err}", file.display()))?;
+        completed_steps += 1;
     }
 
     for file in config_files {
@@ -245,19 +287,36 @@ pub fn export_instance_as_vtmpack(
             .strip_prefix(configs_dir.as_path())
             .unwrap_or(file.as_path());
         let target = Path::new("configs").join(relative);
+        progress(progress_update(
+            &format!("Bundling config {}", target.display()),
+            completed_steps,
+            total_steps,
+        ));
         archive
             .append_path_with_name(file.as_path(), target.as_path())
             .map_err(|err| format!("failed to append config file {}: {err}", file.display()))?;
+        completed_steps += 1;
     }
 
     for file in additional_files {
         let relative = file.strip_prefix(instance_root).unwrap_or(file.as_path());
         let target = Path::new("root_entries").join(relative);
+        progress(progress_update(
+            &format!("Bundling {}", target.display()),
+            completed_steps,
+            total_steps,
+        ));
         archive
             .append_path_with_name(file.as_path(), target.as_path())
             .map_err(|err| format!("failed to append extra file {}: {err}", file.display()))?;
+        completed_steps += 1;
     }
 
+    progress(progress_update(
+        "Finalizing archive...",
+        completed_steps,
+        total_steps,
+    ));
     archive
         .finish()
         .map_err(|err| format!("failed to finalize archive: {err}"))?;
@@ -267,6 +326,12 @@ pub fn export_instance_as_vtmpack(
     encoder
         .finish()
         .map_err(|err| format!("failed to finalize xz stream: {err}"))?;
+    completed_steps += 1;
+    progress(progress_update(
+        "Export complete.",
+        completed_steps,
+        total_steps,
+    ));
 
     Ok(VtmpackExportStats {
         bundled_mod_files: pack_manifest.bundled_mods.len(),
@@ -345,6 +410,18 @@ fn append_bytes_to_archive(
     archive
         .append_data(&mut header, path, Cursor::new(bytes))
         .map_err(|err| format!("failed to append {path} to archive: {err}"))
+}
+
+fn progress_update(
+    message: &str,
+    completed_steps: usize,
+    total_steps: usize,
+) -> VtmpackExportProgress {
+    VtmpackExportProgress {
+        message: message.to_owned(),
+        completed_steps,
+        total_steps,
+    }
 }
 
 fn normalize_pack_path(path: &str) -> String {

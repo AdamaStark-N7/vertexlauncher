@@ -32,8 +32,9 @@ use std::{
 use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
 use vtmpack::{
     VTMPACK_EXTENSION, VtmpackInstanceMetadata, VtmpackProviderMode, default_vtmpack_file_name,
-    default_vtmpack_root_entry_selected, enforce_vtmpack_extension, export_instance_as_vtmpack,
-    list_exportable_root_entries, sync_vtmpack_export_options,
+    default_vtmpack_root_entry_selected, enforce_vtmpack_extension,
+    export_instance_as_vtmpack_with_progress, list_exportable_root_entries,
+    sync_vtmpack_export_options,
 };
 
 use crate::app::tokio_runtime;
@@ -68,7 +69,7 @@ use installed_entry_render_result::InstalledEntryRenderResult;
 pub use instance_screen_output::InstanceScreenOutput;
 use instance_screen_state::{
     InstalledContentEntryUiCache, InstanceLogEntry, InstanceScreenState, InstanceScreenTab,
-    InstanceScreenshotEntry, InstanceScreenshotViewerState,
+    InstanceScreenshotEntry, InstanceScreenshotViewerState, VtmpackExportOutcome,
 };
 use platform::{
     effective_linux_graphics_settings_for_state, linux_instance_driver_settings_for_save,
@@ -157,7 +158,9 @@ pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&s
             return;
         }
         if state.show_export_vtmpack_modal {
-            state.show_export_vtmpack_modal = false;
+            if !state.export_vtmpack_in_flight {
+                state.show_export_vtmpack_modal = false;
+            }
             data.insert_temp(state_id, state);
             handled = true;
             return;
@@ -214,6 +217,8 @@ pub fn render(
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
 
     poll_background_tasks(&mut state, config, instances, instance_id);
+    poll_vtmpack_export_progress(&mut state);
+    poll_vtmpack_export_results(&mut state);
     poll_instance_screenshot_scan_results(&mut state);
     poll_instance_log_scan_results(&mut state);
     poll_instance_log_load_results(&mut state);
@@ -227,6 +232,7 @@ pub fn render(
         || state.delete_screenshot_in_flight
         || state.log_scan_in_flight
         || state.log_load_in_flight
+        || state.export_vtmpack_in_flight
     {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
@@ -2737,116 +2743,187 @@ fn render_export_vtmpack_modal(
             );
             ui.add_space(12.0);
 
-            for provider_mode in [
-                VtmpackProviderMode::IncludeCurseForge,
-                VtmpackProviderMode::ExcludeCurseForge,
-            ] {
-                let selected = state.export_vtmpack_options.provider_mode == provider_mode;
-                if ui.radio(selected, provider_mode.label()).clicked() {
-                    state.export_vtmpack_options.provider_mode = provider_mode;
-                }
-            }
+            if state.export_vtmpack_in_flight {
+                let progress = state.export_vtmpack_latest_progress.as_ref();
+                let progress_fraction = progress
+                    .and_then(|progress| {
+                        (progress.total_steps > 0)
+                            .then_some(progress.completed_steps as f32 / progress.total_steps as f32)
+                    })
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let progress_label = progress
+                    .map(|progress| progress.message.as_str())
+                    .unwrap_or("Starting export...");
+                let progress_counts = progress
+                    .map(|progress| {
+                        format!(
+                            "{} of {} steps complete",
+                            progress.completed_steps.min(progress.total_steps),
+                            progress.total_steps
+                        )
+                    })
+                    .unwrap_or_else(|| "Preparing export task...".to_owned());
 
-            ui.add_space(12.0);
-            let explanation = match state.export_vtmpack_options.provider_mode {
-                VtmpackProviderMode::IncludeCurseForge => {
-                    "Managed CurseForge entries stay downloadable in the pack manifest."
-                }
-                VtmpackProviderMode::ExcludeCurseForge => {
-                    "CurseForge metadata is removed from the export. CurseForge-managed files are bundled into the pack unless they already use Modrinth as the selected source."
-                }
-            };
-            let _ = text_ui.label(
-                ui,
-                ("instance_export_vtmpack_explanation", instance_id),
-                explanation,
-                &body_style,
-            );
-
-            ui.add_space(16.0);
-            let _ = text_ui.label(
-                ui,
-                ("instance_export_vtmpack_include_label", instance_id),
-                "Include top-level entries from the Minecraft root",
-                &LabelOptions {
-                    font_size: 18.0,
-                    line_height: 22.0,
-                    weight: 600,
-                    color: ui.visuals().text_color(),
-                    wrap: false,
-                    ..LabelOptions::default()
-                },
-            );
-            let _ = text_ui.label(
-                ui,
-                ("instance_export_vtmpack_include_help", instance_id),
-                "Defaults to mods, resourcepacks, shaderpacks, and config. You can also include any other top-level files or folders found in the instance root.",
-                &body_style,
-            );
-            ui.add_space(8.0);
-
-            if let Some(instance_root) = instance_root.as_deref() {
-                let entries = list_exportable_root_entries(instance_root);
-                egui::ScrollArea::vertical()
-                    .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
-                    .max_height(180.0)
-                    .show(ui, |ui| {
-                        for entry in entries {
-                            let checked = state
-                                .export_vtmpack_options
-                                .included_root_entries
-                                .entry(entry.clone())
-                                .or_insert_with(|| default_vtmpack_root_entry_selected(&entry));
-                            let label = if instance_root.join(entry.as_str()).is_dir() {
-                                format!("{entry}/")
-                            } else {
-                                entry.clone()
-                            };
-                            ui.checkbox(checked, label);
-                        }
-                    });
-            } else {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_export_vtmpack_progress_title", instance_id),
+                        "Export in progress",
+                        &LabelOptions {
+                            font_size: 18.0,
+                            line_height: 22.0,
+                            weight: 600,
+                            color: ui.visuals().text_color(),
+                            wrap: false,
+                            ..LabelOptions::default()
+                        },
+                    );
+                });
+                ui.add_space(12.0);
                 let _ = text_ui.label(
                     ui,
-                    ("instance_export_vtmpack_missing_instance", instance_id),
-                    "Instance root is unavailable, so folder selection cannot be shown.",
+                    ("instance_export_vtmpack_progress_message", instance_id),
+                    progress_label,
                     &body_style,
                 );
-            }
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_progress_counts", instance_id),
+                    progress_counts.as_str(),
+                    &body_style,
+                );
+                if let Some(path) = state.export_vtmpack_output_path.as_ref() {
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_export_vtmpack_progress_path", instance_id),
+                        &format!("Destination: {}", path.display()),
+                        &style::muted(ui),
+                    );
+                }
+                ui.add_space(10.0);
+                ui.add(
+                    egui::ProgressBar::new(progress_fraction)
+                        .desired_width(ui.available_width())
+                        .show_percentage(),
+                );
+            } else {
+                for provider_mode in [
+                    VtmpackProviderMode::IncludeCurseForge,
+                    VtmpackProviderMode::ExcludeCurseForge,
+                ] {
+                    let selected = state.export_vtmpack_options.provider_mode == provider_mode;
+                    if ui.radio(selected, provider_mode.label()).clicked() {
+                        state.export_vtmpack_options.provider_mode = provider_mode;
+                    }
+                }
 
-            ui.add_space(16.0);
-            ui.horizontal(|ui| {
-                if text_ui
-                    .button(
+                ui.add_space(12.0);
+                let explanation = match state.export_vtmpack_options.provider_mode {
+                    VtmpackProviderMode::IncludeCurseForge => {
+                        "Managed CurseForge entries stay downloadable in the pack manifest."
+                    }
+                    VtmpackProviderMode::ExcludeCurseForge => {
+                        "CurseForge metadata is removed from the export. CurseForge-managed files are bundled into the pack unless they already use Modrinth as the selected source."
+                    }
+                };
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_explanation", instance_id),
+                    explanation,
+                    &body_style,
+                );
+
+                ui.add_space(16.0);
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_include_label", instance_id),
+                    "Include top-level entries from the Minecraft root",
+                    &LabelOptions {
+                        font_size: 18.0,
+                        line_height: 22.0,
+                        weight: 600,
+                        color: ui.visuals().text_color(),
+                        wrap: false,
+                        ..LabelOptions::default()
+                    },
+                );
+                let _ = text_ui.label(
+                    ui,
+                    ("instance_export_vtmpack_include_help", instance_id),
+                    "Defaults to mods, resourcepacks, shaderpacks, and config. You can also include any other top-level files or folders found in the instance root.",
+                    &body_style,
+                );
+                ui.add_space(8.0);
+
+                if let Some(instance_root) = instance_root.as_deref() {
+                    let entries = list_exportable_root_entries(instance_root);
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
+                        .max_height(360.0)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            for entry in entries {
+                                let checked = state
+                                    .export_vtmpack_options
+                                    .included_root_entries
+                                    .entry(entry.clone())
+                                    .or_insert_with(|| {
+                                        default_vtmpack_root_entry_selected(&entry)
+                                    });
+                                let label = if instance_root.join(entry.as_str()).is_dir() {
+                                    format!("{entry}/")
+                                } else {
+                                    entry.clone()
+                                };
+                                ui.checkbox(checked, label);
+                            }
+                        });
+                } else {
+                    let _ = text_ui.label(
                         ui,
-                        ("instance_export_vtmpack_cancel", instance_id),
-                        "Cancel",
-                        &ButtonOptions::default(),
-                    )
-                    .clicked()
-                {
-                    close_requested = true;
+                        ("instance_export_vtmpack_missing_instance", instance_id),
+                        "Instance root is unavailable, so folder selection cannot be shown.",
+                        &body_style,
+                    );
                 }
-                if text_ui
-                    .button(
-                        ui,
-                        ("instance_export_vtmpack_confirm", instance_id),
-                        "Choose file",
-                        &ButtonOptions::default(),
-                    )
-                    .clicked()
-                {
-                    export_requested = true;
-                }
-            });
+
+                ui.add_space(16.0);
+                ui.horizontal(|ui| {
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_export_vtmpack_cancel", instance_id),
+                            "Cancel",
+                            &ButtonOptions::default(),
+                        )
+                        .clicked()
+                    {
+                        close_requested = true;
+                    }
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_export_vtmpack_confirm", instance_id),
+                            "Choose file",
+                            &ButtonOptions::default(),
+                        )
+                        .clicked()
+                    {
+                        export_requested = true;
+                    }
+                });
+            }
         });
 
-    if close_requested {
+    if close_requested && !state.export_vtmpack_in_flight {
         open = false;
     }
 
     if export_requested {
-        open = false;
         if let Some(instance) = instances.find(instance_id) {
             let instance_root = instances::instance_root_path(&installations_root, instance);
             let default_file_name = default_vtmpack_file_name(instance.name.as_str());
@@ -2865,33 +2942,179 @@ fn render_export_vtmpack_modal(
                     modloader: instance.modloader.clone(),
                     modloader_version: instance.modloader_version.clone(),
                 };
-                match export_instance_as_vtmpack(
-                    &pack_instance,
-                    instance_root.as_path(),
-                    output_path.as_path(),
-                    &state.export_vtmpack_options,
-                ) {
-                    Ok(stats) => {
-                        state.status_message = Some(format!(
-                            "Exported {} ({} bundled mods, {} config files, {} additional files) to {}",
-                            instance.name,
-                            stats.bundled_mod_files,
-                            stats.config_files,
-                            stats.additional_files,
-                            output_path.display()
-                        ));
-                    }
-                    Err(err) => {
-                        state.status_message = Some(format!("Failed to export .vtmpack: {err}"));
-                    }
-                }
+                request_vtmpack_export(
+                    state,
+                    pack_instance,
+                    instance_root,
+                    output_path,
+                    state.export_vtmpack_options.clone(),
+                );
+                open = true;
             }
         } else {
             state.status_message = Some("Instance was removed before export.".to_owned());
+            open = false;
         }
     }
 
-    state.show_export_vtmpack_modal = open;
+    state.show_export_vtmpack_modal = open || state.export_vtmpack_in_flight;
+}
+
+fn ensure_vtmpack_export_channels(state: &mut InstanceScreenState) {
+    if state.export_vtmpack_progress_tx.is_none() || state.export_vtmpack_progress_rx.is_none() {
+        let (tx, rx) = mpsc::channel();
+        state.export_vtmpack_progress_tx = Some(tx);
+        state.export_vtmpack_progress_rx = Some(Arc::new(Mutex::new(rx)));
+    }
+    if state.export_vtmpack_results_tx.is_none() || state.export_vtmpack_results_rx.is_none() {
+        let (tx, rx) = mpsc::channel();
+        state.export_vtmpack_results_tx = Some(tx);
+        state.export_vtmpack_results_rx = Some(Arc::new(Mutex::new(rx)));
+    }
+}
+
+fn request_vtmpack_export(
+    state: &mut InstanceScreenState,
+    instance: VtmpackInstanceMetadata,
+    instance_root: PathBuf,
+    output_path: PathBuf,
+    options: vtmpack::VtmpackExportOptions,
+) {
+    if state.export_vtmpack_in_flight {
+        state.show_export_vtmpack_modal = true;
+        return;
+    }
+
+    ensure_vtmpack_export_channels(state);
+    let Some(progress_tx) = state.export_vtmpack_progress_tx.as_ref().cloned() else {
+        state.status_message = Some("Failed to start .vtmpack export progress channel.".to_owned());
+        return;
+    };
+    let Some(results_tx) = state.export_vtmpack_results_tx.as_ref().cloned() else {
+        state.status_message = Some("Failed to start .vtmpack export result channel.".to_owned());
+        return;
+    };
+
+    state.export_vtmpack_in_flight = true;
+    state.export_vtmpack_output_path = Some(output_path.clone());
+    state.export_vtmpack_latest_progress = None;
+    state.show_export_vtmpack_modal = true;
+    state.status_message = Some(format!(
+        "Exporting {} to {}...",
+        instance.name,
+        output_path.display()
+    ));
+
+    let instance_name = instance.name.clone();
+    let export_path_for_task = output_path.clone();
+    let _ = tokio_runtime::spawn_detached(async move {
+        let result = tokio_runtime::spawn_blocking(move || {
+            export_instance_as_vtmpack_with_progress(
+                &instance,
+                instance_root.as_path(),
+                export_path_for_task.as_path(),
+                &options,
+                |progress| {
+                    let _ = progress_tx.send(progress);
+                },
+            )
+        })
+        .await
+        .map_err(|err| format!("vtmpack export task join error: {err}"))
+        .and_then(|inner| inner);
+        let _ = results_tx.send(VtmpackExportOutcome {
+            instance_name,
+            output_path,
+            result,
+        });
+    });
+}
+
+fn poll_vtmpack_export_progress(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.export_vtmpack_progress_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    if should_reset_channel && !state.export_vtmpack_in_flight {
+        state.export_vtmpack_progress_tx = None;
+        state.export_vtmpack_progress_rx = None;
+    }
+
+    if let Some(update) = updates.into_iter().last() {
+        state.export_vtmpack_latest_progress = Some(update);
+    }
+}
+
+fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
+    let mut updates = Vec::new();
+    let mut should_reset_channel = false;
+    if let Some(rx) = state.export_vtmpack_results_rx.as_ref() {
+        match rx.lock() {
+            Ok(receiver) => loop {
+                match receiver.try_recv() {
+                    Ok(update) => updates.push(update),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        should_reset_channel = true;
+                        break;
+                    }
+                }
+            },
+            Err(_) => should_reset_channel = true,
+        }
+    }
+
+    for update in updates {
+        state.export_vtmpack_in_flight = false;
+        state.export_vtmpack_latest_progress = None;
+        state.export_vtmpack_output_path = None;
+        state.show_export_vtmpack_modal = false;
+        match update.result {
+            Ok(stats) => {
+                state.status_message = Some(format!(
+                    "Exported {} ({} bundled mods, {} config files, {} additional files) to {}",
+                    update.instance_name,
+                    stats.bundled_mod_files,
+                    stats.config_files,
+                    stats.additional_files,
+                    update.output_path.display()
+                ));
+            }
+            Err(err) => {
+                state.status_message = Some(format!("Failed to export .vtmpack: {err}"));
+            }
+        }
+    }
+
+    if should_reset_channel && state.export_vtmpack_in_flight {
+        state.export_vtmpack_in_flight = false;
+        state.export_vtmpack_latest_progress = None;
+        state.export_vtmpack_output_path = None;
+        state.show_export_vtmpack_modal = false;
+        state.status_message =
+            Some("Failed to export .vtmpack: export task stopped unexpectedly.".to_owned());
+    }
+
+    if should_reset_channel || !state.export_vtmpack_in_flight {
+        state.export_vtmpack_progress_tx = None;
+        state.export_vtmpack_progress_rx = None;
+        state.export_vtmpack_results_tx = None;
+        state.export_vtmpack_results_rx = None;
+    }
 }
 
 fn modified_millis(path: &Path) -> Option<u64> {

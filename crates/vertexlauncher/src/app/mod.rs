@@ -14,11 +14,11 @@ use instances::{
     instance_root_path, load_store, save_store as save_instance_store,
 };
 use launcher_runtime as tokio_runtime;
-use launcher_ui::{
-    console, install_activity, notification, screens, ui, window_effects,
-    ui::instance_context_menu::InstanceContextAction,
-};
 use launcher_ui::ui::svg_aa;
+use launcher_ui::{
+    console, install_activity, notification, screens, ui,
+    ui::instance_context_menu::InstanceContextAction, window_effects,
+};
 use std::{
     any::Any,
     collections::HashMap,
@@ -31,8 +31,8 @@ use std::{
 use textui::TextUi;
 
 use self::auth_state::{AuthState, REPAINT_INTERVAL};
-use self::discord_presence::DiscordPresenceManager;
 use self::config_format_modal::ModalAction;
+use self::discord_presence::DiscordPresenceManager;
 use self::fonts::FontController;
 
 mod app_icon;
@@ -240,6 +240,7 @@ impl VertexApp {
         let previous_config = self.config.clone();
         let previous_instance_store = self.instance_store.clone();
         poll_create_instance_result(self);
+        poll_import_instance_progress(self);
         poll_import_instance_result(self);
         self.sync_theme_from_config();
         self.theme
@@ -382,10 +383,10 @@ impl VertexApp {
                     self.open_instance_folder(&instance_id);
                 }
                 InstanceContextAction::Delete => {
-            self.selected_instance_id = Some(instance_id.clone());
-            self.active_screen = screens::AppScreen::Library;
-            screens::request_delete_instance(ctx, &instance_id);
-        }
+                    self.selected_instance_id = Some(instance_id.clone());
+                    self.active_screen = screens::AppScreen::Library;
+                    screens::request_delete_instance(ctx, &instance_id);
+                }
             }
         }
         if sidebar_output.create_instance_clicked {
@@ -632,10 +633,7 @@ impl VertexApp {
             instance_id,
             installations_root.as_path(),
         ) {
-            notification::error!(
-                "instance_context_menu",
-                "Failed to delete instance: {err}"
-            );
+            notification::error!("instance_context_menu", "Failed to delete instance: {err}");
         }
     }
 
@@ -1022,12 +1020,22 @@ fn ensure_import_instance_channel(state: &mut import_instance_modal::ImportInsta
     state.import_results_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
+fn ensure_import_instance_progress_channel(state: &mut import_instance_modal::ImportInstanceState) {
+    if state.import_progress_tx.is_some() && state.import_progress_rx.is_some() {
+        return;
+    }
+    let (tx, rx) = mpsc::channel::<import_instance_modal::ImportProgress>();
+    state.import_progress_tx = Some(tx);
+    state.import_progress_rx = Some(Arc::new(Mutex::new(rx)));
+}
+
 fn start_import_instance_task(app: &mut VertexApp, request: import_instance_modal::ImportRequest) {
     if app.import_instance_state.import_in_flight {
         return;
     }
 
     ensure_import_instance_channel(&mut app.import_instance_state);
+    ensure_import_instance_progress_channel(&mut app.import_instance_state);
     let Some(tx) = app
         .import_instance_state
         .import_results_tx
@@ -1036,14 +1044,23 @@ fn start_import_instance_task(app: &mut VertexApp, request: import_instance_moda
     else {
         return;
     };
+    let Some(progress_tx) = app
+        .import_instance_state
+        .import_progress_tx
+        .as_ref()
+        .cloned()
+    else {
+        return;
+    };
 
     app.import_instance_state.error = None;
     app.import_instance_state.import_in_flight = true;
+    app.import_instance_state.import_latest_progress = None;
     let store = app.instance_store.clone();
     let installations_root = PathBuf::from(app.config.minecraft_installations_root());
     let _ = tokio_runtime::spawn_detached(async move {
         let outcome = tokio_runtime::spawn_blocking(move || {
-            import_package_in_background(store, installations_root, request)
+            import_package_in_background(store, installations_root, request, progress_tx)
         })
         .await;
         match outcome {
@@ -1055,6 +1072,23 @@ fn start_import_instance_task(app: &mut VertexApp, request: import_instance_moda
             }
         }
     });
+}
+
+fn poll_import_instance_progress(app: &mut VertexApp) {
+    let Some(rx) = app
+        .import_instance_state
+        .import_progress_rx
+        .as_ref()
+        .cloned()
+    else {
+        return;
+    };
+    let Ok(receiver) = rx.lock() else {
+        return;
+    };
+    while let Ok(progress) = receiver.try_recv() {
+        app.import_instance_state.import_latest_progress = Some(progress);
+    }
 }
 
 fn poll_import_instance_result(app: &mut VertexApp) {
@@ -1074,6 +1108,7 @@ fn poll_import_instance_result(app: &mut VertexApp) {
     };
 
     app.import_instance_state.import_in_flight = false;
+    app.import_instance_state.import_latest_progress = None;
     match result {
         Ok((store, instance)) => {
             let installations_root = PathBuf::from(app.config.minecraft_installations_root());
@@ -1095,9 +1130,16 @@ fn import_package_in_background(
     mut store: InstanceStore,
     installations_root: PathBuf,
     request: import_instance_modal::ImportRequest,
+    progress_tx: mpsc::Sender<import_instance_modal::ImportProgress>,
 ) -> Result<(InstanceStore, InstanceRecord), String> {
-    let instance =
-        import_instance_modal::import_package(&mut store, installations_root.as_path(), request)?;
+    let instance = import_instance_modal::import_package_with_progress(
+        &mut store,
+        installations_root.as_path(),
+        request,
+        |progress| {
+            let _ = progress_tx.send(progress);
+        },
+    )?;
     Ok((store, instance))
 }
 

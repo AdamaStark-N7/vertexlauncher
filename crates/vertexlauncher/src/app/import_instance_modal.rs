@@ -42,6 +42,9 @@ pub struct ImportInstanceState {
     preview_results_tx: Option<mpsc::Sender<(u64, Result<ImportPreview, String>)>>,
     preview_results_rx: Option<Arc<Mutex<mpsc::Receiver<(u64, Result<ImportPreview, String>)>>>>,
     pub import_in_flight: bool,
+    pub import_latest_progress: Option<ImportProgress>,
+    pub import_progress_tx: Option<mpsc::Sender<ImportProgress>>,
+    pub import_progress_rx: Option<Arc<Mutex<mpsc::Receiver<ImportProgress>>>>,
     pub import_results_tx: Option<mpsc::Sender<ImportTaskResult>>,
     pub import_results_rx: Option<Arc<Mutex<mpsc::Receiver<ImportTaskResult>>>>,
     preview: Option<ImportPreview>,
@@ -76,6 +79,13 @@ pub enum ModalAction {
 }
 
 pub type ImportTaskResult = Result<(InstanceStore, InstanceRecord), String>;
+
+#[derive(Clone, Debug)]
+pub struct ImportProgress {
+    pub message: String,
+    pub completed_steps: usize,
+    pub total_steps: usize,
+}
 
 fn ensure_preview_channel(state: &mut ImportInstanceState) {
     if state.preview_results_tx.is_some() && state.preview_results_rx.is_some() {
@@ -489,11 +499,45 @@ pub fn render(
             }
 
             if state.import_in_flight {
+                let progress = state.import_latest_progress.as_ref();
+                let progress_fraction = progress
+                    .and_then(|progress| {
+                        (progress.total_steps > 0)
+                            .then_some(progress.completed_steps as f32 / progress.total_steps as f32)
+                    })
+                    .unwrap_or(0.0)
+                    .clamp(0.0, 1.0);
+                let progress_message = progress
+                    .map(|progress| progress.message.as_str())
+                    .unwrap_or("Importing profile in the background...");
+                let progress_counts = progress
+                    .map(|progress| {
+                        format!(
+                            "{} of {} steps complete",
+                            progress.completed_steps.min(progress.total_steps),
+                            progress.total_steps
+                        )
+                    })
+                    .unwrap_or_else(|| "Preparing import task...".to_owned());
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    let _ = text_ui.label(
+                        ui,
+                        "instance_import_in_flight",
+                        progress_message,
+                        &body_style,
+                    );
+                });
                 let _ = text_ui.label(
                     ui,
-                    "instance_import_in_flight",
-                    "Importing profile in the background...",
+                    "instance_import_in_flight_counts",
+                    progress_counts.as_str(),
                     &body_style,
+                );
+                ui.add(
+                    egui::ProgressBar::new(progress_fraction)
+                        .desired_width(ui.available_width())
+                        .show_percentage(),
                 );
             }
 
@@ -565,20 +609,24 @@ pub fn render(
     action
 }
 
-pub fn import_package(
+pub fn import_package_with_progress<F>(
     store: &mut InstanceStore,
     installations_root: &Path,
     request: ImportRequest,
-) -> Result<InstanceRecord, String> {
+    mut progress: F,
+) -> Result<InstanceRecord, String>
+where
+    F: FnMut(ImportProgress),
+{
     match &request.source {
         ImportSource::ManifestFile(path) => {
             let preview = inspect_package(path.as_path())?;
             match preview.kind {
                 ImportPreviewKind::Manifest(ImportPackageKind::VertexPack) => {
-                    import_vtmpack(store, installations_root, &request)
+                    import_vtmpack(store, installations_root, &request, &mut progress)
                 }
                 ImportPreviewKind::Manifest(ImportPackageKind::ModrinthPack) => {
-                    import_mrpack(store, installations_root, &request)
+                    import_mrpack(store, installations_root, &request, &mut progress)
                 }
                 ImportPreviewKind::Launcher(_) => {
                     Err("Launcher previews are not valid for manifest imports.".to_owned())
@@ -586,6 +634,7 @@ pub fn import_package(
             }
         }
         ImportSource::LauncherDirectory { .. } => {
+            progress(import_progress("Copying launcher instance files...", 0, 0));
             import_launcher_instance(store, installations_root, &request)
         }
     }
@@ -1872,11 +1921,15 @@ fn import_vtmpack(
     store: &mut InstanceStore,
     installations_root: &Path,
     request: &ImportRequest,
+    progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<InstanceRecord, String> {
     let ImportSource::ManifestFile(package_path) = &request.source else {
         return Err("Vertex pack import requires a manifest file source.".to_owned());
     };
+    progress(import_progress("Reading .vtmpack manifest...", 0, 1));
     let manifest = read_vtmpack_manifest(package_path.as_path())?;
+    let extract_steps = count_vtmpack_payload_entries(package_path.as_path())?;
+    let total_steps = 3 + extract_steps + manifest.downloadable_content.len();
     let instance = create_instance(
         store,
         installations_root,
@@ -1893,14 +1946,29 @@ fn import_vtmpack(
         },
     )
     .map_err(|err| format!("failed to create imported profile: {err}"))?;
+    progress(import_progress(
+        "Created imported profile. Restoring packaged files...",
+        1,
+        total_steps,
+    ));
     let instance_root = instance_root_path(installations_root, &instance);
 
-    if let Err(err) =
-        populate_vtmpack_instance(package_path.as_path(), manifest, instance_root.as_path())
-    {
+    if let Err(err) = populate_vtmpack_instance(
+        package_path.as_path(),
+        manifest,
+        instance_root.as_path(),
+        total_steps,
+        progress,
+    ) {
         let _ = delete_instance(store, instance.id.as_str(), installations_root);
         return Err(err);
     }
+
+    progress(import_progress(
+        "Import complete.",
+        total_steps,
+        total_steps,
+    ));
 
     Ok(instance)
 }
@@ -1909,12 +1977,16 @@ fn import_mrpack(
     store: &mut InstanceStore,
     installations_root: &Path,
     request: &ImportRequest,
+    progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<InstanceRecord, String> {
     let ImportSource::ManifestFile(package_path) = &request.source else {
         return Err("Modrinth pack import requires a manifest file source.".to_owned());
     };
+    progress(import_progress("Reading .mrpack manifest...", 0, 1));
     let manifest = read_mrpack_manifest(package_path.as_path())?;
     let dependency_info = resolve_mrpack_dependencies(&manifest.dependencies)?;
+    let override_steps = count_mrpack_override_entries(package_path.as_path())?;
+    let total_steps = 3 + override_steps + manifest.files.len();
     let instance = create_instance(
         store,
         installations_root,
@@ -1928,14 +2000,29 @@ fn import_mrpack(
         },
     )
     .map_err(|err| format!("failed to create imported profile: {err}"))?;
+    progress(import_progress(
+        "Created imported profile. Restoring overrides...",
+        1,
+        total_steps,
+    ));
     let instance_root = instance_root_path(installations_root, &instance);
 
-    if let Err(err) =
-        populate_mrpack_instance(package_path.as_path(), manifest, instance_root.as_path())
-    {
+    if let Err(err) = populate_mrpack_instance(
+        package_path.as_path(),
+        manifest,
+        instance_root.as_path(),
+        total_steps,
+        progress,
+    ) {
         let _ = delete_instance(store, instance.id.as_str(), installations_root);
         return Err(err);
     }
+
+    progress(import_progress(
+        "Import complete.",
+        total_steps,
+        total_steps,
+    ));
 
     Ok(instance)
 }
@@ -1944,8 +2031,17 @@ fn populate_vtmpack_instance(
     package_path: &Path,
     manifest: VtmpackManifest,
     instance_root: &Path,
+    total_steps: usize,
+    progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<(), String> {
-    extract_vtmpack_payload(package_path, instance_root)?;
+    let mut completed_steps = 1usize;
+    extract_vtmpack_payload(
+        package_path,
+        instance_root,
+        total_steps,
+        &mut completed_steps,
+        progress,
+    )?;
 
     for downloadable in &manifest.downloadable_content {
         if downloadable.file_path.trim().is_empty() {
@@ -1960,13 +2056,25 @@ fn populate_vtmpack_instance(
                 )
             })?;
         }
+        completed_steps += 1;
+        progress(import_progress(
+            &format!("Downloading {}", downloadable.name),
+            completed_steps,
+            total_steps,
+        ));
         download_vtmpack_entry(downloadable, destination.as_path())?;
     }
 
     Ok(())
 }
 
-fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<(), String> {
+fn extract_vtmpack_payload(
+    package_path: &Path,
+    instance_root: &Path,
+    total_steps: usize,
+    completed_steps: &mut usize,
+    progress: &mut dyn FnMut(ImportProgress),
+) -> Result<(), String> {
     let file = fs::File::open(package_path)
         .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
     let decoder = xz2::read::XzDecoder::new(file);
@@ -1991,8 +2099,14 @@ fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<
         if entry_string == "manifest.toml" {
             continue;
         }
+        *completed_steps += 1;
         if entry_string == format!("metadata/{CONTENT_MANIFEST_FILE_NAME}") {
             let destination = instance_root.join(CONTENT_MANIFEST_FILE_NAME);
+            progress(import_progress(
+                "Restoring managed metadata...",
+                *completed_steps,
+                total_steps,
+            ));
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     format!(
@@ -2011,6 +2125,11 @@ fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<
         }
         if let Some(relative) = entry_string.strip_prefix("bundled_mods/") {
             let destination = join_safe(&instance_root.join("mods"), relative)?;
+            progress(import_progress(
+                &format!("Restoring bundled mod {}", relative),
+                *completed_steps,
+                total_steps,
+            ));
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     format!(
@@ -2029,6 +2148,11 @@ fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<
         }
         if let Some(relative) = entry_string.strip_prefix("configs/") {
             let destination = join_safe(&instance_root.join("config"), relative)?;
+            progress(import_progress(
+                &format!("Restoring config {}", relative),
+                *completed_steps,
+                total_steps,
+            ));
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     format!(
@@ -2044,6 +2168,11 @@ fn extract_vtmpack_payload(package_path: &Path, instance_root: &Path) -> Result<
         }
         if let Some(relative) = entry_string.strip_prefix("root_entries/") {
             let destination = join_safe(instance_root, relative)?;
+            progress(import_progress(
+                &format!("Restoring {}", relative),
+                *completed_steps,
+                total_steps,
+            ));
             if let Some(parent) = destination.parent() {
                 fs::create_dir_all(parent).map_err(|err| {
                     format!(
@@ -2148,8 +2277,17 @@ fn populate_mrpack_instance(
     package_path: &Path,
     manifest: MrpackManifest,
     instance_root: &Path,
+    total_steps: usize,
+    progress: &mut dyn FnMut(ImportProgress),
 ) -> Result<(), String> {
-    extract_mrpack_overrides(package_path, instance_root)?;
+    let mut completed_steps = 1usize;
+    extract_mrpack_overrides(
+        package_path,
+        instance_root,
+        total_steps,
+        &mut completed_steps,
+        progress,
+    )?;
     for file in manifest.files {
         if matches!(
             file.env.as_ref().and_then(|env| env.client.as_deref()),
@@ -2171,12 +2309,24 @@ fn populate_mrpack_instance(
             .first()
             .cloned()
             .ok_or_else(|| format!("Modrinth pack entry {} has no download URL", file.path))?;
+        completed_steps += 1;
+        progress(import_progress(
+            &format!("Downloading {}", file.path),
+            completed_steps,
+            total_steps,
+        ));
         download_file(download_url.as_str(), destination.as_path())?;
     }
     Ok(())
 }
 
-fn extract_mrpack_overrides(package_path: &Path, instance_root: &Path) -> Result<(), String> {
+fn extract_mrpack_overrides(
+    package_path: &Path,
+    instance_root: &Path,
+    total_steps: usize,
+    completed_steps: &mut usize,
+    progress: &mut dyn FnMut(ImportProgress),
+) -> Result<(), String> {
     let file = fs::File::open(package_path)
         .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
@@ -2200,6 +2350,12 @@ fn extract_mrpack_overrides(package_path: &Path, instance_root: &Path) -> Result
             continue;
         }
         let destination = join_safe(instance_root, relative)?;
+        *completed_steps += 1;
+        progress(import_progress(
+            &format!("Restoring override {}", relative),
+            *completed_steps,
+            total_steps,
+        ));
         if entry.is_dir() {
             fs::create_dir_all(destination.as_path()).map_err(|err| {
                 format!(
@@ -2230,6 +2386,66 @@ fn extract_mrpack_overrides(package_path: &Path, instance_root: &Path) -> Result
     }
 
     Ok(())
+}
+
+fn count_vtmpack_payload_entries(package_path: &Path) -> Result<usize, String> {
+    let file = fs::File::open(package_path)
+        .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
+    let decoder = xz2::read::XzDecoder::new(file);
+    let mut archive = tar::Archive::new(decoder);
+    let mut count = 0usize;
+    for entry in archive
+        .entries()
+        .map_err(|err| format!("failed to read {}: {err}", package_path.display()))?
+    {
+        let entry = entry.map_err(|err| {
+            format!(
+                "failed to read archive entry in {}: {err}",
+                package_path.display()
+            )
+        })?;
+        let entry_path = entry
+            .path()
+            .map_err(|err| format!("failed to decode archive path: {err}"))?
+            .to_path_buf();
+        if entry_path.to_string_lossy().replace('\\', "/") != "manifest.toml" {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn count_mrpack_override_entries(package_path: &Path) -> Result<usize, String> {
+    let file = fs::File::open(package_path)
+        .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|err| format!("failed to read {}: {err}", package_path.display()))?;
+    let mut count = 0usize;
+    for index in 0..archive.len() {
+        let entry = archive.by_index(index).map_err(|err| {
+            format!(
+                "failed to read zip entry in {}: {err}",
+                package_path.display()
+            )
+        })?;
+        let entry_name = entry.name().replace('\\', "/");
+        if entry_name
+            .strip_prefix("overrides/")
+            .or_else(|| entry_name.strip_prefix("client-overrides/"))
+            .is_some_and(|relative| !relative.is_empty())
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn import_progress(message: &str, completed_steps: usize, total_steps: usize) -> ImportProgress {
+    ImportProgress {
+        message: message.to_owned(),
+        completed_steps,
+        total_steps,
+    }
 }
 
 fn read_mrpack_manifest(path: &Path) -> Result<MrpackManifest, String> {
