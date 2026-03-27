@@ -427,10 +427,6 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     let mut button_clicked = false;
 
     let motion_rect = Rect::from_min_size(
-        egui::pos2(base_x, base_y - (button_size.y + button_gap) * 2.0),
-        button_size,
-    );
-    let expressions_rect = Rect::from_min_size(
         egui::pos2(base_x, base_y - (button_size.y + button_gap)),
         button_size,
     );
@@ -450,22 +446,6 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
                 PreviewMotionMode::Walk => PreviewMotionMode::Idle,
             };
         }
-    });
-
-    let expressions_text = if state.expressions_enabled {
-        if state.cached_expression_layout.is_some() {
-            "Expressions: Ready"
-        } else {
-            "Expressions: No Spec"
-        }
-    } else {
-        "Expressions: Disabled"
-    };
-    ui.scope_builder(egui::UiBuilder::new().max_rect(expressions_rect), |ui| {
-        ui.set_min_size(expressions_rect.size());
-        ui.centered_and_justified(|ui| {
-            ui.label(expressions_text);
-        });
     });
 
     let toggle_text = if state.show_elytra {
@@ -680,6 +660,7 @@ struct EyeExpressionSpec {
     right_center_x: f32,
     left_center_x: f32,
     center_y: f32,
+    #[allow(dead_code)]
     z: f32,
     width: f32,
     height: f32,
@@ -698,6 +679,7 @@ struct BrowExpressionSpec {
     left_brow: Option<TextureRectU32>,
     center_x: f32,
     center_y: f32,
+    #[allow(dead_code)]
     z: f32,
     width: f32,
     height: f32,
@@ -3039,8 +3021,6 @@ fn add_expression_triangles(
     let (right_lid_rect, left_lid_rect) = eye_lid_rects(eye);
     let right_lid_uv = uv_rect_from_eyelid_texel_rect(right_lid_rect);
     let left_lid_uv = uv_rect_from_eyelid_texel_rect(left_lid_rect);
-    let brow_rects = layout.brow.map(brow_face_rects);
-    let brow_drop = pose.brow_squeeze * 0.22;
     let right_upper_top = right_eye_rect.top_y() - 1.0;
     let left_upper_top = left_eye_rect.top_y() - 1.0;
     let right_lid_h = right_lid_rect.h as f32;
