@@ -9,7 +9,7 @@ use egui::{Button, Ui};
 use crate::{
     app::tokio_runtime,
     assets,
-    ui::{components::icon_button, context_menu, instance_context_menu, style},
+    ui::{components::icon_button, instance_context_menu, style},
 };
 
 use super::{ProfileShortcut, SidebarOutput};
@@ -90,8 +90,6 @@ pub fn render(
             }
         }
     });
-
-    context_menu::show(ui.ctx());
 }
 
 fn render_profile_icon(

@@ -149,6 +149,8 @@ finish-args:
 
   - --talk-name=org.freedesktop.secrets
 
+  - --talk-name=org.freedesktop.Flatpak
+
   - --env=GDK_BACKEND=wayland,x11
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin

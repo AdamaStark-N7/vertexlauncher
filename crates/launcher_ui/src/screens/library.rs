@@ -1293,7 +1293,8 @@ fn required_java_major(game_version: &str) -> Option<u8> {
     let patch = parts.next().unwrap_or(0);
 
     if major != 1 {
-        return Some(21);
+        // New versioning scheme (e.g. 26.x): Java version is major - 1
+        return major.checked_sub(1).and_then(|v| u8::try_from(v).ok());
     }
     if minor <= 16 {
         return Some(8);
@@ -1325,6 +1326,7 @@ fn java_runtime_from_major(major: u8) -> Option<JavaRuntimeVersion> {
         16 => Some(JavaRuntimeVersion::Java16),
         17 => Some(JavaRuntimeVersion::Java17),
         21 => Some(JavaRuntimeVersion::Java21),
+        25 => Some(JavaRuntimeVersion::Java25),
         _ => None,
     }
 }

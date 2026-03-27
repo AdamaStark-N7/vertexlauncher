@@ -21,6 +21,12 @@ pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
 
     #[cfg(target_os = "linux")]
     {
+        if Path::new("/.flatpak-info").exists() {
+            return spawn_first_available(
+                path,
+                &[ProgramLaunch::new("flatpak-spawn", &["--host", "xdg-open"])],
+            );
+        }
         return spawn_first_available(
             path,
             &[

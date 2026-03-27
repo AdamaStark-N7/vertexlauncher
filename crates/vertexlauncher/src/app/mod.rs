@@ -26,7 +26,6 @@ use std::{
     io::{Read, Write},
     panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     path::{Path, PathBuf},
-    process::Command,
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
@@ -644,7 +643,7 @@ impl VertexApp {
 
         let installations_root = PathBuf::from(self.config.minecraft_installations_root());
         let instance_root = instance_root_path(installations_root.as_path(), &instance);
-        if let Err(err) = open_path_in_file_manager(&instance_root) {
+        if let Err(err) = launcher_ui::desktop::open_in_file_manager(&instance_root) {
             notification::error!(
                 "instance_context_menu",
                 "Failed to open instance folder: {err}"
@@ -711,25 +710,6 @@ impl VertexApp {
     }
 }
 
-fn open_path_in_file_manager(path: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "linux")]
-    {
-        Command::new("xdg-open").arg(path).spawn()?;
-        return Ok(());
-    }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer").arg(path).spawn()?;
-        return Ok(());
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open").arg(path).spawn()?;
-        return Ok(());
-    }
-    #[allow(unreachable_code)]
-    Ok(())
-}
 
 fn sleep_precise(duration: Duration) {
     let coarse = Duration::from_millis(1);
@@ -1590,6 +1570,9 @@ fn start_initial_instance_install(
     let java_21 = config
         .java_runtime_path(JavaRuntimeVersion::Java21)
         .map(str::to_owned);
+    let java_25 = config
+        .java_runtime_path(JavaRuntimeVersion::Java25)
+        .map(str::to_owned);
 
     let notification_source = format!("installation/{instance_name}");
     install_activity::set_progress(
@@ -1676,6 +1659,7 @@ fn start_initial_instance_install(
                 JavaRuntimeVersion::Java16 => java_16.as_deref(),
                 JavaRuntimeVersion::Java17 => java_17.as_deref(),
                 JavaRuntimeVersion::Java21 => java_21.as_deref(),
+                JavaRuntimeVersion::Java25 => java_25.as_deref(),
             });
             let java_path = configured_java
                 .map(str::trim)
@@ -1737,7 +1721,8 @@ fn recommended_java_runtime_for_game(game_version: &str) -> Option<JavaRuntimeVe
     let patch = parts.next().unwrap_or(0);
 
     if major != 1 {
-        return Some(JavaRuntimeVersion::Java21);
+        // New versioning scheme (e.g. 26.x): Java version is major - 1
+        return Some(JavaRuntimeVersion::Java25);
     }
     if minor <= 16 {
         return Some(JavaRuntimeVersion::Java8);

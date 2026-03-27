@@ -317,14 +317,16 @@ pub enum JavaRuntimeVersion {
     Java16,
     Java17,
     Java21,
+    Java25,
 }
 
 impl JavaRuntimeVersion {
-    pub const ALL: [JavaRuntimeVersion; 4] = [
+    pub const ALL: [JavaRuntimeVersion; 5] = [
         JavaRuntimeVersion::Java8,
         JavaRuntimeVersion::Java16,
         JavaRuntimeVersion::Java17,
         JavaRuntimeVersion::Java21,
+        JavaRuntimeVersion::Java25,
     ];
 
     /// Java major version number.
@@ -334,6 +336,7 @@ impl JavaRuntimeVersion {
             JavaRuntimeVersion::Java16 => 16,
             JavaRuntimeVersion::Java17 => 17,
             JavaRuntimeVersion::Java21 => 21,
+            JavaRuntimeVersion::Java25 => 25,
         }
     }
 
@@ -344,6 +347,7 @@ impl JavaRuntimeVersion {
             JavaRuntimeVersion::Java16 => "Java 16 JVM Path",
             JavaRuntimeVersion::Java17 => "Java 17 JVM Path",
             JavaRuntimeVersion::Java21 => "Java 21 JVM Path",
+            JavaRuntimeVersion::Java25 => "Java 25 JVM Path",
         }
     }
 
@@ -355,7 +359,8 @@ impl JavaRuntimeVersion {
             JavaRuntimeVersion::Java17 => {
                 "Used for Minecraft 1.18 through 1.20.4 release versions."
             }
-            JavaRuntimeVersion::Java21 => "Used for Minecraft 1.20.5 and newer release versions.",
+            JavaRuntimeVersion::Java21 => "Used for Minecraft 1.20.5 through 1.x release versions.",
+            JavaRuntimeVersion::Java25 => "Used for Minecraft 26.x and newer release versions.",
         }
     }
 }
@@ -682,6 +687,7 @@ pub struct Config {
     java_16_jvm_path: Option<String>,
     java_17_jvm_path: Option<String>,
     java_21_jvm_path: Option<String>,
+    java_25_jvm_path: Option<String>,
 }
 
 impl Config {
@@ -975,6 +981,7 @@ impl Config {
             JavaRuntimeVersion::Java16 => self.java_16_jvm_path.as_deref(),
             JavaRuntimeVersion::Java17 => self.java_17_jvm_path.as_deref(),
             JavaRuntimeVersion::Java21 => self.java_21_jvm_path.as_deref(),
+            JavaRuntimeVersion::Java25 => self.java_25_jvm_path.as_deref(),
         }
     }
 
@@ -985,6 +992,7 @@ impl Config {
             JavaRuntimeVersion::Java16 => self.java_16_jvm_path = path,
             JavaRuntimeVersion::Java17 => self.java_17_jvm_path = path,
             JavaRuntimeVersion::Java21 => self.java_21_jvm_path = path,
+            JavaRuntimeVersion::Java25 => self.java_25_jvm_path = path,
         }
     }
 
@@ -1030,6 +1038,7 @@ impl Config {
         normalize_optional_path(&mut self.java_16_jvm_path);
         normalize_optional_path(&mut self.java_17_jvm_path);
         normalize_optional_path(&mut self.java_21_jvm_path);
+        normalize_optional_path(&mut self.java_25_jvm_path);
         if self.theme_id.trim().is_empty() {
             self.theme_id = "matrix_oled".to_owned();
         }
@@ -1075,6 +1084,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            java_25_jvm_path: _,
             curseforge_api_key: _,
         } = self;
 
@@ -1168,6 +1178,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            java_25_jvm_path: _,
         } = self;
 
         visit(DropdownSettingId::UiFontFamily.spec(), ui_font_family);
@@ -1214,6 +1225,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            java_25_jvm_path: _,
         } = self;
 
         visit(FloatSettingId::UiFontSize.spec(), ui_font_size);
@@ -1268,6 +1280,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            java_25_jvm_path: _,
         } = self;
 
         visit(IntSettingId::UiFontWeight.spec(), ui_font_weight);
@@ -1323,6 +1336,7 @@ impl Config {
             java_16_jvm_path: _,
             java_17_jvm_path: _,
             java_21_jvm_path: _,
+            java_25_jvm_path: _,
         } = self;
 
         visit(
@@ -1389,6 +1403,7 @@ impl Default for Config {
             java_16_jvm_path: None,
             java_17_jvm_path: None,
             java_21_jvm_path: None,
+            java_25_jvm_path: None,
         }
     }
 }

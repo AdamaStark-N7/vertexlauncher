@@ -550,7 +550,8 @@ fn recommended_java_runtime_for_game(game_version: &str) -> Option<JavaRuntimeVe
     let patch = parts.next().unwrap_or(0);
 
     if major != 1 {
-        return Some(JavaRuntimeVersion::Java21);
+        // New versioning scheme (e.g. 26.x): Java version is major - 1
+        return Some(JavaRuntimeVersion::Java25);
     }
     if minor <= 16 {
         return Some(JavaRuntimeVersion::Java8);
