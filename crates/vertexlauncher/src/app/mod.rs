@@ -710,7 +710,6 @@ impl VertexApp {
     }
 }
 
-
 fn sleep_precise(duration: Duration) {
     let coarse = Duration::from_millis(1);
     let tail = Duration::from_micros(250);

@@ -25,7 +25,7 @@ const CAMERA_DRAG_SENSITIVITY_RAD_PER_POINT: f32 = 0.0046;
 const CAMERA_INERTIA_FRICTION_PER_SEC: f32 = 2.0;
 const CAMERA_INERTIA_STOP_THRESHOLD_RAD_PER_SEC: f32 = 0.015;
 const UV_EDGE_INSET_BASE_TEXELS: f32 = 0.08;
-const UV_EDGE_INSET_OVERLAY_TEXELS: f32 = 0.38;
+const UV_EDGE_INSET_OVERLAY_TEXELS: f32 = 0.5;
 const CAPE_TILE_WIDTH_MIN: f32 = 132.0;
 const CAPE_TILE_HEIGHT: f32 = 186.0;
 const SKIN_PREVIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -49,6 +49,7 @@ pub fn render(
     preview_motion_blur_shutter_frames: f32,
     preview_motion_blur_sample_count: i32,
     preview_3d_layers_enabled: bool,
+    expressions_enabled: bool,
 ) {
     let state_id = ui.make_persistent_id("skins_screen_state");
     let mut state = ui
@@ -79,6 +80,7 @@ pub fn render(
     state.preview_motion_blur_shutter_frames = preview_motion_blur_shutter_frames.max(0.0);
     state.preview_motion_blur_sample_count = preview_motion_blur_sample_count.max(1) as usize;
     state.preview_3d_layers_enabled = preview_3d_layers_enabled;
+    state.expressions_enabled = expressions_enabled;
     if state.last_preview_aa_mode != state.preview_aa_mode
         || state.last_preview_motion_blur_enabled != state.preview_motion_blur_enabled
         || (state.last_preview_motion_blur_amount - state.preview_motion_blur_amount).abs()
@@ -89,6 +91,7 @@ pub fn render(
             > f32::EPSILON
         || state.last_preview_motion_blur_sample_count != state.preview_motion_blur_sample_count
         || state.last_preview_3d_layers_enabled != state.preview_3d_layers_enabled
+        || state.last_expressions_enabled != state.expressions_enabled
     {
         state.preview_texture = None;
         state.preview_history = None;
@@ -98,6 +101,7 @@ pub fn render(
         state.last_preview_motion_blur_shutter_frames = state.preview_motion_blur_shutter_frames;
         state.last_preview_motion_blur_sample_count = state.preview_motion_blur_sample_count;
         state.last_preview_3d_layers_enabled = state.preview_3d_layers_enabled;
+        state.last_expressions_enabled = state.expressions_enabled;
     }
     state.poll_worker(ui.ctx());
     state.poll_pick_skin_result(ui.ctx());
@@ -330,7 +334,27 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     } else {
         std::f32::consts::TAU / PREVIEW_ORBIT_SECONDS as f32
     };
-    let walk = (now as f32 * 3.3).sin();
+
+    let blend_target = match state.preview_motion_mode {
+        PreviewMotionMode::Idle => 0.0,
+        PreviewMotionMode::Walk => 1.0,
+    };
+    let blend_speed = if blend_target > state.preview_motion_blend {
+        5.4
+    } else {
+        4.2
+    };
+    let blend_alpha = 1.0 - (-blend_speed * dt.max(0.0)).exp();
+    state.preview_motion_blend += (blend_target - state.preview_motion_blend) * blend_alpha;
+    state.preview_motion_blend = state.preview_motion_blend.clamp(0.0, 1.0);
+    let preview_pose = PreviewPose {
+        time_seconds: now as f32,
+        idle_cycle: (now as f32 * 1.15).sin(),
+        walk_cycle: (now as f32 * 3.3).sin(),
+        locomotion_blend: state.preview_motion_blend,
+    };
+
+    state.refresh_expression_layout_cache();
 
     let skin_texture = state.skin_texture.as_ref();
     let cape_texture = state.cape_texture.as_ref();
@@ -366,10 +390,11 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
             cape_uv,
             yaw,
             yaw_velocity,
-            now as f32,
-            walk,
+            preview_pose,
             variant,
             show_elytra,
+            state.expressions_enabled,
+            state.cached_expression_layout,
             wgpu_target_format,
             preview_msaa_samples,
             preview_aa_mode,
@@ -394,16 +419,60 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
         });
     }
 
-    let toggle_rect = Rect::from_min_size(
-        egui::pos2(rect.left() + 14.0, rect.bottom() - 46.0),
-        egui::vec2(154.0, 32.0),
+    let button_size = egui::vec2(154.0, 32.0);
+    let button_gap = 8.0;
+    let base_x = rect.left() + 14.0;
+    let base_y = rect.bottom() - 46.0;
+
+    let mut button_clicked = false;
+
+    let motion_rect = Rect::from_min_size(
+        egui::pos2(base_x, base_y - (button_size.y + button_gap) * 2.0),
+        button_size,
     );
+    let expressions_rect = Rect::from_min_size(
+        egui::pos2(base_x, base_y - (button_size.y + button_gap)),
+        button_size,
+    );
+    let toggle_rect = Rect::from_min_size(egui::pos2(base_x, base_y), button_size);
+
+    let motion_text = match state.preview_motion_mode {
+        PreviewMotionMode::Idle => "Motion: Idle",
+        PreviewMotionMode::Walk => "Motion: Walk",
+    };
+    ui.scope_builder(egui::UiBuilder::new().max_rect(motion_rect), |ui| {
+        let mut toggle_style = style::neutral_button(ui);
+        toggle_style.min_size = motion_rect.size();
+        let response = text_ui.button(ui, "skins_toggle_motion_mode", motion_text, &toggle_style);
+        if response.clicked() {
+            state.preview_motion_mode = match state.preview_motion_mode {
+                PreviewMotionMode::Idle => PreviewMotionMode::Walk,
+                PreviewMotionMode::Walk => PreviewMotionMode::Idle,
+            };
+        }
+    });
+
+    let expressions_text = if state.expressions_enabled {
+        if state.cached_expression_layout.is_some() {
+            "Expressions: Ready"
+        } else {
+            "Expressions: No Spec"
+        }
+    } else {
+        "Expressions: Disabled"
+    };
+    ui.scope_builder(egui::UiBuilder::new().max_rect(expressions_rect), |ui| {
+        ui.set_min_size(expressions_rect.size());
+        ui.centered_and_justified(|ui| {
+            ui.label(expressions_text);
+        });
+    });
+
     let toggle_text = if state.show_elytra {
         "Elytra: On"
     } else {
         "Elytra: Off"
     };
-    let mut button_clicked = false;
     ui.scope_builder(egui::UiBuilder::new().max_rect(toggle_rect), |ui| {
         let mut toggle_style = style::neutral_button(ui);
         toggle_style.min_size = toggle_rect.size();
@@ -445,10 +514,11 @@ fn draw_character(
     cape_uv: FaceUvs,
     yaw: f32,
     yaw_velocity: f32,
-    time_seconds: f32,
-    walk_phase: f32,
+    preview_pose: PreviewPose,
     variant: MinecraftSkinVariant,
     show_elytra: bool,
+    expressions_enabled: bool,
+    expression_layout: Option<DetectedExpressionsLayout>,
     wgpu_target_format: Option<wgpu::TextureFormat>,
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
@@ -469,11 +539,12 @@ fn draw_character(
         rect,
         cape_uv,
         yaw,
-        time_seconds,
-        walk_phase,
+        preview_pose,
         variant,
         preview_3d_layers_enabled,
         show_elytra,
+        expressions_enabled,
+        expression_layout,
         skin_sample.clone(),
         cape_sample.clone(),
         default_elytra_sample.clone(),
@@ -487,13 +558,14 @@ fn draw_character(
                 cape_uv,
                 yaw,
                 yaw_velocity,
-                time_seconds,
-                walk_phase,
+                preview_pose,
                 preview_motion_blur_shutter_frames,
                 preview_motion_blur_sample_count,
                 variant,
                 preview_3d_layers_enabled,
                 show_elytra,
+                expressions_enabled,
+                expression_layout,
                 Some(Arc::clone(skin_sample)),
                 cape_sample,
                 default_elytra_sample,
@@ -537,9 +609,780 @@ fn draw_character(
     );
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PreviewMotionMode {
+    Idle,
+    Walk,
+}
+
+#[derive(Clone, Copy)]
+struct PreviewPose {
+    time_seconds: f32,
+    idle_cycle: f32,
+    walk_cycle: f32,
+    locomotion_blend: f32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExpressionOffset {
+    Bottom,
+    LowerMid,
+    UpperMid,
+    Top,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EyeFamily {
+    TwoByOne,
+    TwoByTwo,
+    TwoByThree,
+    ThreeByOne,
+    OneByOne,
+    OneByTwo,
+    OneByThree,
+    Spread,
+    FarOneByOne,
+    OneByOneInner,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowKind {
+    Standard,
+    Hat,
+    Spread,
+    Villager,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct TextureRectU32 {
+    x: u32,
+    y: u32,
+    w: u32,
+    h: u32,
+}
+
+const fn tex(x: u32, y: u32, w: u32, h: u32) -> TextureRectU32 {
+    TextureRectU32 { x, y, w, h }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct EyeExpressionSpec {
+    id: &'static str,
+    family: EyeFamily,
+    offset: ExpressionOffset,
+    right_eye: TextureRectU32,
+    left_eye: TextureRectU32,
+    right_white: Option<TextureRectU32>,
+    left_white: Option<TextureRectU32>,
+    right_pupil: Option<TextureRectU32>,
+    left_pupil: Option<TextureRectU32>,
+    blink: Option<TextureRectU32>,
+    right_center_x: f32,
+    left_center_x: f32,
+    center_y: f32,
+    z: f32,
+    width: f32,
+    height: f32,
+    pupil_width: f32,
+    pupil_height: f32,
+    gaze_scale_x: f32,
+    gaze_scale_y: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct BrowExpressionSpec {
+    id: &'static str,
+    kind: BrowKind,
+    offset: ExpressionOffset,
+    right_brow: TextureRectU32,
+    left_brow: Option<TextureRectU32>,
+    center_x: f32,
+    center_y: f32,
+    z: f32,
+    width: f32,
+    height: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DetectedExpressionsLayout {
+    eye: EyeExpressionSpec,
+    brow: Option<BrowExpressionSpec>,
+}
+
+#[derive(Clone, Copy)]
+struct FaceExpressionPose {
+    look_x: f32,
+    look_y: f32,
+    brow_raise_left: f32,
+    brow_raise_right: f32,
+    brow_squeeze: f32,
+    upper_lid_left: f32,
+    upper_lid_right: f32,
+    lower_lid: f32,
+}
+
+const SUPPORTED_EYE_SPECS: &[EyeExpressionSpec] = &[
+    EyeExpressionSpec {
+        id: "eye_16",
+        family: EyeFamily::Spread,
+        offset: ExpressionOffset::LowerMid,
+        right_eye: tex(36, 6, 2, 1),
+        left_eye: tex(38, 6, 2, 1),
+        right_white: Some(tex(36, 7, 1, 1)),
+        left_white: Some(tex(39, 7, 1, 1)),
+        right_pupil: Some(tex(37, 7, 1, 1)),
+        left_pupil: Some(tex(38, 7, 1, 1)),
+        blink: Some(tex(36, 6, 2, 1)),
+        right_center_x: 2.975,
+        left_center_x: -2.975,
+        center_y: 27.000,
+        z: 3.000,
+        width: 2.025,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_10",
+        family: EyeFamily::ThreeByOne,
+        offset: ExpressionOffset::LowerMid,
+        right_eye: tex(32, 2, 3, 1),
+        left_eye: tex(37, 2, 3, 1),
+        right_white: Some(tex(32, 3, 3, 1)),
+        left_white: Some(tex(37, 3, 3, 1)),
+        right_pupil: Some(tex(35, 3, 1, 1)),
+        left_pupil: Some(tex(36, 3, 1, 1)),
+        blink: Some(tex(32, 2, 3, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 27.000,
+        z: 4.000,
+        width: 3.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.450,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_11",
+        family: EyeFamily::ThreeByOne,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(32, 0, 3, 1),
+        left_eye: tex(37, 0, 3, 1),
+        right_white: Some(tex(32, 1, 3, 1)),
+        left_white: Some(tex(37, 1, 3, 1)),
+        right_pupil: Some(tex(35, 1, 1, 1)),
+        left_pupil: Some(tex(36, 1, 1, 1)),
+        blink: Some(tex(32, 0, 3, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 28.000,
+        z: 4.000,
+        width: 3.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.450,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_9",
+        family: EyeFamily::TwoByThree,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(32, 4, 2, 3),
+        left_eye: tex(34, 4, 2, 3),
+        right_white: Some(tex(32, 5, 1, 3)),
+        left_white: Some(tex(35, 5, 1, 3)),
+        right_pupil: Some(tex(33, 5, 1, 2)),
+        left_pupil: Some(tex(34, 5, 1, 2)),
+        blink: Some(tex(32, 4, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 26.500,
+        z: 3.000,
+        width: 2.000,
+        height: 3.000,
+        pupil_width: 1.000,
+        pupil_height: 2.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_5",
+        family: EyeFamily::TwoByTwo,
+        offset: ExpressionOffset::Bottom,
+        right_eye: tex(24, 5, 2, 2),
+        left_eye: tex(26, 5, 2, 2),
+        right_white: Some(tex(24, 6, 1, 2)),
+        left_white: Some(tex(27, 6, 1, 2)),
+        right_pupil: Some(tex(25, 6, 1, 2)),
+        left_pupil: Some(tex(26, 6, 1, 2)),
+        blink: Some(tex(24, 5, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 26.000,
+        z: 3.000,
+        width: 2.000,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 2.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_6",
+        family: EyeFamily::TwoByTwo,
+        offset: ExpressionOffset::LowerMid,
+        right_eye: tex(24, 2, 2, 2),
+        left_eye: tex(26, 2, 2, 2),
+        right_white: Some(tex(24, 3, 1, 2)),
+        left_white: Some(tex(27, 3, 1, 2)),
+        right_pupil: Some(tex(25, 3, 1, 2)),
+        left_pupil: Some(tex(26, 3, 1, 2)),
+        blink: Some(tex(24, 2, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 27.000,
+        z: 3.000,
+        width: 2.000,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 2.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_7",
+        family: EyeFamily::TwoByTwo,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(28, 5, 2, 2),
+        left_eye: tex(30, 5, 2, 2),
+        right_white: Some(tex(28, 6, 1, 2)),
+        left_white: Some(tex(31, 6, 1, 2)),
+        right_pupil: Some(tex(29, 6, 1, 2)),
+        left_pupil: Some(tex(30, 6, 1, 2)),
+        blink: Some(tex(28, 5, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 28.000,
+        z: 3.000,
+        width: 2.000,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 2.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_8",
+        family: EyeFamily::TwoByTwo,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(28, 2, 2, 2),
+        left_eye: tex(30, 2, 2, 2),
+        right_white: Some(tex(28, 3, 1, 2)),
+        left_white: Some(tex(31, 3, 1, 2)),
+        right_pupil: Some(tex(29, 3, 1, 2)),
+        left_pupil: Some(tex(30, 3, 1, 2)),
+        blink: Some(tex(28, 2, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 29.000,
+        z: 3.000,
+        width: 2.000,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 2.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_1",
+        family: EyeFamily::TwoByOne,
+        offset: ExpressionOffset::Bottom,
+        right_eye: tex(4, 6, 2, 1),
+        left_eye: tex(6, 6, 2, 1),
+        right_white: Some(tex(4, 7, 1, 1)),
+        left_white: Some(tex(7, 7, 1, 1)),
+        right_pupil: Some(tex(5, 7, 1, 1)),
+        left_pupil: Some(tex(6, 7, 1, 1)),
+        blink: Some(tex(4, 6, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 26.000,
+        z: 3.000,
+        width: 2.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_2",
+        family: EyeFamily::TwoByOne,
+        offset: ExpressionOffset::LowerMid,
+        right_eye: tex(4, 4, 2, 1),
+        left_eye: tex(6, 4, 2, 1),
+        right_white: Some(tex(4, 5, 1, 1)),
+        left_white: Some(tex(7, 5, 1, 1)),
+        right_pupil: Some(tex(5, 5, 1, 1)),
+        left_pupil: Some(tex(6, 5, 1, 1)),
+        blink: Some(tex(4, 4, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 27.000,
+        z: 3.000,
+        width: 2.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_3",
+        family: EyeFamily::TwoByOne,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(4, 2, 2, 1),
+        left_eye: tex(6, 2, 2, 1),
+        right_white: Some(tex(4, 3, 1, 1)),
+        left_white: Some(tex(7, 3, 1, 1)),
+        right_pupil: Some(tex(5, 3, 1, 1)),
+        left_pupil: Some(tex(6, 3, 1, 1)),
+        blink: Some(tex(4, 2, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 28.000,
+        z: 3.000,
+        width: 2.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_4",
+        family: EyeFamily::TwoByOne,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(4, 0, 2, 1),
+        left_eye: tex(6, 0, 2, 1),
+        right_white: Some(tex(4, 1, 1, 1)),
+        left_white: Some(tex(7, 1, 1, 1)),
+        right_pupil: Some(tex(5, 1, 1, 1)),
+        left_pupil: Some(tex(6, 1, 1, 1)),
+        blink: Some(tex(4, 0, 2, 1)),
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 29.000,
+        z: 3.000,
+        width: 2.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.380,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_12",
+        family: EyeFamily::OneByOne,
+        offset: ExpressionOffset::Bottom,
+        right_eye: tex(2, 7, 1, 1),
+        left_eye: tex(3, 7, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: Some(tex(2, 7, 1, 1)),
+        left_pupil: Some(tex(3, 7, 1, 1)),
+        blink: None,
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 26.000,
+        z: 3.000,
+        width: 1.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_13",
+        family: EyeFamily::OneByOne,
+        offset: ExpressionOffset::LowerMid,
+        right_eye: tex(2, 5, 1, 1),
+        left_eye: tex(3, 5, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: Some(tex(2, 5, 1, 1)),
+        left_pupil: Some(tex(3, 5, 1, 1)),
+        blink: None,
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 27.000,
+        z: 3.000,
+        width: 1.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_14",
+        family: EyeFamily::OneByOne,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(2, 3, 1, 1),
+        left_eye: tex(3, 3, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: Some(tex(2, 3, 1, 1)),
+        left_pupil: Some(tex(3, 3, 1, 1)),
+        blink: None,
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 28.000,
+        z: 3.000,
+        width: 1.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_15",
+        family: EyeFamily::OneByOne,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(2, 1, 1, 1),
+        left_eye: tex(3, 1, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: Some(tex(2, 1, 1, 1)),
+        left_pupil: Some(tex(3, 1, 1, 1)),
+        blink: None,
+        right_center_x: 2.000,
+        left_center_x: -2.000,
+        center_y: 29.000,
+        z: 3.000,
+        width: 1.000,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_17",
+        family: EyeFamily::FarOneByOne,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(0, 7, 1, 1),
+        left_eye: tex(1, 7, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 7, 1, 1)),
+        right_center_x: 2.475,
+        left_center_x: -2.475,
+        center_y: 28.000,
+        z: 3.000,
+        width: 1.025,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_18",
+        family: EyeFamily::FarOneByOne,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(0, 6, 1, 1),
+        left_eye: tex(1, 6, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 6, 1, 1)),
+        right_center_x: 2.475,
+        left_center_x: -2.475,
+        center_y: 29.000,
+        z: 3.000,
+        width: 1.025,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_19",
+        family: EyeFamily::OneByOneInner,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(0, 5, 1, 1),
+        left_eye: tex(1, 5, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 5, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 28.000,
+        z: 3.000,
+        width: 1.025,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_20",
+        family: EyeFamily::OneByOneInner,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(0, 4, 1, 1),
+        left_eye: tex(1, 4, 1, 1),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 4, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 29.000,
+        z: 3.000,
+        width: 1.025,
+        height: 1.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.120,
+    },
+    EyeExpressionSpec {
+        id: "eye_21",
+        family: EyeFamily::OneByTwo,
+        offset: ExpressionOffset::UpperMid,
+        right_eye: tex(0, 3, 1, 2),
+        left_eye: tex(1, 3, 1, 2),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 3, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 28.000,
+        z: 3.000,
+        width: 1.025,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_22",
+        family: EyeFamily::OneByTwo,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(0, 2, 1, 2),
+        left_eye: tex(1, 2, 1, 2),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 2, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 29.000,
+        z: 3.000,
+        width: 1.025,
+        height: 2.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_23",
+        family: EyeFamily::OneByThree,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(0, 1, 1, 3),
+        left_eye: tex(1, 1, 1, 3),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 1, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 29.000,
+        z: 3.000,
+        width: 1.025,
+        height: 3.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.180,
+    },
+    EyeExpressionSpec {
+        id: "eye_24",
+        family: EyeFamily::OneByThree,
+        offset: ExpressionOffset::Top,
+        right_eye: tex(0, 0, 1, 3),
+        left_eye: tex(1, 0, 1, 3),
+        right_white: None,
+        left_white: None,
+        right_pupil: None,
+        left_pupil: None,
+        blink: Some(tex(0, 0, 1, 1)),
+        right_center_x: 1.475,
+        left_center_x: -1.475,
+        center_y: 30.000,
+        z: 3.000,
+        width: 1.025,
+        height: 3.000,
+        pupil_width: 1.000,
+        pupil_height: 1.000,
+        gaze_scale_x: 0.250,
+        gaze_scale_y: 0.180,
+    },
+];
+
+const SUPPORTED_BROW_SPECS: &[BrowExpressionSpec] = &[
+    BrowExpressionSpec {
+        id: "brow_bottom",
+        kind: BrowKind::Standard,
+        offset: ExpressionOffset::Bottom,
+        right_brow: tex(60, 7, 2, 1),
+        left_brow: Some(tex(62, 7, 2, 1)),
+        center_x: 2.000,
+        center_y: 26.500,
+        z: 4.000,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_lower_mid",
+        kind: BrowKind::Standard,
+        offset: ExpressionOffset::LowerMid,
+        right_brow: tex(60, 5, 2, 1),
+        left_brow: Some(tex(62, 5, 2, 1)),
+        center_x: 2.000,
+        center_y: 27.500,
+        z: 4.000,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_upper_mid",
+        kind: BrowKind::Standard,
+        offset: ExpressionOffset::UpperMid,
+        right_brow: tex(60, 3, 2, 1),
+        left_brow: Some(tex(62, 3, 2, 1)),
+        center_x: 2.000,
+        center_y: 28.500,
+        z: 4.000,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_top",
+        kind: BrowKind::Standard,
+        offset: ExpressionOffset::Top,
+        right_brow: tex(60, 1, 2, 1),
+        left_brow: Some(tex(62, 1, 2, 1)),
+        center_x: 2.000,
+        center_y: 29.500,
+        z: 4.000,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_hat_bottom",
+        kind: BrowKind::Hat,
+        offset: ExpressionOffset::Bottom,
+        right_brow: tex(56, 7, 2, 1),
+        left_brow: Some(tex(58, 7, 2, 1)),
+        center_x: 2.000,
+        center_y: 26.500,
+        z: 4.200,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_hat_lower_mid",
+        kind: BrowKind::Hat,
+        offset: ExpressionOffset::LowerMid,
+        right_brow: tex(56, 6, 2, 1),
+        left_brow: Some(tex(58, 6, 2, 1)),
+        center_x: 2.000,
+        center_y: 27.500,
+        z: 4.200,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_hat_upper_mid",
+        kind: BrowKind::Hat,
+        offset: ExpressionOffset::UpperMid,
+        right_brow: tex(56, 5, 2, 1),
+        left_brow: Some(tex(58, 5, 2, 1)),
+        center_x: 2.000,
+        center_y: 28.500,
+        z: 4.200,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_hat_top",
+        kind: BrowKind::Hat,
+        offset: ExpressionOffset::Top,
+        right_brow: tex(56, 4, 2, 1),
+        left_brow: Some(tex(58, 4, 2, 1)),
+        center_x: 2.000,
+        center_y: 29.500,
+        z: 4.200,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_spread",
+        kind: BrowKind::Spread,
+        offset: ExpressionOffset::LowerMid,
+        right_brow: tex(36, 5, 2, 1),
+        left_brow: Some(tex(38, 5, 2, 1)),
+        center_x: 3.000,
+        center_y: 27.500,
+        z: 4.000,
+        width: 2.000,
+        height: 1.0,
+    },
+    BrowExpressionSpec {
+        id: "brow_villager",
+        kind: BrowKind::Villager,
+        offset: ExpressionOffset::UpperMid,
+        right_brow: tex(24, 1, 5, 1),
+        left_brow: None,
+        center_x: 0.000,
+        center_y: 28.500,
+        z: 4.000,
+        width: 6.000,
+        height: 1.0,
+    },
+];
+
 struct BuiltCharacterScene {
     triangles: Vec<RenderTriangle>,
     cape_render_sample: Option<Arc<RgbaImage>>,
+}
+
+struct WeightedPreviewScene {
+    weight: f32,
+    triangles: Vec<RenderTriangle>,
 }
 
 #[derive(Clone, Copy)]
@@ -707,11 +1550,12 @@ fn build_character_scene(
     rect: Rect,
     cape_uv: FaceUvs,
     yaw: f32,
-    time_seconds: f32,
-    walk_phase: f32,
+    preview_pose: PreviewPose,
     variant: MinecraftSkinVariant,
     preview_3d_layers_enabled: bool,
     show_elytra: bool,
+    expressions_enabled: bool,
+    expression_layout: Option<DetectedExpressionsLayout>,
     skin_sample: Option<Arc<RgbaImage>>,
     cape_sample: Option<Arc<RgbaImage>>,
     default_elytra_sample: Option<Arc<RgbaImage>>,
@@ -721,9 +1565,20 @@ fn build_character_scene(
     } else {
         4.0
     };
-    let bob = walk_phase.abs() * 0.55;
-    let leg_swing = walk_phase * 0.62;
-    let arm_swing = -walk_phase * 0.74;
+    let idle_sway = preview_pose.idle_cycle;
+    let walk_phase = preview_pose.walk_cycle;
+    let locomotion_blend = preview_pose.locomotion_blend;
+    let stride_phase = walk_phase * locomotion_blend;
+    let bob_idle = 0.08 + (idle_sway * 0.5 + 0.5) * 0.12;
+    let bob_walk = stride_phase.abs() * 0.58
+        + (preview_pose.time_seconds * 6.6).cos().abs() * 0.04 * locomotion_blend;
+    let bob = egui::lerp(bob_idle..=bob_walk, locomotion_blend);
+    let leg_swing = stride_phase * 0.72;
+    let arm_idle = (preview_pose.time_seconds * 1.35).sin() * 0.055;
+    let arm_swing = (-stride_phase * 0.82) + arm_idle * (1.0 - locomotion_blend * 0.45);
+    let torso_idle_tilt = idle_sway * 0.035 * (1.0 - locomotion_blend * 0.6) + stride_phase * 0.05;
+    let head_idle_tilt = idle_sway * 0.055 * (1.0 - locomotion_blend * 0.55) - stride_phase * 0.035;
+    let cape_walk_phase = stride_phase;
 
     let target = Vec3::new(0.0, 19.5 + bob, 0.0);
     let camera_radius = 56.0;
@@ -881,7 +1736,7 @@ fn build_character_scene(
         CuboidSpec {
             size: Vec3::new(8.0, 12.0, 4.0),
             pivot_top_center: Vec3::new(0.0, 24.0, 0.0) + model_offset,
-            rotate_x: 0.0,
+            rotate_x: torso_idle_tilt,
             rotate_z: 0.0,
             uv: torso_uv,
             cull_backfaces: true,
@@ -943,7 +1798,7 @@ fn build_character_scene(
                 OverlayPartSpec {
                     size: Vec3::new(8.0, 12.0, 4.0),
                     pivot_top_center: Vec3::new(0.0, 24.0, 0.0) + model_offset,
-                    rotate_x: 0.0,
+                    rotate_x: torso_idle_tilt,
                     rotate_z: 0.0,
                 },
                 &torso_regions,
@@ -960,7 +1815,7 @@ fn build_character_scene(
             CuboidSpec {
                 size: Vec3::new(8.6, 12.6, 4.6),
                 pivot_top_center: Vec3::new(0.0, 24.2, 0.0) + model_offset,
-                rotate_x: 0.0,
+                rotate_x: torso_idle_tilt,
                 rotate_z: 0.0,
                 uv: torso_overlay_uv,
                 cull_backfaces: false,
@@ -978,7 +1833,7 @@ fn build_character_scene(
         CuboidSpec {
             size: Vec3::new(8.0, 8.0, 8.0),
             pivot_top_center: Vec3::new(0.0, 32.0, 0.0) + model_offset,
-            rotate_x: 0.0,
+            rotate_x: head_idle_tilt,
             rotate_z: 0.0,
             uv: head_uv,
             cull_backfaces: true,
@@ -1040,7 +1895,7 @@ fn build_character_scene(
                 OverlayPartSpec {
                     size: Vec3::new(8.0, 8.0, 8.0),
                     pivot_top_center: Vec3::new(0.0, 32.0, 0.0) + model_offset,
-                    rotate_x: 0.0,
+                    rotate_x: head_idle_tilt,
                     rotate_z: 0.0,
                 },
                 &head_regions,
@@ -1057,7 +1912,7 @@ fn build_character_scene(
             CuboidSpec {
                 size: Vec3::new(8.8, 8.8, 8.8),
                 pivot_top_center: Vec3::new(0.0, 32.4, 0.0) + model_offset,
-                rotate_x: 0.0,
+                rotate_x: head_idle_tilt,
                 rotate_z: 0.0,
                 uv: head_overlay_uv,
                 cull_backfaces: false,
@@ -1067,6 +1922,27 @@ fn build_character_scene(
             rect,
             light_dir,
         );
+    }
+
+    if expressions_enabled {
+        if let (Some(layout), Some(skin_image)) = (expression_layout, skin_sample.as_ref()) {
+            let expression_pose = compute_expression_pose(
+                preview_pose.time_seconds,
+                hash_rgba_image(skin_image),
+                locomotion_blend,
+            );
+            add_expression_triangles(
+                &mut overlay_tris,
+                &camera,
+                projection,
+                rect,
+                model_offset,
+                head_idle_tilt,
+                light_dir,
+                layout,
+                expression_pose,
+            );
+        }
     }
 
     let shoulder_x = 4.0 + arm_width * 0.5;
@@ -1498,7 +2374,7 @@ fn build_character_scene(
             projection,
             rect,
             model_offset,
-            walk_phase,
+            cape_walk_phase,
             cape_uv,
             light_dir,
         );
@@ -1521,8 +2397,8 @@ fn build_character_scene(
             projection,
             rect,
             model_offset,
-            time_seconds,
-            walk_phase,
+            preview_pose.time_seconds,
+            cape_walk_phase,
             uv_layout,
             light_dir,
         );
@@ -1534,9 +2410,877 @@ fn build_character_scene(
     }
 }
 
-struct WeightedPreviewScene {
-    weight: f32,
-    triangles: Vec<RenderTriangle>,
+fn compute_expression_pose(
+    time_seconds: f32,
+    skin_hash: u64,
+    locomotion_blend: f32,
+) -> FaceExpressionPose {
+    let seed_a = hash_to_unit(skin_hash ^ 0x14f2_35a7_9bcd_e011);
+    let seed_b = hash_to_unit(skin_hash ^ 0xa611_7cc3_52ef_91d5);
+    let seed_c = hash_to_unit(skin_hash ^ 0x3d84_2f61_8cbe_7201);
+    let seed_d = hash_to_unit(skin_hash ^ 0xff02_6a99_311c_4e73);
+
+    let blink_window = 5.0 + seed_a * 4.8;
+    let local_time = time_seconds + seed_b * blink_window;
+    let blink_index = (local_time / blink_window).floor().max(0.0) as u64;
+    let blink_seed = skin_hash ^ blink_index.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+    let blink_duration = 0.24 + hash_to_unit(blink_seed ^ 0x19e3) * 0.18;
+    let blink_start =
+        0.55 + hash_to_unit(blink_seed ^ 0x74c1) * (blink_window - blink_duration - 0.85).max(0.15);
+    let blink_chance = 0.72 + locomotion_blend * 0.08;
+    let local_phase = local_time - blink_index as f32 * blink_window;
+    let mut blink = if hash_to_unit(blink_seed ^ 0xba51) <= blink_chance {
+        smooth_blink_pulse(local_phase, blink_start, blink_duration)
+    } else {
+        0.0
+    };
+    if blink > 0.0 && hash_to_unit(blink_seed ^ 0xd00b) > 0.78 {
+        let second_gap = 0.09 + hash_to_unit(blink_seed ^ 0x52a9) * 0.08;
+        let second_duration = blink_duration * (0.72 + hash_to_unit(blink_seed ^ 0x6ef4) * 0.28);
+        blink = blink.max(smooth_blink_pulse(
+            local_phase,
+            blink_start + blink_duration + second_gap,
+            second_duration,
+        ));
+    }
+
+    let micro_blink = ((time_seconds * (0.45 + seed_c * 0.35) + seed_d * 2.1).sin() * 0.5 + 0.5)
+        * (0.015 + locomotion_blend * 0.02);
+
+    let gaze_dampen = 1.0 - locomotion_blend * 0.15;
+    let mut look_x = (((time_seconds * (0.33 + seed_c * 0.22)).sin() * 0.54)
+        + ((time_seconds * (0.84 + seed_a * 0.27) + 1.4).sin() * 0.27)
+        + ((time_seconds * (1.47 + seed_d * 0.31) + 0.35).cos() * 0.09))
+        * gaze_dampen;
+    let mut look_y = (((time_seconds * (0.26 + seed_b * 0.13) + 0.65).sin() * 0.34)
+        + ((time_seconds * (0.72 + seed_d * 0.22)).cos() * 0.12))
+        * (1.0 - locomotion_blend * 0.1);
+
+    let emotive_wave = (time_seconds * (0.28 + seed_a * 0.18) + seed_b * 2.2).sin();
+    let emotive_wave_b = (time_seconds * (0.47 + seed_d * 0.21) + seed_c * 1.7).cos();
+    let brow_raise_left = emotive_wave * 0.62 + emotive_wave_b * 0.26;
+    let brow_raise_right = emotive_wave * -0.24 + emotive_wave_b * 0.57;
+    let brow_squeeze = (((time_seconds * (0.52 + seed_b * 0.29)).sin() * 0.5) + 0.5) * 0.24
+        + locomotion_blend * 0.11;
+    let action_window = 4.2 + seed_d * 3.1;
+    let action_time = time_seconds + seed_a * action_window;
+    let action_index = (action_time / action_window).floor().max(0.0) as u64;
+    let action_seed = skin_hash ^ action_index.wrapping_mul(0xd1b5_4a32_d192_ed03);
+    let action_duration = 0.9 + hash_to_unit(action_seed ^ 0x8123) * 1.6;
+    let action_start = 0.35
+        + hash_to_unit(action_seed ^ 0x16af) * (action_window - action_duration - 0.95).max(0.15);
+    let action_local_time = action_time - action_index as f32 * action_window;
+    let action_strength = if hash_to_unit(action_seed ^ 0xb44d) < 0.82 {
+        smooth_window_envelope(action_local_time, action_start, action_duration)
+    } else {
+        0.0
+    };
+    let action_kind = ((hash_to_unit(action_seed ^ 0x3e91) * 3.0).floor() as i32).clamp(0, 2);
+    let action_phase = if action_strength > 0.0 {
+        ((action_local_time - action_start) / action_duration).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+
+    let mut upper_lid_left = micro_blink;
+    let mut upper_lid_right = micro_blink;
+    let mut lower_lid = micro_blink * 0.18 + look_y.max(0.0) * 0.2;
+
+    if action_strength > 0.0 {
+        match action_kind {
+            0 => {
+                let first_dir = if hash_to_unit(action_seed ^ 0xa102) > 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                let sweep = if action_phase < 0.5 {
+                    -1.0 + action_phase / 0.5 * 2.0
+                } else {
+                    1.0 - (action_phase - 0.5) / 0.5 * 2.0
+                };
+                look_x += first_dir * sweep * 0.78 * action_strength;
+                look_y -= 0.04 * action_strength;
+            }
+            1 => {
+                let dir = if hash_to_unit(action_seed ^ 0x7ac4) > 0.5 {
+                    -1.0
+                } else {
+                    1.0
+                };
+                look_x += dir * 0.86 * action_strength;
+                look_y -= 0.02 * action_strength;
+                if dir < 0.0 {
+                    upper_lid_left += 0.16 * action_strength;
+                    upper_lid_right += 0.34 * action_strength;
+                } else {
+                    upper_lid_left += 0.34 * action_strength;
+                    upper_lid_right += 0.16 * action_strength;
+                }
+            }
+            _ => {
+                let scan = if hash_to_unit(action_seed ^ 0xcf17) > 0.46 {
+                    (action_phase * std::f32::consts::TAU).sin() * 0.38
+                } else {
+                    0.0
+                };
+                look_x += scan * action_strength;
+                look_y -= 0.05 * action_strength;
+                upper_lid_left += 0.28 + 0.16 * action_strength;
+                upper_lid_right += 0.28 + 0.16 * action_strength;
+                lower_lid += 0.08 * action_strength;
+            }
+        }
+    }
+
+    upper_lid_left = (upper_lid_left + blink).clamp(0.0, 1.0);
+    upper_lid_right = (upper_lid_right + blink).clamp(0.0, 1.0);
+    lower_lid = (lower_lid + blink * 0.36).clamp(0.0, 0.82);
+
+    FaceExpressionPose {
+        look_x: look_x.clamp(-0.72, 0.72),
+        look_y: look_y.clamp(-0.62, 0.62),
+        brow_raise_left: brow_raise_left.clamp(-1.05, 1.05),
+        brow_raise_right: brow_raise_right.clamp(-1.05, 1.05),
+        brow_squeeze: brow_squeeze.clamp(0.0, 0.52),
+        upper_lid_left,
+        upper_lid_right,
+        lower_lid: lower_lid.clamp(0.0, 0.82),
+    }
+}
+
+fn uv_rect_from_texel_rect(rect: TextureRectU32) -> Rect {
+    uv_rect_with_inset(
+        [64, 64],
+        rect.x,
+        rect.y,
+        rect.w,
+        rect.h,
+        UV_EDGE_INSET_OVERLAY_TEXELS,
+    )
+}
+
+fn uv_rect_from_eyelid_texel_rect(rect: TextureRectU32) -> Rect {
+    uv_rect_with_inset([64, 64], rect.x, rect.y, rect.w, rect.h, UV_EDGE_INSET_OVERLAY_TEXELS)
+}
+
+fn eye_lid_rects(spec: EyeExpressionSpec) -> (TextureRectU32, TextureRectU32) {
+    if let Some(right_lid) = spec.blink {
+        let left_dx = spec.left_eye.x as i32 - spec.right_eye.x as i32;
+        let left_x = (right_lid.x as i32 + left_dx).max(0) as u32;
+        (
+            right_lid,
+            TextureRectU32 {
+                x: left_x,
+                y: right_lid.y,
+                w: right_lid.w,
+                h: right_lid.h,
+            },
+        )
+    } else {
+        (spec.right_eye, spec.left_eye)
+    }
+}
+
+fn hash_mix64(mut value: u64) -> u64 {
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn hash_to_unit(value: u64) -> f32 {
+    let mixed = hash_mix64(value);
+    ((mixed >> 40) as f32) / ((1u64 << 24) as f32)
+}
+
+fn smooth_blink_pulse(time_seconds: f32, start: f32, duration: f32) -> f32 {
+    if duration <= 0.0 || time_seconds < start || time_seconds >= start + duration {
+        return 0.0;
+    }
+    let phase = ((time_seconds - start) / duration).clamp(0.0, 1.0);
+    (std::f32::consts::PI * phase)
+        .sin()
+        .powf(0.65)
+        .clamp(0.0, 1.0)
+}
+
+fn smooth_window_envelope(time_seconds: f32, start: f32, duration: f32) -> f32 {
+    if duration <= 0.0 || time_seconds < start || time_seconds >= start + duration {
+        return 0.0;
+    }
+    let phase = ((time_seconds - start) / duration).clamp(0.0, 1.0);
+    let rise = (phase / 0.22).clamp(0.0, 1.0);
+    let fall = ((1.0 - phase) / 0.22).clamp(0.0, 1.0);
+    let edge = rise.min(fall);
+    edge * edge * (3.0 - 2.0 * edge)
+}
+
+fn compatibility_score(eye: EyeExpressionSpec, brow: BrowExpressionSpec) -> i32 {
+    let mut score = 0;
+    if eye.offset == brow.offset {
+        score += 10;
+    }
+    match (eye.family, brow.kind) {
+        (EyeFamily::Spread, BrowKind::Spread) => score += 6,
+        (EyeFamily::ThreeByOne, BrowKind::Villager) => score += 3,
+        (_, BrowKind::Standard) => score += 2,
+        _ => {}
+    }
+    score - ((eye.center_y - brow.center_y).abs() * 4.0) as i32
+}
+
+#[derive(Clone, Copy, Debug)]
+struct FacePixelRect {
+    left: f32,
+    top: f32,
+    width: f32,
+    height: f32,
+}
+
+impl FacePixelRect {
+    fn center_x(self) -> f32 {
+        4.0 - (self.left + self.width * 0.5)
+    }
+
+    fn top_y(self) -> f32 {
+        self.top
+    }
+
+    fn bottom_y(self) -> f32 {
+        self.top + self.height
+    }
+}
+
+fn face_left_from_center(center_x: f32, width: f32) -> f32 {
+    4.0 - center_x - width * 0.5
+}
+
+fn face_top_from_center(center_y: f32, height: f32) -> f32 {
+    32.0 - center_y - height * 0.5
+}
+
+fn eye_face_rects(spec: EyeExpressionSpec) -> (FacePixelRect, FacePixelRect) {
+    (
+        FacePixelRect {
+            left: face_left_from_center(spec.right_center_x, spec.width),
+            top: face_top_from_center(spec.center_y, spec.height) - 1.0,
+            width: spec.width,
+            height: spec.height,
+        },
+        FacePixelRect {
+            left: face_left_from_center(spec.left_center_x, spec.width),
+            top: face_top_from_center(spec.center_y, spec.height) - 1.0,
+            width: spec.width,
+            height: spec.height,
+        },
+    )
+}
+
+fn brow_face_rects(spec: BrowExpressionSpec) -> (FacePixelRect, Option<FacePixelRect>) {
+    match spec.kind {
+        BrowKind::Spread => (
+            FacePixelRect {
+                left: face_left_from_center(spec.center_x, spec.width),
+                top: face_top_from_center(spec.center_y, spec.height),
+                width: spec.width,
+                height: spec.height,
+            },
+            Some(FacePixelRect {
+                left: face_left_from_center(-spec.center_x, spec.width),
+                top: face_top_from_center(spec.center_y, spec.height),
+                width: spec.width,
+                height: spec.height,
+            }),
+        ),
+        BrowKind::Villager => (
+            FacePixelRect {
+                left: face_left_from_center(spec.center_x, spec.width),
+                top: face_top_from_center(spec.center_y, spec.height),
+                width: spec.width,
+                height: spec.height,
+            },
+            None,
+        ),
+        BrowKind::Standard | BrowKind::Hat => (
+            FacePixelRect {
+                left: face_left_from_center(spec.center_x, spec.width),
+                top: face_top_from_center(spec.center_y, spec.height),
+                width: spec.width,
+                height: spec.height,
+            },
+            spec.left_brow.map(|_| FacePixelRect {
+                left: face_left_from_center(-spec.center_x, spec.width),
+                top: face_top_from_center(spec.center_y, spec.height),
+                width: spec.width,
+                height: spec.height,
+            }),
+        ),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FaceCoverBias {
+    Above,
+    Below,
+}
+
+fn face_cover_texel(rect: FacePixelRect, bias: FaceCoverBias) -> TextureRectU32 {
+    let face_min_x = 8;
+    let face_max_x = 15;
+    let face_min_y = 8;
+    let face_max_y = 15;
+    let center_x = (8 + rect.left.round() as i32 + (rect.width.max(1.0).round() as i32 - 1) / 2)
+        .clamp(face_min_x, face_max_x);
+    let center_y = (8 + rect.top.round() as i32 + (rect.height.max(1.0).round() as i32 - 1) / 2)
+        .clamp(face_min_y, face_max_y);
+    let top = (8 + rect.top.round() as i32).clamp(face_min_y, face_max_y);
+    let bottom = (8 + rect.bottom_y().round() as i32).clamp(face_min_y, face_max_y);
+    let left = (8 + rect.left.round() as i32 - 1).clamp(face_min_x, face_max_x);
+    let right = (8 + (rect.left + rect.width).round() as i32).clamp(face_min_x, face_max_x);
+
+    let candidates = match bias {
+        FaceCoverBias::Above => [
+            (center_x, top - 1),
+            (left, center_y),
+            (right, center_y),
+            (center_x, bottom),
+        ],
+        FaceCoverBias::Below => [
+            (center_x, bottom),
+            (left, center_y),
+            (right, center_y),
+            (center_x, top - 1),
+        ],
+    };
+
+    let (x, y) = candidates
+        .into_iter()
+        .map(|(x, y)| {
+            (
+                x.clamp(face_min_x, face_max_x),
+                y.clamp(face_min_y, face_max_y),
+            )
+        })
+        .next()
+        .unwrap_or((center_x, center_y));
+
+    TextureRectU32 {
+        x: x as u32,
+        y: y as u32,
+        w: 1,
+        h: 1,
+    }
+}
+
+fn expression_eye_plane_z() -> f32 {
+    4.06
+}
+
+fn expression_hat_plane_z() -> f32 {
+    4.46
+}
+
+fn add_expression_panel_with_uv(
+    out: &mut Vec<RenderTriangle>,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    light_dir: Vec3,
+    head_pivot: Vec3,
+    head_rotate_x: f32,
+    x_center: f32,
+    y_top: f32,
+    z_front: f32,
+    width: f32,
+    height: f32,
+    uv: Rect,
+) {
+    if width <= 0.01 || height <= 0.01 {
+        return;
+    }
+
+    add_cuboid_triangles_with_y(
+        out,
+        TriangleTexture::Skin,
+        CuboidSpec {
+            size: Vec3::new(width, height, 0.055),
+            pivot_top_center: head_pivot,
+            rotate_x: head_rotate_x,
+            rotate_z: 0.0,
+            uv: FaceUvs {
+                top: uv,
+                bottom: uv,
+                left: uv,
+                right: uv,
+                front: uv,
+                back: uv,
+            },
+            cull_backfaces: false,
+        },
+        camera,
+        projection,
+        rect,
+        light_dir,
+        0.0,
+        Vec3::new(x_center, -y_top - height * 0.5, z_front),
+    );
+}
+
+fn add_expression_panel(
+    out: &mut Vec<RenderTriangle>,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    light_dir: Vec3,
+    head_pivot: Vec3,
+    head_rotate_x: f32,
+    x_center: f32,
+    y_top: f32,
+    z_front: f32,
+    width: f32,
+    height: f32,
+    uv: Rect,
+) {
+    add_expression_panel_with_uv(
+        out,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        head_pivot,
+        head_rotate_x,
+        x_center,
+        y_top,
+        z_front,
+        width,
+        height,
+        uv,
+    );
+}
+
+fn add_expression_triangles(
+    out: &mut Vec<RenderTriangle>,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    model_offset: Vec3,
+    head_rotate_x: f32,
+    light_dir: Vec3,
+    layout: DetectedExpressionsLayout,
+    pose: FaceExpressionPose,
+) {
+    let head_pivot = Vec3::new(0.0, 32.0, 0.0) + model_offset;
+    let eye = layout.eye;
+    let (right_eye_rect, left_eye_rect) = eye_face_rects(eye);
+    let eye_plane_z = expression_eye_plane_z();
+    let face_cover_z = eye_plane_z - 0.018;
+    let eye_white_z = eye_plane_z + 0.012;
+    let pupil_z = eye_plane_z + 0.024;
+    let upper_lid_z = eye_plane_z + 0.036;
+    let lower_lid_z = eye_plane_z + 0.032;
+    let upper_mask_z = eye_plane_z + 0.028;
+    let lower_mask_z = eye_plane_z + 0.026;
+
+    add_expression_panel(
+        out,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        head_pivot,
+        head_rotate_x,
+        right_eye_rect.center_x(),
+        right_eye_rect.top_y(),
+        face_cover_z,
+        right_eye_rect.width,
+        right_eye_rect.height,
+        uv_rect_from_texel_rect(face_cover_texel(right_eye_rect, FaceCoverBias::Below)),
+    );
+    add_expression_panel(
+        out,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        head_pivot,
+        head_rotate_x,
+        left_eye_rect.center_x(),
+        left_eye_rect.top_y(),
+        face_cover_z,
+        left_eye_rect.width,
+        left_eye_rect.height,
+        uv_rect_from_texel_rect(face_cover_texel(left_eye_rect, FaceCoverBias::Below)),
+    );
+
+    add_expression_panel(
+        out,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        head_pivot,
+        head_rotate_x,
+        right_eye_rect.center_x(),
+        right_eye_rect.top_y(),
+        eye_plane_z,
+        right_eye_rect.width,
+        right_eye_rect.height,
+        uv_rect_from_texel_rect(eye.right_eye),
+    );
+    add_expression_panel(
+        out,
+        camera,
+        projection,
+        rect,
+        light_dir,
+        head_pivot,
+        head_rotate_x,
+        left_eye_rect.center_x(),
+        left_eye_rect.top_y(),
+        eye_plane_z,
+        left_eye_rect.width,
+        left_eye_rect.height,
+        uv_rect_from_texel_rect(eye.left_eye),
+    );
+
+    if let (Some(right_white), Some(left_white), Some(right_pupil), Some(left_pupil)) = (
+        eye.right_white,
+        eye.left_white,
+        eye.right_pupil,
+        eye.left_pupil,
+    ) {
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_eye_rect.center_x(),
+            right_eye_rect.top_y(),
+            eye_white_z,
+            right_eye_rect.width,
+            right_eye_rect.height,
+            uv_rect_from_texel_rect(right_white),
+        );
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_eye_rect.center_x(),
+            left_eye_rect.top_y(),
+            eye_white_z,
+            left_eye_rect.width,
+            left_eye_rect.height,
+            uv_rect_from_texel_rect(left_white),
+        );
+
+        let right_pupil_width = eye.pupil_width.min(right_eye_rect.width);
+        let right_pupil_height = eye.pupil_height.min(right_eye_rect.height);
+        let left_pupil_width = eye.pupil_width.min(left_eye_rect.width);
+        let left_pupil_height = eye.pupil_height.min(left_eye_rect.height);
+        let right_gaze_limit_x = eye
+            .gaze_scale_x
+            .min(((right_eye_rect.width - right_pupil_width) * 0.5).max(0.0));
+        let left_gaze_limit_x = eye
+            .gaze_scale_x
+            .min(((left_eye_rect.width - left_pupil_width) * 0.5).max(0.0));
+        let right_gaze_limit_y = eye
+            .gaze_scale_y
+            .min(((right_eye_rect.height - right_pupil_height) * 0.5).max(0.0));
+        let left_gaze_limit_y = eye
+            .gaze_scale_y
+            .min(((left_eye_rect.height - left_pupil_height) * 0.5).max(0.0));
+        let right_pupil_top = right_eye_rect.top
+            + (right_eye_rect.height - right_pupil_height) * 0.5
+            - pose.look_y * right_gaze_limit_y;
+        let left_pupil_top = left_eye_rect.top + (left_eye_rect.height - left_pupil_height) * 0.5
+            - pose.look_y * left_gaze_limit_y;
+
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_eye_rect.center_x() + pose.look_x * right_gaze_limit_x,
+            right_pupil_top,
+            pupil_z,
+            right_pupil_width,
+            right_pupil_height,
+            uv_rect_from_texel_rect(right_pupil),
+        );
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_eye_rect.center_x() + pose.look_x * left_gaze_limit_x,
+            left_pupil_top,
+            pupil_z,
+            left_pupil_width,
+            left_pupil_height,
+            uv_rect_from_texel_rect(left_pupil),
+        );
+    }
+
+    let (right_lid_rect, left_lid_rect) = eye_lid_rects(eye);
+    let right_lid_uv = uv_rect_from_eyelid_texel_rect(right_lid_rect);
+    let left_lid_uv = uv_rect_from_eyelid_texel_rect(left_lid_rect);
+    let brow_rects = layout.brow.map(brow_face_rects);
+    let brow_drop = pose.brow_squeeze * 0.22;
+    let right_upper_top = right_eye_rect.top_y() - 1.0;
+    let left_upper_top = left_eye_rect.top_y() - 1.0;
+    let right_lid_h = right_lid_rect.h as f32;
+    let left_lid_h = left_lid_rect.h as f32;
+    // World-space Y of the lid top: fixed at the open-state position.
+    // The panel function center-anchors (local_offset = -y_top - h/2), so:
+    //   panel_world_top = 32 - y_top - h/2  =>  W_top = 32 - right_upper_top - lid_h/2
+    let right_lid_world_top = 32.0 - right_upper_top - right_lid_h * 0.5;
+    let left_lid_world_top = 32.0 - left_upper_top - left_lid_h * 0.5;
+    // World-space Y of the eye's visible bottom edge (= where the eye cover panel ends)
+    let right_eye_world_bottom = 32.0 - right_eye_rect.top_y() - right_eye_rect.height * 1.5;
+    let left_eye_world_bottom = 32.0 - left_eye_rect.top_y() - left_eye_rect.height * 1.5;
+    // Lid world bottom: open = world_top - lid_h, closed = eye_world_bottom
+    let right_lid_world_bottom = (right_lid_world_top - right_lid_h)
+        + pose.upper_lid_right.clamp(0.0, 1.0)
+            * (right_eye_world_bottom - (right_lid_world_top - right_lid_h));
+    let left_lid_world_bottom = (left_lid_world_top - left_lid_h)
+        + pose.upper_lid_left.clamp(0.0, 1.0)
+            * (left_eye_world_bottom - (left_lid_world_top - left_lid_h));
+    // Back to face-space params: y_top = 32 - W_top - height/2
+    let right_upper_draw_h = (right_lid_world_top - right_lid_world_bottom).max(0.0);
+    let left_upper_draw_h = (left_lid_world_top - left_lid_world_bottom).max(0.0);
+    let right_upper_panel_y_top = 32.0 - right_lid_world_top - right_upper_draw_h * 0.5;
+    let left_upper_panel_y_top = 32.0 - left_lid_world_top - left_upper_draw_h * 0.5;
+    let upper_lid_inset = 0.12;
+    let upper_lid_width = right_eye_rect.width + upper_lid_inset;
+    let right_upper_center_x = right_eye_rect.center_x() - upper_lid_inset * 0.5;
+    let left_upper_center_x = left_eye_rect.center_x() + upper_lid_inset * 0.5;
+    if right_upper_draw_h > 0.01 {
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_upper_center_x,
+            right_upper_panel_y_top,
+            upper_mask_z,
+            upper_lid_width,
+            right_upper_draw_h,
+            uv_rect_from_texel_rect(face_cover_texel(right_eye_rect, FaceCoverBias::Above)),
+        );
+        add_expression_panel_with_uv(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_upper_center_x,
+            right_upper_panel_y_top,
+            upper_lid_z,
+            upper_lid_width,
+            right_upper_draw_h,
+            right_lid_uv,
+        );
+    }
+    if left_upper_draw_h > 0.01 {
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_upper_center_x,
+            left_upper_panel_y_top,
+            upper_mask_z,
+            upper_lid_width,
+            left_upper_draw_h,
+            uv_rect_from_texel_rect(face_cover_texel(left_eye_rect, FaceCoverBias::Above)),
+        );
+        add_expression_panel_with_uv(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_upper_center_x,
+            left_upper_panel_y_top,
+            upper_lid_z,
+            upper_lid_width,
+            left_upper_draw_h,
+            left_lid_uv,
+        );
+    }
+
+    let lower = pose.lower_lid.clamp(0.0, 1.0);
+    let right_lower_h = (lower * (right_eye_rect.height * 0.28)).clamp(0.0, right_eye_rect.height);
+    let left_lower_h = (lower * (left_eye_rect.height * 0.28)).clamp(0.0, left_eye_rect.height);
+    let right_lower_y = right_eye_rect.top_y() + (right_eye_rect.height - right_lower_h);
+    let left_lower_y = left_eye_rect.top_y() + (left_eye_rect.height - left_lower_h);
+
+    if right_lower_h > 0.01 {
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_eye_rect.center_x(),
+            right_lower_y,
+            lower_mask_z,
+            right_eye_rect.width,
+            right_lower_h,
+            uv_rect_from_texel_rect(face_cover_texel(right_eye_rect, FaceCoverBias::Below)),
+        );
+        add_expression_panel_with_uv(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_eye_rect.center_x(),
+            right_lower_y,
+            lower_lid_z,
+            right_eye_rect.width,
+            right_lower_h,
+            right_lid_uv,
+        );
+    }
+    if left_lower_h > 0.01 {
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_eye_rect.center_x(),
+            left_lower_y,
+            lower_mask_z,
+            left_eye_rect.width,
+            left_lower_h,
+            uv_rect_from_texel_rect(face_cover_texel(left_eye_rect, FaceCoverBias::Below)),
+        );
+        add_expression_panel_with_uv(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            left_eye_rect.center_x(),
+            left_lower_y,
+            lower_lid_z,
+            left_eye_rect.width,
+            left_lower_h,
+            left_lid_uv,
+        );
+    }
+
+    if let Some(brow) = layout.brow {
+        let (right_brow_rect, left_brow_rect) = brow_face_rects(brow);
+        let brow_drop = pose.brow_squeeze * 0.22;
+        let brow_plane_z = if brow.kind == BrowKind::Hat {
+            expression_hat_plane_z()
+        } else {
+            eye_plane_z + 0.048
+        };
+        let brow_cover_z = if brow.kind == BrowKind::Hat {
+            expression_hat_plane_z() - 0.018
+        } else {
+            face_cover_z
+        };
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_brow_rect.center_x(),
+            right_brow_rect.top_y(),
+            brow_cover_z,
+            right_brow_rect.width,
+            right_brow_rect.height,
+            uv_rect_from_texel_rect(face_cover_texel(right_brow_rect, FaceCoverBias::Above)),
+        );
+        add_expression_panel(
+            out,
+            camera,
+            projection,
+            rect,
+            light_dir,
+            head_pivot,
+            head_rotate_x,
+            right_brow_rect.center_x(),
+            right_brow_rect.top_y() - pose.brow_raise_right * 0.48 + brow_drop,
+            brow_plane_z,
+            right_brow_rect.width,
+            right_brow_rect.height,
+            uv_rect_from_texel_rect(brow.right_brow),
+        );
+        if let (Some(left_brow), Some(left_rect)) = (brow.left_brow, left_brow_rect) {
+            add_expression_panel(
+                out,
+                camera,
+                projection,
+                rect,
+                light_dir,
+                head_pivot,
+                head_rotate_x,
+                left_rect.center_x(),
+                left_rect.top_y(),
+                brow_cover_z,
+                left_rect.width,
+                left_rect.height,
+                uv_rect_from_texel_rect(face_cover_texel(left_rect, FaceCoverBias::Above)),
+            );
+            add_expression_panel(
+                out,
+                camera,
+                projection,
+                rect,
+                light_dir,
+                head_pivot,
+                head_rotate_x,
+                left_rect.center_x(),
+                left_rect.top_y() - pose.brow_raise_left * 0.48 + brow_drop,
+                brow_plane_z,
+                left_rect.width,
+                left_rect.height,
+                uv_rect_from_texel_rect(left_brow),
+            );
+        }
+    }
 }
 
 fn build_motion_blur_scene_samples(
@@ -1544,13 +3288,14 @@ fn build_motion_blur_scene_samples(
     cape_uv: FaceUvs,
     yaw: f32,
     yaw_velocity: f32,
-    time_seconds: f32,
-    walk_phase: f32,
+    preview_pose: PreviewPose,
     shutter_frames: f32,
     sample_count: usize,
     variant: MinecraftSkinVariant,
     preview_3d_layers_enabled: bool,
     show_elytra: bool,
+    expressions_enabled: bool,
+    expression_layout: Option<DetectedExpressionsLayout>,
     skin_sample: Option<Arc<RgbaImage>>,
     cape_sample: Option<Arc<RgbaImage>>,
     default_elytra_sample: Option<Arc<RgbaImage>>,
@@ -1598,15 +3343,22 @@ fn build_motion_blur_scene_samples(
         };
         let time_offset = (sample_t - 0.5) * shutter_seconds;
         let sample_yaw = yaw + time_offset * yaw_velocity;
+        let sample_pose = PreviewPose {
+            time_seconds: preview_pose.time_seconds + time_offset,
+            idle_cycle: ((preview_pose.time_seconds + time_offset) * 1.15).sin(),
+            walk_cycle: ((preview_pose.time_seconds + time_offset) * 3.3).sin(),
+            locomotion_blend: preview_pose.locomotion_blend,
+        };
         let scene = build_character_scene(
             rect,
             cape_uv,
             sample_yaw,
-            time_seconds,
-            walk_phase,
+            sample_pose,
             variant,
             preview_3d_layers_enabled,
             show_elytra,
+            expressions_enabled,
+            expression_layout,
             skin_sample.clone(),
             cape_sample.clone(),
             default_elytra_sample.clone(),
@@ -5493,12 +7245,15 @@ struct SkinManagerState {
     last_preview_motion_blur_sample_count: usize,
     preview_3d_layers_enabled: bool,
     last_preview_3d_layers_enabled: bool,
+    expressions_enabled: bool,
+    last_expressions_enabled: bool,
+    cached_expression_layout_hash: Option<u64>,
+    cached_expression_layout: Option<DetectedExpressionsLayout>,
+    preview_motion_mode: PreviewMotionMode,
+    preview_motion_blend: f32,
     skin_texture_hash: Option<u64>,
     skin_texture: Option<TextureHandle>,
     skin_sample: Option<Arc<RgbaImage>>,
-    animated_skin_texture_hash: Option<u64>,
-    animated_skin_texture: Option<TextureHandle>,
-    animated_skin_sample: Option<Arc<RgbaImage>>,
     cape_texture_hash: Option<u64>,
     cape_texture: Option<TextureHandle>,
     cape_sample: Option<Arc<RgbaImage>>,
@@ -5552,12 +7307,15 @@ impl Default for SkinManagerState {
             last_preview_motion_blur_sample_count: 5,
             preview_3d_layers_enabled: false,
             last_preview_3d_layers_enabled: false,
+            expressions_enabled: false,
+            last_expressions_enabled: false,
+            cached_expression_layout_hash: None,
+            cached_expression_layout: None,
+            preview_motion_mode: PreviewMotionMode::Idle,
+            preview_motion_blend: 0.0,
             skin_texture_hash: None,
             skin_texture: None,
             skin_sample: None,
-            animated_skin_texture_hash: None,
-            animated_skin_texture: None,
-            animated_skin_sample: None,
             cape_texture_hash: None,
             cape_texture: None,
             cape_sample: None,
@@ -5632,14 +7390,13 @@ impl SkinManagerState {
         self.skin_texture_hash = None;
         self.skin_texture = None;
         self.skin_sample = None;
-        self.animated_skin_texture_hash = None;
-        self.animated_skin_texture = None;
-        self.animated_skin_sample = None;
         self.cape_texture_hash = None;
         self.cape_texture = None;
         self.cape_sample = None;
         self.preview_texture = None;
         self.preview_history = None;
+        self.cached_expression_layout_hash = None;
+        self.cached_expression_layout = None;
         self.cape_uv = default_cape_uv_layout();
         self.camera_yaw_offset = 0.0;
         self.camera_inertial_velocity = 0.0;
@@ -5682,14 +7439,13 @@ impl SkinManagerState {
         self.skin_texture_hash = None;
         self.skin_texture = None;
         self.skin_sample = None;
-        self.animated_skin_texture_hash = None;
-        self.animated_skin_texture = None;
-        self.animated_skin_sample = None;
         self.cape_texture_hash = None;
         self.cape_texture = None;
         self.cape_sample = None;
         self.preview_texture = None;
         self.preview_history = None;
+        self.cached_expression_layout_hash = None;
+        self.cached_expression_layout = None;
         self.cape_uv = default_cape_uv_layout();
 
         let mut choices = Vec::with_capacity(account.minecraft_profile.capes.len());
@@ -5842,9 +7598,6 @@ impl SkinManagerState {
                 self.pending_skin_path = Some(path);
                 self.skin_texture_hash = None;
                 self.skin_sample = None;
-                self.animated_skin_texture = None;
-                self.animated_skin_texture_hash = None;
-                self.animated_skin_sample = None;
                 self.preview_texture = None;
                 self.preview_history = None;
             }
@@ -5861,9 +7614,6 @@ impl SkinManagerState {
             self.skin_texture = None;
             self.skin_texture_hash = None;
             self.skin_sample = None;
-            self.animated_skin_texture = None;
-            self.animated_skin_texture_hash = None;
-            self.animated_skin_sample = None;
             return;
         };
 
@@ -5877,9 +7627,6 @@ impl SkinManagerState {
 
         let Some(image) = decode_skin_rgba(bytes) else {
             self.skin_sample = None;
-            self.animated_skin_texture = None;
-            self.animated_skin_texture_hash = None;
-            self.animated_skin_sample = None;
             return;
         };
         let image = Arc::new(image);
@@ -5896,7 +7643,6 @@ impl SkinManagerState {
         self.skin_sample = Some(image);
         self.skin_texture_hash = Some(hash);
     }
-
     fn ensure_default_elytra_texture(&mut self, ctx: &egui::Context) {
         if self.default_elytra_texture.is_some() && self.default_elytra_sample.is_some() {
             return;
@@ -6236,13 +7982,12 @@ impl SkinManagerState {
         self.pending_cape_id = profile.active_cape_id;
         self.skin_texture_hash = None;
         self.skin_sample = None;
-        self.animated_skin_texture_hash = None;
-        self.animated_skin_texture = None;
-        self.animated_skin_sample = None;
         self.cape_texture_hash = None;
         self.cape_sample = None;
         self.preview_texture = None;
         self.preview_history = None;
+        self.cached_expression_layout_hash = None;
+        self.cached_expression_layout = None;
         self.cape_uv = default_cape_uv_layout();
     }
 
@@ -6273,6 +8018,206 @@ impl SkinManagerState {
             .unwrap_or(0.0);
         self.camera_last_frame_time = Some(now);
         dt
+    }
+
+    fn refresh_expression_layout_cache(&mut self) {
+        if !self.expressions_enabled {
+            self.cached_expression_layout_hash = None;
+            self.cached_expression_layout = None;
+            return;
+        }
+        let Some(sample) = self.skin_sample.as_ref() else {
+            self.cached_expression_layout_hash = None;
+            self.cached_expression_layout = None;
+            return;
+        };
+        let hash = hash_rgba_image(sample);
+        if self.cached_expression_layout_hash == Some(hash) {
+            return;
+        }
+        self.cached_expression_layout_hash = Some(hash);
+        self.cached_expression_layout = detect_expression_layout(sample);
+        if let Some(layout) = self.cached_expression_layout {
+            let (right_eye_rect, left_eye_rect) = eye_face_rects(layout.eye);
+            let (right_lid_rect, left_lid_rect) = eye_lid_rects(layout.eye);
+            let right_lid_base_h = right_lid_rect.h as f32;
+            let left_lid_base_h = left_lid_rect.h as f32;
+            let right_upper_travel = (right_eye_rect.height - right_lid_base_h).max(0.0);
+            let left_upper_travel = (left_eye_rect.height - left_lid_base_h).max(0.0);
+            let right_lower_top_min = right_eye_rect.bottom_y() - right_eye_rect.height;
+            let right_lower_top_max = right_eye_rect.bottom_y() - right_lid_base_h;
+            let left_lower_top_min = left_eye_rect.bottom_y() - left_eye_rect.height;
+            let left_lower_top_max = left_eye_rect.bottom_y() - left_lid_base_h;
+            tracing::info!(
+                target: "vertexlauncher/skins_expressions",
+                eye_id = layout.eye.id,
+                eye_family = ?layout.eye.family,
+                eye_offset = ?layout.eye.offset,
+                eye_width = layout.eye.width,
+                eye_height = layout.eye.height,
+                eye_center_y = layout.eye.center_y,
+                right_eye_center_x = layout.eye.right_center_x,
+                left_eye_center_x = layout.eye.left_center_x,
+                right_eye_left = right_eye_rect.left,
+                right_eye_top = right_eye_rect.top_y(),
+                right_eye_bottom = right_eye_rect.bottom_y(),
+                left_eye_left = left_eye_rect.left,
+                left_eye_top = left_eye_rect.top_y(),
+                left_eye_bottom = left_eye_rect.bottom_y(),
+                right_upper_lid_top_min = right_eye_rect.top_y(),
+                right_upper_lid_top_max = right_eye_rect.top_y(),
+                right_upper_lid_height_min = right_lid_base_h,
+                right_upper_lid_height_max = right_eye_rect.height,
+                right_upper_lid_travel = right_upper_travel,
+                right_lid_uv_min_y = uv_rect_from_eyelid_texel_rect(right_lid_rect).min.y,
+                right_lid_uv_max_y = uv_rect_from_eyelid_texel_rect(right_lid_rect).max.y,
+                left_upper_lid_top_min = left_eye_rect.top_y(),
+                left_upper_lid_top_max = left_eye_rect.top_y(),
+                left_upper_lid_height_min = left_lid_base_h,
+                left_upper_lid_height_max = left_eye_rect.height,
+                left_upper_lid_travel = left_upper_travel,
+                left_lid_uv_min_y = uv_rect_from_eyelid_texel_rect(left_lid_rect).min.y,
+                left_lid_uv_max_y = uv_rect_from_eyelid_texel_rect(left_lid_rect).max.y,
+                right_lower_lid_top_min = right_lower_top_min,
+                right_lower_lid_top_max = right_lower_top_max,
+                right_lower_lid_height_min = right_lid_base_h,
+                right_lower_lid_height_max = right_eye_rect.height,
+                left_lower_lid_top_min = left_lower_top_min,
+                left_lower_lid_top_max = left_lower_top_max,
+                left_lower_lid_height_min = left_lid_base_h,
+                left_lower_lid_height_max = left_eye_rect.height,
+                brow_id = layout.brow.map(|b| b.id).unwrap_or("none"),
+                brow_kind = ?layout.brow.map(|b| b.kind),
+                brow_offset = ?layout.brow.map(|b| b.offset),
+                brow_bounds = ?layout.brow.map(|b| brow_face_rects(b)),
+                "Detected expression layout"
+            );
+        } else {
+            tracing::info!(
+                target: "vertexlauncher/skins_expressions",
+                "No supported expression layout detected for current skin sample"
+            );
+        }
+    }
+}
+
+fn detect_expression_layout(image: &RgbaImage) -> Option<DetectedExpressionsLayout> {
+    let eye = SUPPORTED_EYE_SPECS
+        .iter()
+        .copied()
+        .filter_map(|spec| eye_layout_score(image, spec).map(|score| (score, spec)))
+        .max_by(|(score_a, _), (score_b, _)| score_a.total_cmp(score_b))
+        .map(|(_, spec)| spec)?;
+    let brow = SUPPORTED_BROW_SPECS
+        .iter()
+        .copied()
+        .filter_map(|spec| brow_layout_score(image, spec).map(|score| (score, spec)))
+        .max_by(|(score_a, spec_a), (score_b, spec_b)| {
+            score_a.total_cmp(score_b).then_with(|| {
+                compatibility_score(eye, *spec_a).cmp(&compatibility_score(eye, *spec_b))
+            })
+        })
+        .map(|(_, spec)| spec);
+
+    Some(DetectedExpressionsLayout { eye, brow })
+}
+
+fn eye_layout_score(image: &RgbaImage, spec: EyeExpressionSpec) -> Option<f32> {
+    let right_pixels = region_alpha_pixels(image, spec.right_eye);
+    let left_pixels = region_alpha_pixels(image, spec.left_eye);
+    if right_pixels == 0 || left_pixels == 0 {
+        return None;
+    }
+
+    let right_coverage = region_alpha_coverage(image, spec.right_eye);
+    let left_coverage = region_alpha_coverage(image, spec.left_eye);
+    let mut score = right_coverage + left_coverage;
+    score += (right_pixels + left_pixels) as f32 * 0.12;
+    score -= (right_coverage - left_coverage).abs() * 0.35;
+
+    if let (Some(right_white), Some(left_white)) = (spec.right_white, spec.left_white) {
+        let right_white_pixels = region_alpha_pixels(image, right_white);
+        let left_white_pixels = region_alpha_pixels(image, left_white);
+        if right_white_pixels > 0 && left_white_pixels > 0 {
+            score += region_alpha_coverage(image, right_white)
+                + region_alpha_coverage(image, left_white);
+            score += (right_white_pixels + left_white_pixels) as f32 * 0.08;
+        }
+    }
+    if let (Some(right_pupil), Some(left_pupil)) = (spec.right_pupil, spec.left_pupil) {
+        let right_pupil_pixels = region_alpha_pixels(image, right_pupil);
+        let left_pupil_pixels = region_alpha_pixels(image, left_pupil);
+        if right_pupil_pixels > 0 && left_pupil_pixels > 0 {
+            score += region_alpha_coverage(image, right_pupil)
+                + region_alpha_coverage(image, left_pupil);
+            score += (right_pupil_pixels + left_pupil_pixels) as f32 * 0.06;
+        }
+    }
+    if let Some((right_lid, left_lid)) = eye_lid_rects_if_present(spec) {
+        let right_lid_pixels = region_alpha_pixels(image, right_lid);
+        let left_lid_pixels = region_alpha_pixels(image, left_lid);
+        if right_lid_pixels > 0 && left_lid_pixels > 0 {
+            score += (region_alpha_coverage(image, right_lid)
+                + region_alpha_coverage(image, left_lid))
+                * 0.35;
+            score += (right_lid_pixels + left_lid_pixels) as f32 * 0.05;
+        }
+    }
+
+    (score >= 0.18).then_some(score)
+}
+
+fn eye_lid_rects_if_present(spec: EyeExpressionSpec) -> Option<(TextureRectU32, TextureRectU32)> {
+    spec.blink.map(|_| eye_lid_rects(spec))
+}
+
+fn brow_layout_score(image: &RgbaImage, spec: BrowExpressionSpec) -> Option<f32> {
+    let right_pixels = region_alpha_pixels(image, spec.right_brow);
+    if right_pixels == 0 {
+        return None;
+    }
+    let mut score = region_alpha_coverage(image, spec.right_brow) + right_pixels as f32 * 0.1;
+    if let Some(left_brow) = spec.left_brow {
+        let left_pixels = region_alpha_pixels(image, left_brow);
+        if left_pixels == 0 {
+            return None;
+        }
+        score += region_alpha_coverage(image, left_brow) + left_pixels as f32 * 0.1;
+    }
+    Some(score)
+}
+
+fn region_alpha_pixels(image: &RgbaImage, rect: TextureRectU32) -> u32 {
+    let max_x = (rect.x + rect.w).min(image.width());
+    let max_y = (rect.y + rect.h).min(image.height());
+    let mut covered = 0u32;
+    for py in rect.y..max_y {
+        for px in rect.x..max_x {
+            if image.get_pixel(px, py).0[3] > 24 {
+                covered += 1;
+            }
+        }
+    }
+    covered
+}
+
+fn region_alpha_coverage(image: &RgbaImage, rect: TextureRectU32) -> f32 {
+    let max_x = (rect.x + rect.w).min(image.width());
+    let max_y = (rect.y + rect.h).min(image.height());
+    let mut covered = 0u32;
+    let mut total = 0u32;
+    for py in rect.y..max_y {
+        for px in rect.x..max_x {
+            total += 1;
+            if image.get_pixel(px, py).0[3] > 24 {
+                covered += 1;
+            }
+        }
+    }
+    if total == 0 {
+        0.0
+    } else {
+        covered as f32 / total as f32
     }
 }
 

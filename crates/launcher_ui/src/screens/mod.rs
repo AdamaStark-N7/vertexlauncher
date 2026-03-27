@@ -246,6 +246,7 @@ pub fn render(
                 config.skin_preview_motion_blur_shutter_frames(),
                 config.skin_preview_motion_blur_sample_count(),
                 config.skin_preview_3d_layers_enabled(),
+                config.skin_preview_fresh_format_enabled(),
             );
             ScreenOutput::default()
         }

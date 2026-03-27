@@ -836,9 +836,8 @@ pub(super) fn request_modloader_versions(
     let loader = loader_label.to_owned();
     let game = game_version.to_owned();
     let _ = tokio_runtime::spawn_detached(async move {
-        let result =
-            fetch_loader_versions_for_game(loader.as_str(), game.as_str(), force_refresh)
-                .map_err(|err| err.to_string());
+        let result = fetch_loader_versions_for_game(loader.as_str(), game.as_str(), force_refresh)
+            .map_err(|err| err.to_string());
         let _ = tx.send((key, result));
     });
 }

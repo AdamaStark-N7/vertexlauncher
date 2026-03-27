@@ -428,9 +428,9 @@ impl ToggleSettingId {
             },
             ToggleSettingId::SkinPreviewFreshFormatEnabled => ToggleSettingSpec {
                 id: ToggleSettingId::SkinPreviewFreshFormatEnabled,
-                label: "Enable Fresh Skin Format Support",
+                label: "Enable Skin Expressions",
                 info_tooltip: Some(
-                    "Keeps the skin preview compatible with Fresh Moves / Fresh Player Animations style skin layouts without adopting pack-specific limb animation behavior.",
+                    "Animates supported eye and eyebrow layouts in the skin preview using a built-in Rust implementation inspired by Fresh-style expression packs.",
                 ),
             },
             ToggleSettingId::SkinPreview3dLayersEnabled => ToggleSettingSpec {
