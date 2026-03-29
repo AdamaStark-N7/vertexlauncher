@@ -2,12 +2,12 @@ use std::sync::mpsc::Sender;
 
 use crate::error::{AuthError, prefix_auth_error};
 use crate::minecraft::complete_minecraft_login;
-use crate::oauth::{oauth_tenant, poll_for_microsoft_token, request_device_code};
+use crate::oauth::{device_code_credentials, poll_for_microsoft_token, request_device_code};
 use crate::types::{DeviceCodePrompt, LoginEvent};
 use crate::util::build_http_agent;
 
 pub(crate) fn run_device_code_login(
-    client_id: String,
+    _client_id: String,
     sender: &Sender<LoginEvent>,
 ) -> Result<(), AuthError> {
     tracing::info!(
@@ -15,7 +15,7 @@ pub(crate) fn run_device_code_login(
         "starting device-code login worker"
     );
     let agent = build_http_agent();
-    let tenant = oauth_tenant();
+    let (client_id, tenant) = device_code_credentials();
 
     let device_code = request_device_code(&agent, &client_id, &tenant)
         .map_err(|err| prefix_auth_error("RequestDeviceCode", err))?;
@@ -31,7 +31,7 @@ pub(crate) fn run_device_code_login(
     let _ = sender.send(LoginEvent::DeviceCode(prompt));
 
     let microsoft_token =
-        poll_for_microsoft_token(&agent, &client_id, &tenant, &device_code, sender)
+        poll_for_microsoft_token(&agent, client_id.as_str(), &tenant, &device_code, sender)
             .map_err(|err| prefix_auth_error("PollForMicrosoftToken", err))?;
 
     let account = complete_minecraft_login(

@@ -8,8 +8,9 @@ use url::Url;
 use zeroize::Zeroizing;
 
 use crate::constants::{
-    BUILTIN_MICROSOFT_TENANT, DEVICE_CODE_SCOPE, LIVE_AUTHORIZE_URL, LIVE_REDIRECT_URI, LIVE_SCOPE,
-    LIVE_TOKEN_URL, OAUTH_BASE_URL,
+    BUILTIN_DEVICE_CODE_CLIENT_ID, BUILTIN_DEVICE_CODE_TENANT, BUILTIN_MICROSOFT_TENANT,
+    DEVICE_CODE_SCOPE, LIVE_AUTHORIZE_URL, LIVE_REDIRECT_URI, LIVE_SCOPE, LIVE_TOKEN_URL,
+    OAUTH_BASE_URL,
 };
 use crate::error::{AuthError, map_http_error};
 use crate::types::{LoginEvent, MinecraftLoginFlow};
@@ -204,7 +205,7 @@ fn capture_oauth_pair(
 }
 
 pub(crate) fn request_device_code(
-    agent: &ureq::Agent,
+    _agent: &ureq::Agent,
     client_id: &str,
     tenant: &str,
 ) -> Result<DeviceCodeResponse, AuthError> {
@@ -215,17 +216,24 @@ pub(crate) fn request_device_code(
         "requesting Microsoft device code"
     );
     let url = device_code_url(tenant);
-    let response = agent
+    let permissive_agent = ureq::config::Config::builder()
+        .http_status_as_error(false)
+        .build()
+        .new_agent();
+    let response = permissive_agent
         .post(&url)
         .header("Accept", "application/json")
-        .send_form([("client_id", client_id), ("scope", DEVICE_CODE_SCOPE)]);
+        .send_form([("client_id", client_id), ("scope", DEVICE_CODE_SCOPE)])
+        .map_err(map_http_error)?;
 
-    match response {
-        Ok(ok) => Ok(ok.into_json::<DeviceCodeResponse>()?),
-        Err(ureq::Error::StatusCode(code)) => Err(AuthError::Http(format!(
-            "HTTP status {code} while requesting device code"
-        ))),
-        Err(err) => Err(map_http_error(err)),
+    let status = response.status();
+    if status.is_success() {
+        Ok(response.into_json::<DeviceCodeResponse>()?)
+    } else {
+        let body = response.into_string().unwrap_or_default();
+        Err(AuthError::Http(format!(
+            "HTTP {status} while requesting device code: {body}"
+        )))
     }
 }
 
@@ -293,6 +301,20 @@ pub(crate) fn oauth_tenant() -> String {
                 builtin.to_owned()
             }
         })
+}
+
+pub(crate) fn device_code_credentials() -> (String, String) {
+    let client_id = std::env::var("VERTEX_DEVICE_CODE_CLIENT_ID")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| BUILTIN_DEVICE_CODE_CLIENT_ID.to_owned());
+    let tenant = std::env::var("VERTEX_DEVICE_CODE_TENANT")
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| BUILTIN_DEVICE_CODE_TENANT.to_owned());
+    (client_id, tenant)
 }
 
 fn device_code_url(tenant: &str) -> String {

@@ -366,6 +366,7 @@ impl VertexApp {
                 status_message: self.auth.status_message(),
                 accounts: &profile_accounts,
                 user_instance_active,
+                device_code_prompt: self.auth.device_code_prompt(),
             },
         );
         if self.active_screen != screens::AppScreen::Instance {
@@ -376,8 +377,20 @@ impl VertexApp {
             );
         }
 
-        if top_bar_output.start_sign_in {
-            self.auth.start_sign_in();
+        if top_bar_output.start_webview_sign_in {
+            self.auth.start_webview_sign_in();
+        }
+        if top_bar_output.start_device_code_sign_in {
+            self.auth.start_device_code_sign_in();
+        }
+        if top_bar_output.open_device_code_browser {
+            if let Some(prompt) = self.auth.device_code_prompt() {
+                let url = prompt
+                    .verification_uri_complete
+                    .clone()
+                    .unwrap_or_else(|| prompt.verification_uri.clone());
+                let _ = launcher_ui::desktop::open_url(&url);
+            }
         }
         let mut account_switched = false;
         if let Some(profile_id) = top_bar_output.select_account_id.as_deref() {

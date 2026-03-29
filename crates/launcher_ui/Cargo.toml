@@ -30,6 +30,7 @@ bytemuck = { version = "*", features = ["derive"] }
 ureq.workspace = true
 flate2 = "*"
 base64.workspace = true
+qrcode.workspace = true
 tar = "*"
 xz2 = "*"
 vtmpack.workspace = true

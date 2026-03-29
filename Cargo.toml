@@ -47,6 +47,7 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 url = "2.5.8"
 ureq = { version = "3.3.0", features = ["json"] }
+qrcode = "0.14"
 
 # internal crates
 app_paths = { path = "crates/app_paths" }

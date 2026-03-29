@@ -29,3 +29,8 @@ pub(crate) const LEGACY_ACCOUNT_CACHE_PATH: &str = "account_cache.json";
 pub const BUILTIN_MICROSOFT_CLIENT_ID: &str = "00000000402b5328";
 /// Built-in OAuth tenant used when `VERTEX_MSA_TENANT` is not set.
 pub const BUILTIN_MICROSOFT_TENANT: &str = "consumers";
+
+/// Built-in client ID for device code sign-in. Overridden by `VERTEX_DEVICE_CODE_CLIENT_ID`.
+pub const BUILTIN_DEVICE_CODE_CLIENT_ID: &str = "2a674004-0bc7-4136-b863-def55befdfa2";
+/// Built-in tenant for device code sign-in. Overridden by `VERTEX_DEVICE_CODE_TENANT`.
+pub const BUILTIN_DEVICE_CODE_TENANT: &str = "consumers";

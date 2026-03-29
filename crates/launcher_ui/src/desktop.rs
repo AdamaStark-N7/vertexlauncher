@@ -4,6 +4,62 @@ use std::{
     process::{Command, Stdio},
 };
 
+pub fn open_url(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        return std::process::Command::new("cmd")
+            .args(["/c", "start", "", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        return std::process::Command::new("open")
+            .arg(url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| e.to_string());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if Path::new("/.flatpak-info").exists() {
+            return std::process::Command::new("flatpak-spawn")
+                .args(["--host", "xdg-open", url])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string());
+        }
+        for program in ["xdg-open", "gio open", "kde-open"] {
+            let mut parts = program.split_whitespace();
+            let cmd = parts.next().unwrap();
+            let mut command = std::process::Command::new(cmd);
+            command.args(parts).arg(url)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            if let Ok(_) = command.spawn() {
+                return Ok(());
+            }
+        }
+        return Err("no supported URL opener found".to_owned());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening URLs is not supported on this platform".to_owned())
+}
+
 pub fn open_in_file_manager(path: &Path) -> Result<(), String> {
     if !path.exists() {
         return Err(format!("path does not exist: {}", path.display()));

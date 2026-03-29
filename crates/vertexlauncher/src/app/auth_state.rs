@@ -1,4 +1,4 @@
-use auth::{CachedAccount, CachedAccountRenewalEvent, CachedAccountsState};
+use auth::{CachedAccount, CachedAccountRenewalEvent, CachedAccountsState, DeviceCodeLoginFlow, DeviceCodePrompt, LoginEvent};
 use launcher_runtime as tokio_runtime;
 use launcher_ui::{notification, privacy};
 use std::collections::hash_map::DefaultHasher;
@@ -18,6 +18,7 @@ pub enum AuthUiStatus {
     RefreshingActiveSession,
     Starting,
     AwaitingBrowser,
+    AwaitingDeviceCode(String),
     WaitingForAuthorization,
     Error(String),
 }
@@ -32,6 +33,7 @@ impl AuthUiStatus {
             AuthUiStatus::AwaitingBrowser => {
                 Some("Complete sign-in in the Microsoft webview window...")
             }
+            AuthUiStatus::AwaitingDeviceCode(message) => Some(message.as_str()),
             AuthUiStatus::WaitingForAuthorization => Some("Finalizing sign-in..."),
             AuthUiStatus::Error(message) => Some(message.as_str()),
         }
@@ -107,6 +109,8 @@ pub struct AuthState {
     avatar_loads_in_flight: HashSet<String>,
     active_avatar_png: Option<Vec<u8>>,
     flow: Option<Receiver<AuthFlowEvent>>,
+    device_code_flow: Option<DeviceCodeLoginFlow>,
+    device_code_prompt: Option<DeviceCodePrompt>,
     renewal: Option<Receiver<RenewalResult>>,
     streamer_mode: bool,
     status: AuthUiStatus,
@@ -134,6 +138,8 @@ impl AuthState {
             avatar_loads_in_flight: HashSet::new(),
             active_avatar_png,
             flow: None,
+            device_code_flow: None,
+            device_code_prompt: None,
             renewal: None,
             streamer_mode,
             status,
@@ -329,10 +335,60 @@ impl AuthState {
         if flow_finished {
             self.flow = None;
         }
+
+        if let Some(device_flow) = self.device_code_flow.as_mut() {
+            let mut device_flow_finished = false;
+            for event in device_flow.poll_events() {
+                match event {
+                    LoginEvent::DeviceCode(prompt) => {
+                        self.status = AuthUiStatus::AwaitingDeviceCode(format!(
+                            "Go to {} and enter code: {}",
+                            prompt.verification_uri, prompt.user_code
+                        ));
+                        self.device_code_prompt = Some(prompt);
+                    }
+                    LoginEvent::WaitingForAuthorization => {
+                        self.status = AuthUiStatus::WaitingForAuthorization;
+                    }
+                    LoginEvent::Completed(account) => {
+                        self.failed_account_errors
+                            .remove(&account.minecraft_profile.id);
+                        self.accounts_state.upsert_and_activate(account);
+                        self.sync_account_avatar_cache();
+                        self.rebuild_active_avatar_png();
+                        self.status = AuthUiStatus::Idle;
+
+                        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+                            let message = format!(
+                                "Sign-in succeeded, but failed to cache account state: {err}"
+                            );
+                            if is_nonfatal_account_cache_error(message.as_str()) {
+                                notification::warn!("auth", "{message}");
+                            } else {
+                                notification::error!("auth", "{message}");
+                                self.status = AuthUiStatus::Error(message);
+                            }
+                        }
+
+                        device_flow_finished = true;
+                        self.schedule_missing_avatars();
+                    }
+                    LoginEvent::Failed(err) => {
+                        notification::error!("auth", "{err}");
+                        self.status = AuthUiStatus::Error(err);
+                        device_flow_finished = true;
+                    }
+                }
+            }
+            if device_flow_finished {
+                self.device_code_flow = None;
+                self.device_code_prompt = None;
+            }
+        }
     }
 
-    pub fn start_sign_in(&mut self) {
-        if self.flow.is_some() || self.renewal.is_some() {
+    pub fn start_webview_sign_in(&mut self) {
+        if self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
             return;
         }
 
@@ -352,6 +408,23 @@ impl AuthState {
         });
 
         self.flow = Some(receiver);
+    }
+
+    pub fn start_device_code_sign_in(&mut self) {
+        if self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
+            return;
+        }
+
+        let client_id = match microsoft_client_id() {
+            Ok(client_id) => client_id,
+            Err(err) => {
+                self.status = AuthUiStatus::Error(err);
+                return;
+            }
+        };
+
+        self.status = AuthUiStatus::Starting;
+        self.device_code_flow = Some(auth::start_device_code_login(client_id));
     }
 
     pub fn select_account(&mut self, profile_id: &str) {
@@ -486,7 +559,7 @@ impl AuthState {
     }
 
     pub fn sign_in_in_progress(&self) -> bool {
-        self.flow.is_some()
+        self.flow.is_some() || self.device_code_flow.is_some()
     }
 
     pub fn set_streamer_mode(&mut self, enabled: bool) {
@@ -494,7 +567,7 @@ impl AuthState {
     }
 
     pub fn auth_busy(&self) -> bool {
-        self.flow.is_some() || self.renewal.is_some()
+        self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some()
     }
 
     pub fn token_refresh_in_progress(&self) -> bool {
@@ -556,6 +629,10 @@ impl AuthState {
 
     pub fn status_message(&self) -> Option<&str> {
         self.status.status_message()
+    }
+
+    pub fn device_code_prompt(&self) -> Option<&DeviceCodePrompt> {
+        self.device_code_prompt.as_ref()
     }
 
     pub fn account_entries(&self) -> Vec<AccountUiEntry> {

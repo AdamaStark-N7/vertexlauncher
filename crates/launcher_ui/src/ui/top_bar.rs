@@ -10,7 +10,7 @@ use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use textui::{ButtonOptions, LabelOptions, TextUi};
 
 use crate::{
-    assets, privacy,
+    assets, desktop, privacy,
     ui::{components::icon_button, style},
 };
 
@@ -29,7 +29,9 @@ const PROFILE_BUTTON_CORNER_RADIUS: u8 = 10;
 
 #[derive(Debug, Clone, Default)]
 pub struct TopBarOutput {
-    pub start_sign_in: bool,
+    pub start_webview_sign_in: bool,
+    pub start_device_code_sign_in: bool,
+    pub open_device_code_browser: bool,
     pub select_account_id: Option<String>,
     pub remove_account_id: Option<String>,
     pub refresh_account_id: Option<String>,
@@ -55,6 +57,7 @@ pub struct ProfileUiModel<'a> {
     pub status_message: Option<&'a str>,
     pub accounts: &'a [ProfileAccountOption],
     pub user_instance_active: bool,
+    pub device_code_prompt: Option<&'a auth::DeviceCodePrompt>,
 }
 
 pub fn render(
@@ -144,7 +147,7 @@ pub fn render(
                     let direct_sign_in = profile_ui.display_name.is_none() && !profile_ui.auth_busy;
                     if direct_sign_in {
                         if profile_response.clicked() {
-                            output.start_sign_in = true;
+                            output.start_webview_sign_in = true;
                         }
                     } else {
                         let profile_popup_id = ui.id().with("profile_selector_popup");
@@ -523,6 +526,197 @@ fn apply_text_color(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
     svg.into_bytes()
 }
 
+fn render_device_code_section(
+    ui: &mut egui::Ui,
+    text_ui: &mut TextUi,
+    prompt: &auth::DeviceCodePrompt,
+    output: &mut TopBarOutput,
+    full_action_width: f32,
+    button_style: &ButtonOptions,
+) {
+    let qr_url = prompt
+        .verification_uri_complete
+        .as_deref()
+        .unwrap_or(prompt.verification_uri.as_str());
+
+    // Instructional text — wraps naturally, normal size
+    let instruction_style = LabelOptions {
+        color: ui.visuals().text_color(),
+        wrap: true,
+        ..LabelOptions::default()
+    };
+    let _ = text_ui.label(
+        ui,
+        "device_code_instruction",
+        "You can either scan this QR code and sign-in on another device, or copy the code below and sign in on this device...",
+        &instruction_style,
+    );
+
+    // QR code: pre-allocate exact rect so nothing can expand outward
+    let qr_size = (full_action_width * 0.7).clamp(120.0, 220.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(full_action_width, qr_size),
+        Layout::top_down(Align::Center),
+        |ui| {
+            render_qr_code(ui, qr_url, qr_size);
+        },
+    );
+
+    // Code row: build style then measure actual rendered size to drive layout
+    let base = LabelOptions::default();
+    let code_label_style = LabelOptions {
+        font_size: base.font_size * 1.25,
+        line_height: base.line_height * 1.25,
+        weight: 700,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..base
+    };
+    let code_text_size = text_ui.measure_text_size(ui, prompt.user_code.as_str(), &code_label_style);
+    let code_row_height = code_text_size.y + style::SPACE_MD * 2.0;
+    let code_box_width = code_text_size.x + style::SPACE_MD * 2.0;
+    let copy_btn_size = code_row_height; // square button matching row height
+    let total_row_width = code_box_width + copy_btn_size;
+
+    let cr = style::CORNER_RADIUS_SM;
+    let box_radius = egui::CornerRadius { nw: cr, sw: cr, ne: 0, se: 0 };
+    let btn_radius = egui::CornerRadius { nw: 0, sw: 0, ne: cr, se: cr };
+
+    // Outer container centers the joined control horizontally
+    ui.allocate_ui_with_layout(
+        egui::vec2(full_action_width, code_row_height),
+        Layout::top_down(Align::Center),
+        |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(total_row_width, code_row_height),
+                Layout::right_to_left(Align::Center),
+                |ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+
+                    // Copy SVG icon button — square, right-rounded
+                    let text_color = ui.visuals().text_color();
+                    let themed_svg = apply_text_color(assets::COPY_SVG, text_color);
+                    let uri = format!(
+                        "bytes://vertex-topbar/device-code-copy-{:02x}{:02x}{:02x}.svg",
+                        text_color.r(), text_color.g(), text_color.b()
+                    );
+                    let icon_size = (copy_btn_size - style::SPACE_MD * 2.0).clamp(12.0, 28.0);
+                    let (btn_rect, btn_response) = ui.allocate_exact_size(
+                        egui::vec2(copy_btn_size, code_row_height),
+                        egui::Sense::click(),
+                    );
+                    let base_fill = ui.visuals().widgets.noninteractive.bg_fill;
+                    let btn_fill = if btn_response.is_pointer_button_down_on() {
+                        ui.visuals().widgets.active.bg_fill
+                    } else if btn_response.hovered() {
+                        ui.visuals().widgets.hovered.bg_fill
+                    } else {
+                        base_fill
+                    };
+                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                    ui.painter().rect(
+                        btn_rect,
+                        btn_radius,
+                        btn_fill,
+                        egui::Stroke::new(1.0, stroke_color),
+                        egui::StrokeKind::Inside,
+                    );
+                    // Paint icon centered in the button rect — paint_at bypasses the cursor
+                    let icon_rect = egui::Rect::from_center_size(
+                        btn_rect.center(),
+                        egui::vec2(icon_size, icon_size),
+                    );
+                    egui::Image::from_bytes(uri, themed_svg)
+                        .paint_at(ui, icon_rect);
+                    if btn_response.clicked() {
+                        ui.ctx().copy_text(prompt.user_code.clone());
+                    }
+
+                    // Code display box — sized to fit text, left-rounded right-flat
+                    let (box_rect, _) = ui.allocate_exact_size(
+                        egui::vec2(code_box_width, code_row_height),
+                        egui::Sense::hover(),
+                    );
+                    ui.painter().rect(
+                        box_rect,
+                        box_radius,
+                        ui.visuals().widgets.noninteractive.bg_fill,
+                        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                        egui::StrokeKind::Inside,
+                    );
+                    let inner = box_rect.shrink2(egui::vec2(style::SPACE_MD, 0.0));
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            let _ = text_ui.label(
+                                ui,
+                                "device_code_user_code",
+                                prompt.user_code.as_str(),
+                                &code_label_style,
+                            );
+                        });
+                    });
+                },
+            );
+        },
+    );
+
+    // Open in browser — full width
+    let mut browser_button_style = button_style.clone();
+    browser_button_style.min_size = egui::vec2(full_action_width, style::CONTROL_HEIGHT);
+    if text_ui
+        .button(
+            ui,
+            "device_code_open_browser",
+            "Open Sign-in Window in Default Browser",
+            &browser_button_style,
+        )
+        .clicked()
+    {
+        output.open_device_code_browser = true;
+    }
+}
+
+fn render_qr_code(ui: &mut egui::Ui, text: &str, size: f32) {
+    use qrcode::QrCode;
+    use qrcode::types::Color;
+
+    let Ok(code) = QrCode::new(text.as_bytes()) else {
+        return;
+    };
+
+    let module_count = code.width();
+    let colors = code.to_colors();
+
+    let pixels: Vec<egui::Color32> = colors
+        .iter()
+        .map(|c| {
+            if *c == Color::Dark {
+                egui::Color32::BLACK
+            } else {
+                egui::Color32::WHITE
+            }
+        })
+        .collect();
+
+    let color_image = egui::ColorImage {
+        size: [module_count, module_count],
+        pixels,
+        source_size: egui::Vec2::new(module_count as f32, module_count as f32),
+    };
+
+    let texture_name = format!("qr_code_{}", text.len());
+    let texture = ui.ctx().load_texture(
+        texture_name,
+        color_image,
+        egui::TextureOptions::NEAREST,
+    );
+
+    let image = egui::Image::from_texture(egui::load::SizedTexture::from_handle(&texture))
+        .fit_to_exact_size(egui::vec2(size, size))
+        .corner_radius(egui::CornerRadius::same(4));
+    ui.add(image);
+}
+
 fn render_profile_popup(
     ui: &mut egui::Ui,
     text_ui: &mut TextUi,
@@ -586,10 +780,17 @@ fn render_profile_popup(
                 );
             }
 
-            if let Some(message) = profile_ui.status_message {
-                let _ = text_ui.label(ui, "profile_popup_status", message, &muted_style);
+                    if profile_ui.device_code_prompt.is_none() {
+                if let Some(message) = profile_ui.status_message {
+                    let _ = text_ui.label(ui, "profile_popup_status", message, &muted_style);
+                }
             }
         });
+
+    if let Some(prompt) = profile_ui.device_code_prompt {
+        render_device_code_section(ui, text_ui, prompt, output, full_action_width, &button_style);
+        return;
+    }
 
     if !profile_ui.accounts.is_empty() {
         ui.add_space(style::SPACE_XS / 2.0);
@@ -616,72 +817,87 @@ fn render_profile_popup(
                 refresh_button_style.min_size = egui::vec2(78.0, style::CONTROL_HEIGHT);
 
                 for account in profile_ui.accounts {
-                    ui.horizontal(|ui| {
-                        let label = if account.is_active && account.is_failed {
-                            format!(
-                                "{} (Failed)",
-                                privacy::redact_account_label(
-                                    profile_ui.streamer_mode,
-                                    account.display_name.as_str()
-                                )
-                            )
-                        } else if account.is_active {
-                            format!(
-                                "{} (Active)",
-                                privacy::redact_account_label(
-                                    profile_ui.streamer_mode,
-                                    account.display_name.as_str()
-                                )
-                            )
-                        } else {
+                    let label = if account.is_active && account.is_failed {
+                        format!(
+                            "{} (Failed)",
                             privacy::redact_account_label(
                                 profile_ui.streamer_mode,
-                                account.display_name.as_str(),
+                                account.display_name.as_str()
                             )
-                            .into_owned()
-                        };
-
-                        if text_ui
-                            .selectable_button(
-                                ui,
-                                ("profile_popup_account_select", &account.profile_id),
-                                &label,
-                                account.is_active,
-                                &list_button_style,
+                        )
+                    } else if account.is_active {
+                        format!(
+                            "{} (Active)",
+                            privacy::redact_account_label(
+                                profile_ui.streamer_mode,
+                                account.display_name.as_str()
                             )
-                            .clicked()
-                        {
-                            output.select_account_id = Some(account.profile_id.clone());
-                        }
+                        )
+                    } else {
+                        privacy::redact_account_label(
+                            profile_ui.streamer_mode,
+                            account.display_name.as_str(),
+                        )
+                        .into_owned()
+                    };
 
-                        if text_ui
-                            .button(
-                                ui,
-                                ("profile_popup_account_remove", &account.profile_id),
-                                "Remove",
-                                &remove_button_style,
-                            )
-                            .clicked()
-                        {
-                            output.remove_account_id = Some(account.profile_id.clone());
-                        }
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), style::CONTROL_HEIGHT),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            if account.is_failed
+                                && ui
+                                    .add_enabled_ui(!profile_ui.auth_busy, |ui| {
+                                        text_ui.button(
+                                            ui,
+                                            ("profile_popup_account_refresh", &account.profile_id),
+                                            "Refresh",
+                                            &refresh_button_style,
+                                        )
+                                    })
+                                    .inner
+                                    .clicked()
+                            {
+                                output.refresh_account_id = Some(account.profile_id.clone());
+                            }
 
-                        if account.is_failed
-                            && ui
-                                .add_enabled_ui(!profile_ui.auth_busy, |ui| {
-                                    text_ui.button(
-                                        ui,
-                                        ("profile_popup_account_refresh", &account.profile_id),
-                                        "Refresh",
-                                        &refresh_button_style,
-                                    )
-                                })
-                                .inner
+                            if text_ui
+                                .button(
+                                    ui,
+                                    ("profile_popup_account_remove", &account.profile_id),
+                                    "Remove",
+                                    &remove_button_style,
+                                )
                                 .clicked()
-                        {
-                            output.refresh_account_id = Some(account.profile_id.clone());
-                        }
-                    });
+                            {
+                                output.remove_account_id = Some(account.profile_id.clone());
+                            }
+
+                            ui.with_layout(
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |ui| {
+                                    let mut fill_style = list_button_style.clone();
+                                    fill_style.min_size.x = ui.available_width().max(1.0);
+                                    if text_ui
+                                        .selectable_button(
+                                            ui,
+                                            (
+                                                "profile_popup_account_select",
+                                                &account.profile_id,
+                                            ),
+                                            &label,
+                                            account.is_active,
+                                            &fill_style,
+                                        )
+                                        .clicked()
+                                    {
+                                        output.select_account_id =
+                                            Some(account.profile_id.clone());
+                                    }
+                                },
+                            );
+                        },
+                    );
                 }
             });
     }
@@ -714,17 +930,43 @@ fn render_profile_popup(
                 true,
             );
         });
-    } else if text_ui
-        .button(
-            ui,
-            "profile_popup_signin_action",
-            "Sign in",
-            &primary_button_style,
-        )
-        .clicked()
-    {
-        output.start_sign_in = true;
-        egui::Popup::open_id(ui.ctx(), popup_id);
+    } else {
+        let half_width =
+            (full_action_width - ui.spacing().item_spacing.x) / 2.0;
+        let mut half_button_style = primary_button_style.clone();
+        half_button_style.min_size = egui::vec2(half_width.max(1.0), style::CONTROL_HEIGHT);
+
+        ui.allocate_ui_with_layout(
+            egui::vec2(full_action_width, style::CONTROL_HEIGHT),
+            egui::Layout::left_to_right(egui::Align::Center),
+            |ui| {
+                if text_ui
+                    .button(
+                        ui,
+                        "profile_popup_signin_webview",
+                        "Webview Sign-in",
+                        &half_button_style,
+                    )
+                    .clicked()
+                {
+                    output.start_webview_sign_in = true;
+                    egui::Popup::open_id(ui.ctx(), popup_id);
+                }
+
+                if text_ui
+                    .button(
+                        ui,
+                        "profile_popup_signin_device_code",
+                        "Device Code Sign-in",
+                        &half_button_style,
+                    )
+                    .clicked()
+                {
+                    output.start_device_code_sign_in = true;
+                    egui::Popup::open_id(ui.ctx(), popup_id);
+                }
+            },
+        );
     }
 }
 
