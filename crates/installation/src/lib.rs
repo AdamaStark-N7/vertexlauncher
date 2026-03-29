@@ -1763,6 +1763,10 @@ fn build_launch_context(
     substitutions.insert("user_properties".to_owned(), "{}".to_owned());
     substitutions.insert("classpath".to_owned(), classpath.to_owned());
     substitutions.insert(
+        "classpath_separator".to_owned(),
+        classpath_separator().to_owned(),
+    );
+    substitutions.insert(
         "library_directory".to_owned(),
         display_user_path(instance_root.join("libraries").as_path()),
     );
