@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::webview_sign_in;
 
@@ -111,6 +111,7 @@ pub struct AuthState {
     flow: Option<Receiver<AuthFlowEvent>>,
     device_code_flow: Option<DeviceCodeLoginFlow>,
     device_code_prompt: Option<DeviceCodePrompt>,
+    device_code_expiry: Option<Instant>,
     renewal: Option<Receiver<RenewalResult>>,
     streamer_mode: bool,
     status: AuthUiStatus,
@@ -140,6 +141,7 @@ impl AuthState {
             flow: None,
             device_code_flow: None,
             device_code_prompt: None,
+            device_code_expiry: None,
             renewal: None,
             streamer_mode,
             status,
@@ -336,6 +338,18 @@ impl AuthState {
             self.flow = None;
         }
 
+        // Proactively restart device code flow when the code expires
+        if self.device_code_flow.is_some()
+            && self
+                .device_code_expiry
+                .is_some_and(|exp| exp <= Instant::now())
+        {
+            self.device_code_flow = None;
+            self.device_code_prompt = None;
+            self.device_code_expiry = None;
+            self.restart_device_code_sign_in();
+        }
+
         if let Some(device_flow) = self.device_code_flow.as_mut() {
             let mut device_flow_finished = false;
             for event in device_flow.poll_events() {
@@ -345,6 +359,8 @@ impl AuthState {
                             "Go to {} and enter code: {}",
                             prompt.verification_uri, prompt.user_code
                         ));
+                        self.device_code_expiry =
+                            Some(Instant::now() + Duration::from_secs(prompt.expires_in_secs));
                         self.device_code_prompt = Some(prompt);
                     }
                     LoginEvent::WaitingForAuthorization => {
@@ -374,15 +390,30 @@ impl AuthState {
                         self.schedule_missing_avatars();
                     }
                     LoginEvent::Failed(err) => {
-                        notification::error!("auth", "{err}");
-                        self.status = AuthUiStatus::Error(err);
-                        device_flow_finished = true;
+                        let expired = self
+                            .device_code_expiry
+                            .is_some_and(|exp| exp <= Instant::now());
+                        if expired {
+                            // Code timed out — restart silently with a fresh code
+                            device_flow_finished = true;
+                        } else {
+                            notification::error!("auth", "{err}");
+                            self.status = AuthUiStatus::Error(err);
+                            device_flow_finished = true;
+                        }
                     }
                 }
             }
             if device_flow_finished {
+                let should_restart = self
+                    .device_code_expiry
+                    .is_some_and(|exp| exp <= Instant::now());
                 self.device_code_flow = None;
                 self.device_code_prompt = None;
+                self.device_code_expiry = None;
+                if should_restart {
+                    self.restart_device_code_sign_in();
+                }
             }
         }
     }
@@ -633,6 +664,19 @@ impl AuthState {
 
     pub fn device_code_prompt(&self) -> Option<&DeviceCodePrompt> {
         self.device_code_prompt.as_ref()
+    }
+
+    pub fn cancel_device_code_sign_in(&mut self) {
+        self.device_code_flow = None;
+        self.device_code_prompt = None;
+        self.device_code_expiry = None;
+        self.status = AuthUiStatus::Idle;
+    }
+
+    fn restart_device_code_sign_in(&mut self) {
+        self.status = AuthUiStatus::Starting;
+        // client_id is ignored by the device-code flow worker; it uses its own credentials
+        self.device_code_flow = Some(auth::start_device_code_login(""));
     }
 
     pub fn account_entries(&self) -> Vec<AccountUiEntry> {

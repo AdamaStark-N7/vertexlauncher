@@ -377,6 +377,9 @@ impl VertexApp {
         if top_bar_output.start_device_code_sign_in {
             self.auth.start_device_code_sign_in();
         }
+        if top_bar_output.cancel_device_code_sign_in {
+            self.auth.cancel_device_code_sign_in();
+        }
         if top_bar_output.open_device_code_browser {
             if let Some(prompt) = self.auth.device_code_prompt() {
                 let url = prompt
