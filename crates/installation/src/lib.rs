@@ -917,6 +917,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         instance_root.as_path(),
         profile_id.as_str(),
         request.game_version.as_str(),
+        main_class.as_str(),
         &profile_chain,
     )?;
     let classpath = prepare_launch_classpath(
@@ -992,10 +993,23 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         command.arg(arg);
     }
 
-    let command_args = command
+    let raw_args: Vec<std::borrow::Cow<str>> = command
         .get_args()
-        .map(|arg| quote_command_arg(arg.to_string_lossy().as_ref()))
-        .collect::<Vec<_>>();
+        .map(|arg| arg.to_string_lossy())
+        .collect();
+    let mut command_args: Vec<String> = Vec::with_capacity(raw_args.len());
+    let mut redact_next = false;
+    for arg in &raw_args {
+        if redact_next {
+            command_args.push("[redacted]".to_owned());
+            redact_next = false;
+        } else {
+            command_args.push(quote_command_arg(arg.as_ref()));
+            if arg.as_ref() == "--accessToken" {
+                redact_next = true;
+            }
+        }
+    }
     let _ = writeln!(
         command_log,
         "[vertexlauncher] Command: {} {}",
@@ -1450,6 +1464,7 @@ fn build_classpath_entries(
     instance_root: &Path,
     profile_id: &str,
     game_version: &str,
+    main_class: &str,
     chain: &[serde_json::Value],
 ) -> Result<Vec<PathBuf>, InstallationError> {
     let mut classpath = Vec::<PathBuf>::new();
@@ -1493,21 +1508,29 @@ fn build_classpath_entries(
         .join("versions")
         .join(profile_id)
         .join(format!("{profile_id}.jar"));
-    let fallback_jar = instance_root
-        .join("versions")
-        .join(game_version)
-        .join(format!("{game_version}.jar"));
-    let selected_jar = if launch_jar.exists() {
-        launch_jar
-    } else if fallback_jar.exists() {
-        fallback_jar
+    if launch_jar.exists() {
+        classpath.push(launch_jar);
     } else {
-        return Err(InstallationError::LaunchFileMissing {
-            profile_id: profile_id.to_owned(),
-            path: launch_jar.display().to_string(),
-        });
-    };
-    classpath.push(selected_jar);
+        // Forge 1.17+ (BootstrapLauncher) and NeoForge use the JPMS module system.
+        // They load game classes via JarJar/FML — adding the vanilla jar to the
+        // classpath would create a duplicate module (_1._20._1 vs minecraft) and
+        // crash at startup. Skip the game jar entirely for these loaders.
+        let uses_bootstrap_launcher = main_class.contains("BootstrapLauncher");
+        if !uses_bootstrap_launcher {
+            let fallback_jar = instance_root
+                .join("versions")
+                .join(game_version)
+                .join(format!("{game_version}.jar"));
+            if fallback_jar.exists() {
+                classpath.push(fallback_jar);
+            } else {
+                return Err(InstallationError::LaunchFileMissing {
+                    profile_id: profile_id.to_owned(),
+                    path: launch_jar.display().to_string(),
+                });
+            }
+        }
+    }
     Ok(classpath)
 }
 
@@ -1754,6 +1777,17 @@ fn build_launch_context(
         display_user_path(instance_root.join("assets").as_path()),
     );
     substitutions.insert("assets_index_name".to_owned(), assets_index_name.to_owned());
+    // Legacy token used by pre-1.13 minecraftArguments as --assetsDir value.
+    substitutions.insert(
+        "game_assets".to_owned(),
+        display_user_path(
+            instance_root
+                .join("assets")
+                .join("virtual")
+                .join(assets_index_name)
+                .as_path(),
+        ),
+    );
     substitutions.insert("auth_uuid".to_owned(), uuid.to_owned());
     substitutions.insert("auth_access_token".to_owned(), access_token.to_owned());
     substitutions.insert("clientid".to_owned(), "0".to_owned());
