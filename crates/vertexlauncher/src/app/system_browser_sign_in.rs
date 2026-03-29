@@ -3,11 +3,47 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use launcher_ui::ui::theme::{Oklch, Theme};
 use url::Url;
 
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const ACCEPT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const AUTO_CLOSE_DELAY_SECS: u64 = 4;
+const CALLBACK_PAGE_TEMPLATE: &str = include_str!("callback_page_template.html");
+
+pub struct CallbackPageColors {
+    pub bg: String,
+    pub panel: String,
+    pub border: String,
+    pub text: String,
+    pub muted: String,
+    pub success: String,
+    pub danger: String,
+    pub primary_tint: String,
+}
+
+impl CallbackPageColors {
+    pub fn from_theme(theme: &Theme) -> Self {
+        Self {
+            bg: fmt_oklch(theme.bg_dark),
+            panel: fmt_oklch(theme.bg),
+            border: fmt_oklch(theme.border_muted),
+            text: fmt_oklch(theme.text),
+            muted: fmt_oklch(theme.text_muted),
+            success: fmt_oklch(theme.success),
+            danger: fmt_oklch(theme.danger),
+            primary_tint: fmt_oklch_alpha(theme.primary, 0.09),
+        }
+    }
+}
+
+fn fmt_oklch(c: Oklch) -> String {
+    format!("oklch({:.3} {:.3} {:.1})", c.l, c.c, c.h)
+}
+
+fn fmt_oklch_alpha(c: Oklch, alpha: f32) -> String {
+    format!("oklch({:.3} {:.3} {:.1} / {:.2})", c.l, c.c, c.h, alpha)
+}
 
 pub struct LoopbackCallbackListener {
     listener: TcpListener,
@@ -35,9 +71,10 @@ pub fn prepare_loopback_callback_listener() -> Result<LoopbackCallbackListener, 
 pub fn open_microsoft_sign_in(
     auth_request_uri: &str,
     callback_listener: LoopbackCallbackListener,
+    colors: &CallbackPageColors,
 ) -> Result<String, String> {
     launcher_ui::desktop::open_url(auth_request_uri)?;
-    wait_for_loopback_callback(callback_listener.listener, &callback_listener.redirect_uri)
+    wait_for_loopback_callback(callback_listener.listener, &callback_listener.redirect_uri, colors)
 }
 
 fn bind_loopback_listener() -> Result<TcpListener, String> {
@@ -45,7 +82,11 @@ fn bind_loopback_listener() -> Result<TcpListener, String> {
         .map_err(|err| format!("Failed to bind localhost loopback listener: {err}"))
 }
 
-fn wait_for_loopback_callback(listener: TcpListener, redirect_uri: &str) -> Result<String, String> {
+fn wait_for_loopback_callback(
+    listener: TcpListener,
+    redirect_uri: &str,
+    colors: &CallbackPageColors,
+) -> Result<String, String> {
     listener
         .set_nonblocking(true)
         .map_err(|err| format!("Failed to configure loopback listener: {err}"))?;
@@ -54,7 +95,7 @@ fn wait_for_loopback_callback(listener: TcpListener, redirect_uri: &str) -> Resu
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                if let Some(callback_url) = handle_callback_stream(stream, redirect_uri)? {
+                if let Some(callback_url) = handle_callback_stream(stream, redirect_uri, colors)? {
                     return Ok(callback_url);
                 }
             }
@@ -79,6 +120,7 @@ fn wait_for_loopback_callback(listener: TcpListener, redirect_uri: &str) -> Resu
 fn handle_callback_stream(
     mut stream: TcpStream,
     redirect_uri: &str,
+    colors: &CallbackPageColors,
 ) -> Result<Option<String>, String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -105,6 +147,7 @@ fn handle_callback_stream(
                 "Vertex Launcher could not understand the browser callback request.",
                 Some("Try starting the browser sign-in flow again from the launcher."),
                 CallbackPageTone::Error,
+                colors,
             ),
         )?;
         return Ok(None);
@@ -124,6 +167,7 @@ fn handle_callback_stream(
                 "This localhost page is not being used by Vertex Launcher.",
                 Some("You can close this tab."),
                 CallbackPageTone::Error,
+                colors,
             ),
         )?;
         return Ok(None);
@@ -136,6 +180,7 @@ fn handle_callback_stream(
             "Microsoft sign-in finished successfully.",
             Some("This tab should close automatically. You can return to Vertex Launcher."),
             CallbackPageTone::Success,
+            colors,
         )
     } else if let Some(error) = query_pairs
         .iter()
@@ -151,6 +196,7 @@ fn handle_callback_stream(
             &format!("Microsoft returned an authorization error: {error}."),
             detail,
             CallbackPageTone::Error,
+            colors,
         )
     } else {
         render_callback_page(
@@ -158,6 +204,7 @@ fn handle_callback_stream(
             "Microsoft returned to Vertex Launcher, but no authorization code was included.",
             Some("You can close this tab and retry the sign-in flow."),
             CallbackPageTone::Error,
+            colors,
         )
     };
     write_http_response(&mut stream, "200 OK", &body)?;
@@ -196,155 +243,34 @@ fn render_callback_page(
     message: &str,
     detail: Option<&str>,
     tone: CallbackPageTone,
+    colors: &CallbackPageColors,
 ) -> String {
     let accent = match tone {
-        CallbackPageTone::Success => "#2d6a4f",
-        CallbackPageTone::Error => "#a61e4d",
+        CallbackPageTone::Success => colors.success.as_str(),
+        CallbackPageTone::Error => colors.danger.as_str(),
     };
     let badge = match tone {
         CallbackPageTone::Success => "Connected",
         CallbackPageTone::Error => "Action needed",
     };
     let detail_html = detail
-        .map(|detail| format!(r#"<p class="detail">{}</p>"#, escape_html(detail)))
+        .map(|d| format!(r#"<p class="detail">{}</p>"#, escape_html(d)))
         .unwrap_or_default();
-    let title = escape_html(title);
-    let message = escape_html(message);
+    let secs = AUTO_CLOSE_DELAY_SECS.to_string();
 
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{title}</title>
-  <style>
-    :root {{
-      color-scheme: light;
-      --bg: #f4f1ea;
-      --panel: rgba(255, 252, 246, 0.94);
-      --text: #1d1b19;
-      --muted: #625b53;
-      --accent: {accent};
-      --border: rgba(29, 27, 25, 0.12);
-      --shadow: 0 22px 60px rgba(30, 20, 10, 0.16);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      padding: 24px;
-      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-      background:
-        radial-gradient(circle at top, rgba(255,255,255,0.9), transparent 42%),
-        linear-gradient(160deg, #e8e1d3 0%, var(--bg) 52%, #ddd4c3 100%);
-      color: var(--text);
-    }}
-    .panel {{
-      width: min(560px, 100%);
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 24px;
-      box-shadow: var(--shadow);
-      overflow: hidden;
-      backdrop-filter: blur(10px);
-    }}
-    .stripe {{
-      height: 10px;
-      background: linear-gradient(90deg, var(--accent), color-mix(in srgb, var(--accent) 36%, white));
-    }}
-    .content {{
-      padding: 28px 30px 26px;
-    }}
-    .badge {{
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 7px 12px;
-      border-radius: 999px;
-      background: color-mix(in srgb, var(--accent) 14%, white);
-      color: var(--accent);
-      font-size: 13px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-    }}
-    h1 {{
-      margin: 18px 0 10px;
-      font-size: clamp(30px, 5vw, 40px);
-      line-height: 1.05;
-      letter-spacing: -0.04em;
-    }}
-    p {{
-      margin: 0;
-      font-size: 16px;
-      line-height: 1.6;
-      color: var(--muted);
-    }}
-    .detail {{
-      margin-top: 16px;
-      padding: 14px 16px;
-      border-radius: 16px;
-      background: rgba(255,255,255,0.72);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-size: 14px;
-      line-height: 1.55;
-      word-break: break-word;
-    }}
-    .footer {{
-      margin-top: 22px;
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      flex-wrap: wrap;
-      font-size: 14px;
-      color: var(--muted);
-    }}
-    .timer {{
-      font-weight: 700;
-      color: var(--accent);
-    }}
-    .hint {{
-      opacity: 0.9;
-    }}
-  </style>
-</head>
-<body>
-  <main class="panel">
-    <div class="stripe"></div>
-    <section class="content">
-      <div class="badge">{badge}</div>
-      <h1>{title}</h1>
-      <p>{message}</p>
-      {detail_html}
-      <div class="footer">
-        <span class="hint">This tab should close automatically.</span>
-        <span class="timer">Closing in <span id="countdown">{AUTO_CLOSE_DELAY_SECS}</span>s</span>
-      </div>
-    </section>
-  </main>
-  <script>
-    let remaining = {AUTO_CLOSE_DELAY_SECS};
-    const countdown = document.getElementById("countdown");
-    const tick = () => {{
-      remaining -= 1;
-      if (remaining >= 0 && countdown) countdown.textContent = String(remaining);
-      if (remaining <= 0) {{
-        window.close();
-        setTimeout(() => window.location.replace("about:blank"), 150);
-        return;
-      }}
-      setTimeout(tick, 1000);
-    }};
-    setTimeout(tick, 1000);
-  </script>
-</body>
-</html>"#
-    )
+    CALLBACK_PAGE_TEMPLATE
+        .replace("{{BG}}", &colors.bg)
+        .replace("{{PANEL}}", &colors.panel)
+        .replace("{{BORDER}}", &colors.border)
+        .replace("{{TEXT}}", &colors.text)
+        .replace("{{MUTED}}", &colors.muted)
+        .replace("{{PRIMARY_TINT}}", &colors.primary_tint)
+        .replace("{{ACCENT}}", accent)
+        .replace("{{BADGE}}", badge)
+        .replace("{{TITLE}}", &escape_html(title))
+        .replace("{{MESSAGE}}", &escape_html(message))
+        .replace("{{DETAIL_HTML}}", &detail_html)
+        .replace("{{AUTO_CLOSE_SECS}}", &secs)
 }
 
 fn escape_html(value: &str) -> String {

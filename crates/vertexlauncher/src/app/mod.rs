@@ -382,7 +382,7 @@ impl VertexApp {
             self.auth.cancel_device_code_sign_in();
         }
         if top_bar_output.open_device_code_browser {
-            self.auth.start_system_browser_sign_in();
+            self.auth.start_system_browser_sign_in(&self.theme);
         }
         let mut account_switched = false;
         if let Some(profile_id) = top_bar_output.select_account_id.as_deref() {

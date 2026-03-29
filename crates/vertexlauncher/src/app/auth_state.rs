@@ -469,7 +469,7 @@ impl AuthState {
         self.device_code_flow = Some(auth::start_device_code_login(client_id));
     }
 
-    pub fn start_system_browser_sign_in(&mut self) {
+    pub fn start_system_browser_sign_in(&mut self, theme: &launcher_ui::ui::theme::Theme) {
         if self.flow.is_some() || self.renewal.is_some() {
             return;
         }
@@ -479,9 +479,10 @@ impl AuthState {
         self.device_code_expiry = None;
         self.status = AuthUiStatus::Starting;
 
+        let colors = system_browser_sign_in::CallbackPageColors::from_theme(theme);
         let (sender, receiver) = mpsc::channel();
         let _ = tokio_runtime::spawn_blocking_detached(move || {
-            run_system_browser_sign_in_flow(sender);
+            run_system_browser_sign_in_flow(sender, colors);
         });
 
         self.flow = Some(receiver);
@@ -1080,7 +1081,10 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
     );
 }
 
-fn run_system_browser_sign_in_flow(sender: mpsc::Sender<AuthFlowEvent>) {
+fn run_system_browser_sign_in_flow(
+    sender: mpsc::Sender<AuthFlowEvent>,
+    colors: system_browser_sign_in::CallbackPageColors,
+) {
     let started_at = std::time::Instant::now();
     tracing::info!(
         target: "vertexlauncher/auth/signin/browser",
@@ -1127,6 +1131,7 @@ fn run_system_browser_sign_in_flow(sender: mpsc::Sender<AuthFlowEvent>) {
     let callback_url = match system_browser_sign_in::open_microsoft_sign_in(
         &flow.auth_request_uri,
         callback_listener,
+        &colors,
     ) {
         Ok(callback_url) => callback_url,
         Err(err) => {
