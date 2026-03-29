@@ -4515,411 +4515,44 @@ impl SkinPreviewPostProcessWgpuResources {
 
         let scene_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-post-scene-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct VertexIn {
-    @location(0) pos_points: vec2<f32>,
-    @location(1) camera_z: f32,
-    @location(2) uv: vec2<f32>,
-    @location(3) color: vec4<f32>,
-};
-
-struct Globals {
-    screen_size_points: vec2<f32>,
-    _pad: vec2<f32>,
-};
-
-struct VertexOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var preview_tex: texture_2d<f32>;
-@group(0) @binding(1)
-var preview_sampler: sampler;
-@group(1) @binding(0)
-var<uniform> globals: Globals;
-
-fn sample_preview_pixel_art(uv: vec2<f32>) -> vec4<f32> {
-    let dims_i = textureDimensions(preview_tex);
-    let dims = vec2<f32>(dims_i);
-    let texel = 0.5 / dims;
-    let clamped_uv = clamp(uv, texel, vec2<f32>(1.0) - texel);
-    let uv_grad_x = dpdx(clamped_uv);
-    let uv_grad_y = dpdy(clamped_uv);
-    let texel_grad_x = uv_grad_x * dims;
-    let texel_grad_y = uv_grad_y * dims;
-    let footprint = max(
-        max(abs(texel_grad_x.x), abs(texel_grad_x.y)),
-        max(abs(texel_grad_y.x), abs(texel_grad_y.y)),
-    );
-    let pixel = clamp(
-        vec2<i32>(clamped_uv * dims),
-        vec2<i32>(0),
-        vec2<i32>(dims_i) - vec2<i32>(1),
-    );
-    let nearest = textureLoad(preview_tex, pixel, 0);
-    let filtered = textureSampleGrad(
-        preview_tex,
-        preview_sampler,
-        clamped_uv,
-        uv_grad_x,
-        uv_grad_y,
-    );
-    let filtered_mix = smoothstep(0.85, 1.35, footprint);
-    return mix(nearest, filtered, filtered_mix);
-}
-
-@vertex
-fn vs_main(input: VertexIn) -> VertexOut {
-    var out: VertexOut;
-    let x_ndc = (input.pos_points.x / globals.screen_size_points.x) * 2.0 - 1.0;
-    let y_ndc = 1.0 - (input.pos_points.y / globals.screen_size_points.y) * 2.0;
-    let z_cam = max(input.camera_z, 1.5 + 0.0001);
-    let clip_w = z_cam;
-    let clip_z = z_cam - 1.5;
-    out.pos = vec4<f32>(x_ndc * clip_w, y_ndc * clip_w, clip_z, clip_w);
-    out.uv = input.uv;
-    out.color = input.color;
-    return out;
-}
-
-@fragment
-fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    let sampled = sample_preview_pixel_art(input.uv) * input.color;
-    if sampled.a <= 0.001 {
-        discard;
-    }
-    return sampled;
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_post_scene.wgsl"
+            ))),
         });
 
         let accumulate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-accumulate-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct Scalar {
-    value: vec4<f32>,
-};
-
-struct FullscreenOut {
-    @builtin(position) pos: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var source_tex: texture_2d<f32>;
-@group(1) @binding(0)
-var<uniform> scalar: Scalar;
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
-    var out: FullscreenOut;
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let pixel = clamp(vec2<i32>(pos.xy), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(source_tex, pixel, 0) * scalar.value.x;
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_accumulate.wgsl"
+            ))),
         });
 
         let fxaa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-fxaa-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct FullscreenOut {
-    @builtin(position) pos: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var source_tex: texture_2d<f32>;
-
-fn rgb_luma(rgb: vec3<f32>) -> f32 {
-    return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-}
-
-fn load_rgba(pixel: vec2<i32>) -> vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(source_tex, clamped, 0);
-}
-
-fn sample_linear(pixel: vec2<f32>) -> vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let max_pixel = vec2<f32>(vec2<i32>(dims) - vec2<i32>(1));
-    let p = clamp(pixel, vec2<f32>(0.0), max_pixel);
-    let p0 = vec2<i32>(floor(p));
-    let p1 = min(p0 + vec2<i32>(1), vec2<i32>(dims) - vec2<i32>(1));
-    let f = fract(p);
-    let c00 = load_rgba(p0);
-    let c10 = load_rgba(vec2<i32>(p1.x, p0.y));
-    let c01 = load_rgba(vec2<i32>(p0.x, p1.y));
-    let c11 = load_rgba(p1);
-    let top = mix(c00, c10, f.x);
-    let bottom = mix(c01, c11, f.x);
-    return mix(top, bottom, f.y);
-}
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
-    var out: FullscreenOut;
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = vec2<i32>(pos.xy);
-    let nw = load_rgba(p + vec2<i32>(-1, -1));
-    let ne = load_rgba(p + vec2<i32>(1, -1));
-    let sw = load_rgba(p + vec2<i32>(-1, 1));
-    let se = load_rgba(p + vec2<i32>(1, 1));
-    let m = load_rgba(p);
-
-    let luma_nw = rgb_luma(nw.rgb);
-    let luma_ne = rgb_luma(ne.rgb);
-    let luma_sw = rgb_luma(sw.rgb);
-    let luma_se = rgb_luma(se.rgb);
-    let luma_m = rgb_luma(m.rgb);
-
-    let luma_min = min(luma_m, min(min(luma_nw, luma_ne), min(luma_sw, luma_se)));
-    let luma_max = max(luma_m, max(max(luma_nw, luma_ne), max(luma_sw, luma_se)));
-    let luma_range = luma_max - luma_min;
-    let threshold = max(1.0 / 16.0, luma_max * (1.0 / 8.0));
-    if luma_range < threshold {
-        return m;
-    }
-
-    var dir = vec2<f32>(
-        -((luma_nw + luma_ne) - (luma_sw + luma_se)),
-        (luma_nw + luma_sw) - (luma_ne + luma_se),
-    );
-    let dir_reduce = max(
-        ((luma_nw + luma_ne + luma_sw + luma_se) * 0.25) * (1.0 / 8.0),
-        1.0 / 128.0,
-    );
-    let rcp_dir_min = 1.0 / (min(abs(dir.x), abs(dir.y)) + dir_reduce);
-    dir = clamp(dir * rcp_dir_min, vec2<f32>(-8.0), vec2<f32>(8.0));
-
-    let fp = pos.xy;
-    let rgb_a = 0.5 * (
-        sample_linear(fp + dir * (1.0 / 3.0 - 0.5)).rgb +
-        sample_linear(fp + dir * (2.0 / 3.0 - 0.5)).rgb
-    );
-    let rgb_b = rgb_a * 0.5 + 0.25 * (
-        sample_linear(fp + dir * -0.5).rgb +
-        sample_linear(fp + dir * 0.5).rgb
-    );
-
-    let luma_b = rgb_luma(rgb_b);
-    var final_rgb = rgb_b;
-    if luma_b < luma_min || luma_b > luma_max {
-        final_rgb = rgb_a;
-    }
-    return vec4<f32>(final_rgb, m.a);
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_fxaa.wgsl"
+            ))),
         });
 
         let smaa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-smaa-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct FullscreenOut {
-    @builtin(position) pos: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var source_tex: texture_2d<f32>;
-
-fn rgb_luma(rgb: vec3<f32>) -> f32 {
-    return dot(rgb, vec3<f32>(0.299, 0.587, 0.114));
-}
-
-fn load_rgba(pixel: vec2<i32>) -> vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(source_tex, clamped, 0);
-}
-
-fn sample_linear(pixel: vec2<f32>) -> vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let max_pixel = vec2<f32>(vec2<i32>(dims) - vec2<i32>(1));
-    let p = clamp(pixel, vec2<f32>(0.0), max_pixel);
-    let p0 = vec2<i32>(floor(p));
-    let p1 = min(p0 + vec2<i32>(1), vec2<i32>(dims) - vec2<i32>(1));
-    let f = fract(p);
-    let c00 = load_rgba(p0);
-    let c10 = load_rgba(vec2<i32>(p1.x, p0.y));
-    let c01 = load_rgba(vec2<i32>(p0.x, p1.y));
-    let c11 = load_rgba(p1);
-    let top = mix(c00, c10, f.x);
-    let bottom = mix(c01, c11, f.x);
-    return mix(top, bottom, f.y);
-}
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
-    var out: FullscreenOut;
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = vec2<i32>(pos.xy);
-    let c = load_rgba(p);
-    let l = load_rgba(p + vec2<i32>(-1, 0));
-    let r = load_rgba(p + vec2<i32>(1, 0));
-    let t = load_rgba(p + vec2<i32>(0, -1));
-    let b = load_rgba(p + vec2<i32>(0, 1));
-
-    let luma_c = rgb_luma(c.rgb);
-    let luma_l = rgb_luma(l.rgb);
-    let luma_r = rgb_luma(r.rgb);
-    let luma_t = rgb_luma(t.rgb);
-    let luma_b = rgb_luma(b.rgb);
-
-    let edge_h = max(abs(luma_l - luma_c), abs(luma_r - luma_c));
-    let edge_v = max(abs(luma_t - luma_c), abs(luma_b - luma_c));
-    let threshold = max(0.04, luma_c * 0.12);
-
-    if max(edge_h, edge_v) < threshold {
-        return c;
-    }
-
-    let center = pos.xy;
-    if edge_h >= edge_v {
-        let a = sample_linear(center + vec2<f32>(-0.75, 0.0));
-        let b = sample_linear(center + vec2<f32>(0.75, 0.0));
-        let long_a = sample_linear(center + vec2<f32>(-1.5, 0.0));
-        let long_b = sample_linear(center + vec2<f32>(1.5, 0.0));
-        let blend = clamp((edge_h - threshold) * 6.0, 0.0, 1.0);
-        let neighbor = mix(0.5 * (a + b), 0.5 * (long_a + long_b), 0.35);
-        return mix(c, vec4<f32>(neighbor.rgb, c.a), blend * 0.75);
-    }
-
-    let sample_a = sample_linear(center + vec2<f32>(0.0, -0.75));
-    let sample_b = sample_linear(center + vec2<f32>(0.0, 0.75));
-    let long_sample_a = sample_linear(center + vec2<f32>(0.0, -1.5));
-    let long_sample_b = sample_linear(center + vec2<f32>(0.0, 1.5));
-    let blend = clamp((edge_v - threshold) * 6.0, 0.0, 1.0);
-    let neighbor = mix(
-        0.5 * (sample_a + sample_b),
-        0.5 * (long_sample_a + long_sample_b),
-        0.35,
-    );
-    return mix(c, vec4<f32>(neighbor.rgb, c.a), blend * 0.75);
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_smaa.wgsl"
+            ))),
         });
 
         let taa_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-taa-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct Scalar {
-    value: vec4<f32>,
-};
-
-struct FullscreenOut {
-    @builtin(position) pos: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var current_tex: texture_2d<f32>;
-@group(1) @binding(0)
-var history_tex: texture_2d<f32>;
-@group(2) @binding(0)
-var<uniform> scalar: Scalar;
-
-fn load_current(pixel: vec2<i32>) -> vec4<f32> {
-    let dims = textureDimensions(current_tex);
-    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(current_tex, clamped, 0);
-}
-
-fn load_history(pixel: vec2<i32>) -> vec4<f32> {
-    let dims = textureDimensions(history_tex);
-    let clamped = clamp(pixel, vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(history_tex, clamped, 0);
-}
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
-    var out: FullscreenOut;
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let pixel = vec2<i32>(pos.xy);
-    let current = load_current(pixel);
-    var lo = current;
-    var hi = current;
-    for (var y = -1; y <= 1; y = y + 1) {
-        for (var x = -1; x <= 1; x = x + 1) {
-            let sample = load_current(pixel + vec2<i32>(x, y));
-            lo = min(lo, sample);
-            hi = max(hi, sample);
-        }
-    }
-    let history = clamp(load_history(pixel), lo, hi);
-    let current_weight = clamp(scalar.value.x, 0.05, 1.0);
-    return mix(history, current, current_weight);
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_taa.wgsl"
+            ))),
         });
 
         let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-present-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct FullscreenOut {
-    @builtin(position) pos: vec4<f32>,
-};
-
-@group(0) @binding(0)
-var source_tex: texture_2d<f32>;
-
-@vertex
-fn vs_fullscreen(@builtin(vertex_index) vertex_index: u32) -> FullscreenOut {
-    var out: FullscreenOut;
-    let x = f32((vertex_index << 1u) & 2u);
-    let y = f32(vertex_index & 2u);
-    out.pos = vec4<f32>(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-    return out;
-}
-
-@fragment
-fn fs_main(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let dims = textureDimensions(source_tex);
-    let pixel = clamp(vec2<i32>(pos.xy), vec2<i32>(0), vec2<i32>(dims) - vec2<i32>(1));
-    return textureLoad(source_tex, pixel, 0);
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview_present.wgsl"
+            ))),
         });
 
         let texture_bind_group_layout =
@@ -6012,87 +5645,9 @@ impl SkinPreviewWgpuResources {
     fn new(device: &wgpu::Device, target_format: wgpu::TextureFormat, msaa_samples: u32) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("skins-preview-shader"),
-            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(
-                r#"
-struct VertexIn {
-    @location(0) pos_points: vec2<f32>,
-    @location(1) camera_z: f32,
-    @location(2) uv: vec2<f32>,
-    @location(3) color: vec4<f32>,
-};
-
-struct Globals {
-    screen_size_points: vec2<f32>,
-    _pad: vec2<f32>,
-};
-
-struct VertexOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-    @location(1) color: vec4<f32>,
-};
-
-@vertex
-fn vs_main(input: VertexIn) -> VertexOut {
-    var out: VertexOut;
-    let x_ndc = (input.pos_points.x / globals.screen_size_points.x) * 2.0 - 1.0;
-    let y_ndc = 1.0 - (input.pos_points.y / globals.screen_size_points.y) * 2.0;
-    let z_cam = max(input.camera_z, 1.5 + 0.0001);
-    let clip_w = z_cam;
-    let clip_z = z_cam - 1.5;
-    out.pos = vec4<f32>(x_ndc * clip_w, y_ndc * clip_w, clip_z, clip_w);
-    out.uv = input.uv;
-    out.color = input.color;
-    return out;
-}
-
-@group(0) @binding(0)
-var preview_tex: texture_2d<f32>;
-@group(0) @binding(1)
-var preview_sampler: sampler;
-@group(1) @binding(0)
-var<uniform> globals: Globals;
-
-fn sample_preview_pixel_art(uv: vec2<f32>) -> vec4<f32> {
-    let dims_i = textureDimensions(preview_tex);
-    let dims = vec2<f32>(dims_i);
-    let texel = 0.5 / dims;
-    let clamped_uv = clamp(uv, texel, vec2<f32>(1.0) - texel);
-    let uv_grad_x = dpdx(clamped_uv);
-    let uv_grad_y = dpdy(clamped_uv);
-    let texel_grad_x = uv_grad_x * dims;
-    let texel_grad_y = uv_grad_y * dims;
-    let footprint = max(
-        max(abs(texel_grad_x.x), abs(texel_grad_x.y)),
-        max(abs(texel_grad_y.x), abs(texel_grad_y.y)),
-    );
-    let pixel = clamp(
-        vec2<i32>(clamped_uv * dims),
-        vec2<i32>(0),
-        vec2<i32>(dims_i) - vec2<i32>(1),
-    );
-    let nearest = textureLoad(preview_tex, pixel, 0);
-    let filtered = textureSampleGrad(
-        preview_tex,
-        preview_sampler,
-        clamped_uv,
-        uv_grad_x,
-        uv_grad_y,
-    );
-    let filtered_mix = smoothstep(0.85, 1.35, footprint);
-    return mix(nearest, filtered, filtered_mix);
-}
-
-@fragment
-fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    let sampled = sample_preview_pixel_art(input.uv) * input.color;
-    if sampled.a <= 0.001 {
-        discard;
-    }
-    return sampled;
-}
-"#,
-            )),
+            source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(include_str!(
+                "shaders/skin_preview.wgsl"
+            ))),
         });
 
         let texture_bind_group_layout =
