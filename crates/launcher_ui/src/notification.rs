@@ -355,7 +355,7 @@ pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi, expiry_bars_empt
                                     egui::vec2(icon_size, icon_size),
                                 );
                                 ui.put(icon_rect, icon);
-                                ui.add_space(icon_size + 6.0);
+                                ui.add_space(6.0);
 
                                 if entry.count > 1 {
                                     let mut count_style = LabelOptions::default();
@@ -374,7 +374,7 @@ pub fn render_popups(ctx: &egui::Context, text_ui: &mut TextUi, expiry_bars_empt
 
                                 let mut source_style = LabelOptions::default();
                                 source_style.color = ui.visuals().text_color();
-                                source_style.wrap = false;
+                                source_style.wrap = true;
                                 source_style.weight = 700;
                                 source_style.font_size = 15.0;
                                 source_style.line_height = 20.0;

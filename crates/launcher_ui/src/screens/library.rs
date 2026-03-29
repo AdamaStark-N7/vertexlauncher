@@ -350,6 +350,7 @@ fn render_instance_tile(
             ui.set_min_height(TILE_HEIGHT);
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
             ui.vertical(|ui| {
+                let tile_start_y = ui.cursor().min.y;
                 render_instance_thumbnail(ui, state, instance);
 
                 let mut name_style = style::heading(ui, 22.0, 28.0);
@@ -406,7 +407,9 @@ fn render_instance_tile(
                 );
 
                 let play_button_height = style::CONTROL_HEIGHT_LG;
-                let remaining_height = (ui.available_height()
+                let consumed_height = ui.cursor().min.y - tile_start_y;
+                let remaining_height = (TILE_HEIGHT
+                    - consumed_height
                     - play_button_height
                     - style::SPACE_SM
                     - TILE_DELETE_BUTTON_HEIGHT)
