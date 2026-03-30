@@ -145,51 +145,44 @@ pub fn render(
 
                     let profile_response =
                         render_profile_button(ui, text_ui, profile_ui, profile_button_size);
-                    let direct_sign_in = profile_ui.display_name.is_none() && !profile_ui.auth_busy;
-                    if direct_sign_in {
-                        if profile_response.clicked() {
-                            output.start_webview_sign_in = true;
-                        }
-                    } else {
-                        // Use a separate popup ID for device-code mode so the normal popup's
-                        // cached area size is never inflated by the wider device-code layout.
-                        let in_dc = profile_ui.device_code_prompt.is_some();
-                        let normal_popup_id = ui.id().with("profile_selector_popup");
-                        let dc_popup_id = ui.id().with("profile_selector_popup_dc");
-                        let profile_popup_id = if in_dc { dc_popup_id } else { normal_popup_id };
+                    // Use a separate popup ID for device-code mode so the normal popup's
+                    // cached area size is never inflated by the wider device-code layout.
+                    let in_dc = profile_ui.device_code_prompt.is_some();
+                    let normal_popup_id = ui.id().with("profile_selector_popup");
+                    let dc_popup_id = ui.id().with("profile_selector_popup_dc");
+                    let profile_popup_id = if in_dc { dc_popup_id } else { normal_popup_id };
 
-                        // When device-code state changes, transfer open state to the new ID.
-                        let prev_in_dc_key = ui.id().with("prev_in_dc");
-                        let prev_in_dc = ui
-                            .ctx()
-                            .data_mut(|d| d.get_temp::<bool>(prev_in_dc_key))
-                            .unwrap_or(in_dc);
-                        ui.ctx().data_mut(|d| d.insert_temp(prev_in_dc_key, in_dc));
-                        if prev_in_dc != in_dc {
-                            let old_id = if prev_in_dc {
-                                dc_popup_id
-                            } else {
-                                normal_popup_id
-                            };
-                            if egui::Popup::is_id_open(ui.ctx(), old_id) {
-                                egui::Popup::open_id(ui.ctx(), profile_popup_id);
-                            }
+                    // When device-code state changes, transfer open state to the new ID.
+                    let prev_in_dc_key = ui.id().with("prev_in_dc");
+                    let prev_in_dc = ui
+                        .ctx()
+                        .data_mut(|d| d.get_temp::<bool>(prev_in_dc_key))
+                        .unwrap_or(in_dc);
+                    ui.ctx().data_mut(|d| d.insert_temp(prev_in_dc_key, in_dc));
+                    if prev_in_dc != in_dc {
+                        let old_id = if prev_in_dc {
+                            dc_popup_id
+                        } else {
+                            normal_popup_id
+                        };
+                        if egui::Popup::is_id_open(ui.ctx(), old_id) {
+                            egui::Popup::open_id(ui.ctx(), profile_popup_id);
                         }
-
-                        let _ = egui::Popup::menu(&profile_response)
-                            .id(profile_popup_id)
-                            .width(PROFILE_POPUP_MIN_WIDTH)
-                            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                            .show(|ui| {
-                                render_profile_popup(
-                                    ui,
-                                    text_ui,
-                                    profile_ui,
-                                    &mut output,
-                                    profile_popup_id,
-                                );
-                            });
                     }
+
+                    let _ = egui::Popup::menu(&profile_response)
+                        .id(profile_popup_id)
+                        .width(PROFILE_POPUP_MIN_WIDTH)
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show(|ui| {
+                            render_profile_popup(
+                                ui,
+                                text_ui,
+                                profile_ui,
+                                &mut output,
+                                profile_popup_id,
+                            );
+                        });
 
                     if active_user_visible {
                         ui.add_space(ACTIVE_USER_TO_PROFILE_GAP);

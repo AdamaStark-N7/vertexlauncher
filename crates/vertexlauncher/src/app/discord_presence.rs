@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
+#[cfg(target_os = "linux")]
+use std::env;
 use std::fs;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use config::Config;
@@ -32,8 +36,10 @@ pub struct DiscordPresenceManager {
     client: Option<DiscordIpcClient>,
     session_start_by_instance_id: HashMap<String, i64>,
     active_presence: Option<DesiredPresence>,
+    last_desired_presence: Option<DesiredPresence>,
     connected: bool,
     last_connect_attempt_at: Option<Instant>,
+    last_connect_error: Option<String>,
     last_presence_sync_at: Option<Instant>,
 }
 
@@ -43,8 +49,10 @@ impl Default for DiscordPresenceManager {
             client: None,
             session_start_by_instance_id: HashMap::new(),
             active_presence: None,
+            last_desired_presence: None,
             connected: false,
             last_connect_attempt_at: None,
+            last_connect_error: None,
             last_presence_sync_at: None,
         }
     }
@@ -76,8 +84,17 @@ impl DiscordPresenceManager {
             return;
         }
 
+        if desired.is_some()
+            && !self.connected
+            && !self.can_attempt_connect()
+            && desired == self.last_desired_presence
+        {
+            return;
+        }
+
         match desired.clone() {
             Some(next) => {
+                self.last_desired_presence = Some(next.clone());
                 log_presence_update_attempt(&next, should_resync);
                 if let Err(err) = self.set_presence(&next) {
                     log_presence_update_failure(&next, &err);
@@ -94,6 +111,7 @@ impl DiscordPresenceManager {
                 }
                 self.clear_presence();
                 self.active_presence = None;
+                self.last_desired_presence = None;
             }
         }
     }
@@ -211,11 +229,16 @@ impl DiscordPresenceManager {
         selected_instance_id: Option<&str>,
         instances: &InstanceStore,
     ) -> DesiredPresence {
-        let selected_instance_name = selected_instance_id.and_then(|instance_id| {
-            instances
-                .find(instance_id)
-                .map(|instance| instance.name.clone())
-        });
+        let selected_instance_name = match menu_context {
+            MenuPresenceContext::Instance(_) | MenuPresenceContext::Screen(AppScreen::Instance) => {
+                selected_instance_id.and_then(|instance_id| {
+                    instances
+                        .find(instance_id)
+                        .map(|instance| instance.name.clone())
+                })
+            }
+            _ => None,
+        };
         DesiredPresence::Menu {
             context: menu_context,
             selected_instance_name,
@@ -249,8 +272,9 @@ impl DiscordPresenceManager {
 
     fn ensure_client_connected(&mut self) -> Result<&mut DiscordIpcClient, String> {
         if self.client.is_none() {
+            prepare_discord_ipc_environment();
             self.client = Some(DiscordIpcClient::new(DISCORD_APPLICATION_ID));
-            tracing::debug!(
+            tracing::info!(
                 target: "vertexlauncher/discord_presence",
                 application_id = DISCORD_APPLICATION_ID,
                 "Created Discord IPC client."
@@ -264,13 +288,11 @@ impl DiscordPresenceManager {
                 .ok_or_else(|| "Discord client missing".to_owned());
         }
 
-        let should_retry = self
-            .last_connect_attempt_at
-            .is_none_or(|last| last.elapsed() >= CONNECT_RETRY_INTERVAL);
+        let should_retry = self.can_attempt_connect();
 
         if should_retry {
             self.last_connect_attempt_at = Some(Instant::now());
-            tracing::debug!(
+            tracing::info!(
                 target: "vertexlauncher/discord_presence",
                 "Attempting Discord IPC connection."
             );
@@ -284,13 +306,17 @@ impl DiscordPresenceManager {
             };
 
             connect_result.map_err(|err| {
-                tracing::debug!(
+                let message = format!("failed to connect to Discord IPC: {err}");
+                self.last_connect_error = Some(message.clone());
+                tracing::warn!(
                     target: "vertexlauncher/discord_presence",
-                    "Discord IPC connection attempt failed: {err}"
+                    error = %message,
+                    "Discord IPC connection attempt failed."
                 );
-                format!("failed to connect to Discord IPC: {err}")
+                message
             })?;
             self.connected = true;
+            self.last_connect_error = None;
             tracing::info!(
                 target: "vertexlauncher/discord_presence",
                 "Connected to Discord IPC."
@@ -298,14 +324,18 @@ impl DiscordPresenceManager {
         }
 
         if !self.connected {
-            tracing::debug!(
+            tracing::info!(
                 target: "vertexlauncher/discord_presence",
                 retry_interval_secs = CONNECT_RETRY_INTERVAL.as_secs(),
+                previous_error = self.last_connect_error.as_deref().unwrap_or("unknown"),
                 "Skipping Discord IPC reconnect attempt because the retry interval has not elapsed."
             );
-            return Err(
-                "Discord IPC reconnect is rate-limited; waiting before retrying".to_owned(),
-            );
+            return Err(match self.last_connect_error.as_deref() {
+                Some(previous) => format!(
+                    "Discord IPC reconnect is rate-limited; waiting before retrying after previous failure: {previous}"
+                ),
+                None => "Discord IPC reconnect is rate-limited; waiting before retrying".to_owned(),
+            });
         }
 
         self.client
@@ -326,6 +356,83 @@ impl DiscordPresenceManager {
         self.last_connect_attempt_at = None;
         self.last_presence_sync_at = None;
     }
+
+    fn can_attempt_connect(&self) -> bool {
+        self.last_connect_attempt_at
+            .is_none_or(|last| last.elapsed() >= CONNECT_RETRY_INTERVAL)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn prepare_discord_ipc_environment() {
+    let runtime_dir = env::var("XDG_RUNTIME_DIR").ok();
+    let candidate_dirs = discord_ipc_candidate_dirs();
+    let candidate_dir_display = candidate_dirs
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect::<Vec<_>>();
+
+    let Some(socket_dir) = find_discord_ipc_socket_dir(&candidate_dirs) else {
+        tracing::info!(
+            target: "vertexlauncher/discord_presence",
+            xdg_runtime_dir = runtime_dir.as_deref().unwrap_or(""),
+            candidate_dirs = ?candidate_dir_display,
+            "No visible Discord IPC socket was found in any candidate directory."
+        );
+        return;
+    };
+
+    let socket_dir_display = socket_dir.display().to_string();
+    // SAFETY: This is called on the UI thread before each Discord IPC client creation.
+    // We only update process env vars used by the `discord-rich-presence` crate's socket lookup.
+    unsafe {
+        env::set_var("TMPDIR", &socket_dir);
+    }
+    tracing::info!(
+        target: "vertexlauncher/discord_presence",
+        socket_dir = %socket_dir_display,
+        "Prepared Discord IPC environment override."
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn prepare_discord_ipc_environment() {}
+
+#[cfg(target_os = "linux")]
+fn discord_ipc_candidate_dirs() -> Vec<PathBuf> {
+    let mut candidate_dirs = Vec::new();
+
+    if let Ok(runtime_dir) = env::var("XDG_RUNTIME_DIR") {
+        let runtime_dir = PathBuf::from(runtime_dir);
+        candidate_dirs.push(runtime_dir.clone());
+        candidate_dirs.push(runtime_dir.join("app/com.discordapp.Discord"));
+        candidate_dirs.push(runtime_dir.join("app/com.discordapp.DiscordCanary"));
+        candidate_dirs.push(runtime_dir.join("app/com.discordapp.DiscordPTB"));
+        candidate_dirs.push(runtime_dir.join("app/dev.vencord.Vesktop"));
+    }
+
+    if let Ok(home) = env::var("HOME") {
+        let home = PathBuf::from(home);
+        candidate_dirs.push(home.join(".flatpak/com.discordapp.Discord/xdg-run"));
+        candidate_dirs.push(home.join(".flatpak/com.discordapp.DiscordCanary/xdg-run"));
+        candidate_dirs.push(home.join(".flatpak/com.discordapp.DiscordPTB/xdg-run"));
+        candidate_dirs.push(home.join(".flatpak/dev.vencord.Vesktop/xdg-run"));
+    }
+
+    candidate_dirs
+}
+
+#[cfg(target_os = "linux")]
+fn find_discord_ipc_socket_dir(candidate_dirs: &[PathBuf]) -> Option<PathBuf> {
+    for dir in candidate_dirs {
+        for index in 0..10 {
+            if dir.join(format!("discord-ipc-{index}")).exists() {
+                return Some(dir.clone());
+            }
+        }
+    }
+
+    None
 }
 
 fn build_activity(desired: &DesiredPresence) -> activity::Activity<'static> {

@@ -7,6 +7,7 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 APP_ID="io.github.SturdyFool10.VertexLauncher"
 BRANCH="${VERTEX_FLATPAK_BRANCH:-stable}"
 ARCHES="${VERTEX_FLATPAK_ARCHES:-${VERTEX_FLATPAK_ARCH:-$(flatpak --default-arch 2>/dev/null || uname -m)}}"
+INCREMENTAL="${VERTEX_FLATPAK_INCREMENTAL:-0}"
 
 RUNTIME="org.gnome.Platform"
 RUNTIME_VERSION="49"
@@ -18,6 +19,7 @@ GEN_DIR="${REPO_ROOT}/flatpak/generated"
 SOURCE_TREE="${GEN_DIR}/source-tree"
 DIST_DIR="${REPO_ROOT}/target/release"
 CARGO_SOURCES_PATH="${GEN_DIR}/cargo-sources.json"
+CARGO_SOURCES_LOCK_SNAPSHOT="${GEN_DIR}/cargo-sources.lock"
 GENERATOR_PATH="${GEN_DIR}/flatpak-cargo-generator.py"
 
 log() {
@@ -60,8 +62,14 @@ ensure_runtime_bits() {
 }
 
 prepare_clean_source_tree() {
-    log "Preparing clean Flatpak source tree"
-    rm -rf "${SOURCE_TREE}"
+    if [[ "${INCREMENTAL}" == "1" ]]; then
+        log "Refreshing incremental Flatpak source tree"
+    else
+        log "Preparing clean Flatpak source tree"
+        rm -rf "${SOURCE_TREE}"
+        mkdir -p "${SOURCE_TREE}"
+    fi
+
     mkdir -p "${SOURCE_TREE}"
 
     rsync -a --delete \
@@ -101,9 +109,18 @@ generate_cargo_sources() {
             https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/cargo/flatpak-cargo-generator.py
     fi
 
+    if [[ "${INCREMENTAL}" == "1" ]] \
+        && [[ -f "${CARGO_SOURCES_PATH}" ]] \
+        && [[ -f "${CARGO_SOURCES_LOCK_SNAPSHOT}" ]] \
+        && cmp -s "${SOURCE_TREE}/Cargo.lock" "${CARGO_SOURCES_LOCK_SNAPSHOT}"; then
+        log "Reusing existing cargo-sources.json because Cargo.lock is unchanged"
+        return
+    fi
+
     log "Generating cargo-sources.json"
     python3 "${GENERATOR_PATH}" "${SOURCE_TREE}/Cargo.lock" -o "${CARGO_SOURCES_PATH}"
     [[ -f "${CARGO_SOURCES_PATH}" ]] || die "Failed to generate cargo-sources.json"
+    cp "${SOURCE_TREE}/Cargo.lock" "${CARGO_SOURCES_LOCK_SNAPSHOT}"
 }
 
 write_manifest() {
@@ -147,6 +164,34 @@ finish-args:
 
   - --filesystem=xdg-run/gvfs
 
+  - --filesystem=xdg-run/discord-ipc-0
+
+  - --filesystem=xdg-run/discord-ipc-1
+
+  - --filesystem=xdg-run/discord-ipc-2
+
+  - --filesystem=xdg-run/discord-ipc-3
+
+  - --filesystem=xdg-run/discord-ipc-4
+
+  - --filesystem=xdg-run/discord-ipc-5
+
+  - --filesystem=xdg-run/discord-ipc-6
+
+  - --filesystem=xdg-run/discord-ipc-7
+
+  - --filesystem=xdg-run/discord-ipc-8
+
+  - --filesystem=xdg-run/discord-ipc-9
+
+  - --filesystem=xdg-run/app/com.discordapp.Discord
+
+  - --filesystem=xdg-run/app/com.discordapp.DiscordCanary
+
+  - --filesystem=xdg-run/app/com.discordapp.DiscordPTB
+
+  - --filesystem=xdg-run/app/dev.vencord.Vesktop
+
   - --talk-name=org.freedesktop.secrets
 
   - --talk-name=org.freedesktop.Flatpak
@@ -188,17 +233,32 @@ build_flatpak() {
     local repo_dir="${REPO_ROOT}/flatpak/repo/${arch}"
     local manifest_path="${GEN_DIR}/${APP_ID}-${arch}.yaml"
 
-    rm -rf "${build_dir}" "${repo_dir}"
-    mkdir -p "${build_dir}" "${repo_dir}" "${DIST_DIR}"
+    if [[ "${INCREMENTAL}" == "1" ]]; then
+        rm -rf "${build_dir}"
+        mkdir -p "${build_dir}" "${repo_dir}" "${DIST_DIR}"
+    else
+        rm -rf "${build_dir}" "${repo_dir}"
+        mkdir -p "${build_dir}" "${repo_dir}" "${DIST_DIR}"
+    fi
 
-    log "Building Flatpak from clean source tree (arch: ${arch})"
-    flatpak-builder \
-        --user \
-        --force-clean \
-        --arch="${arch}" \
-        --repo="${repo_dir}" \
-        "${build_dir}" \
-        "${manifest_path}"
+    if [[ "${INCREMENTAL}" == "1" ]]; then
+        log "Building Flatpak incrementally (arch: ${arch})"
+        flatpak-builder \
+            --user \
+            --arch="${arch}" \
+            --repo="${repo_dir}" \
+            "${build_dir}" \
+            "${manifest_path}"
+    else
+        log "Building Flatpak from clean source tree (arch: ${arch})"
+        flatpak-builder \
+            --user \
+            --force-clean \
+            --arch="${arch}" \
+            --repo="${repo_dir}" \
+            "${build_dir}" \
+            "${manifest_path}"
+    fi
 
     log "Updating local repo metadata"
     flatpak build-update-repo "${repo_dir}" >/dev/null
@@ -237,6 +297,10 @@ main() {
     need_cmd awk
     need_cmd grep
     need_cmd rsync
+
+    if [[ "${INCREMENTAL}" != "0" && "${INCREMENTAL}" != "1" ]]; then
+        die "VERTEX_FLATPAK_INCREMENTAL must be 0 or 1"
+    fi
 
     [[ -f "${REPO_ROOT}/Cargo.toml" ]] || die "Missing Cargo.toml"
     [[ -f "${REPO_ROOT}/flatpak/${APP_ID}.desktop" ]] || die "Missing desktop file"
