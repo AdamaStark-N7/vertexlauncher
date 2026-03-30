@@ -1,9 +1,11 @@
-use config::{Config, WindowsBackdropType};
+use config::Config;
 use egui::Ui;
 use textui::TextUi;
 
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 use crate::ui::components::settings_widgets;
+#[cfg(target_os = "windows")]
+use config::WindowsBackdropType;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PlatformSpecificSection {

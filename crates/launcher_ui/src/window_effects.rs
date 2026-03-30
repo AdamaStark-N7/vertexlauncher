@@ -1,6 +1,4 @@
 #![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
-
-use config::WindowsBackdropType;
 use eframe::CreationContext;
 
 /// Returns whether the current target should opt into native blur effects.
@@ -40,7 +38,7 @@ pub const fn blur_requires_transparent_viewport() -> bool {
 pub fn apply(
     cc: &CreationContext<'_>,
     blur_enabled: bool,
-    windows_backdrop_type: WindowsBackdropType,
+    windows_backdrop_type: config::WindowsBackdropType,
 ) -> Result<(), String> {
     if !blur_enabled || !platform_supports_blur() {
         return Ok(());
@@ -51,8 +49,11 @@ pub fn apply(
 
 fn apply_impl(
     cc: &CreationContext<'_>,
-    windows_backdrop_type: WindowsBackdropType,
+    windows_backdrop_type: config::WindowsBackdropType,
 ) -> Result<(), String> {
+    #[cfg(not(target_os = "windows"))]
+    let _ = windows_backdrop_type;
+
     #[cfg(target_os = "windows")]
     return windows::apply(cc, windows_backdrop_type);
     #[cfg(target_os = "linux")]
@@ -380,10 +381,10 @@ mod linux {
             .display_handle()
             .map_err(|error| format!("display handle unavailable: {error}"))?;
 
-        match (display_handle.as_raw(), window_handle.as_raw()) {
+        let result = match (display_handle.as_raw(), window_handle.as_raw()) {
             (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(window)) => {
                 let Some(display) = display.display else {
-                    return Err("X11 display pointer unavailable".to_owned());
+                    return Ok(());
                 };
                 apply_x11(display.as_ptr().cast::<xlib::Display>(), window.window)
             }
@@ -393,7 +394,19 @@ mod linux {
                     window.surface.as_ptr().cast::<c_void>(),
                 )
             }
-            _ => Err("unsupported Linux window/display backend for blur".to_owned()),
+            _ => Ok(()),
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                tracing::info!(
+                    target: "vertexlauncher/window_blur",
+                    error = %error,
+                    "Linux compositor-specific blur hook was unavailable; keeping transparent viewport enabled for best-effort blur compatibility."
+                );
+                Ok(())
+            }
         }
     }
 

@@ -96,7 +96,8 @@ const INSTANCE_SCREENSHOT_TILE_GAP: f32 = 10.0;
 const INSTANCE_SCREENSHOT_PRELOAD_VIEWPORTS: f32 = 0.75;
 const INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
 const INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
-const INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.2;
+const INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.12;
+const INSTANCE_SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY: f32 = 0.0015;
 const MAX_INSTANCE_SCREENSHOTS: usize = 120;
 const MAX_INSTANCE_LOG_LINES: usize = 12_000;
 const INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
@@ -161,6 +162,11 @@ pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&s
         };
         if state.pending_delete_screenshot_key.is_some() {
             if !state.delete_screenshot_in_flight {
+                tracing::info!(
+                    target: "vertexlauncher/screenshots",
+                    instance_id,
+                    "Instance screenshot delete confirmation closed by escape."
+                );
                 state.pending_delete_screenshot_key = None;
             }
             data.insert_temp(state_id, state);
@@ -168,6 +174,11 @@ pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&s
             return;
         }
         if state.screenshot_viewer.take().is_some() {
+            tracing::info!(
+                target: "vertexlauncher/screenshots",
+                instance_id,
+                "Instance screenshot viewer closed by escape."
+            );
             data.insert_temp(state_id, state);
             handled = true;
             return;
@@ -387,6 +398,11 @@ pub fn render(
                     screenshot_key(screenshot.path.as_path()) == viewer.screenshot_key
                 })
             }) {
+                tracing::info!(
+                    target: "vertexlauncher/screenshots",
+                    instance_id,
+                    "Instance screenshot viewer closed because the selected screenshot disappeared from the gallery state."
+                );
                 state.screenshot_viewer = None;
             }
             if state
@@ -818,6 +834,11 @@ fn render_instance_screenshot_viewer_modal(
         .find(|entry| screenshot_key(entry.path.as_path()) == selected_screenshot_key)
         .cloned()
     else {
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = selected_screenshot_key.as_str(),
+            "Instance screenshot viewer closed because the screenshot entry was no longer available."
+        );
         state.screenshot_viewer = None;
         return;
     };
@@ -839,7 +860,6 @@ fn render_instance_screenshot_viewer_modal(
         (viewport_rect.center().y - modal_height * 0.5)
             .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
     );
-    let mut open = true;
     let mut close_requested = false;
     let mut delete_requested = false;
     modal::show_scrim(ctx, "instance_screenshot_viewer_scrim", viewport_rect);
@@ -847,7 +867,6 @@ fn render_instance_screenshot_viewer_modal(
     egui::Window::new("Instance Screenshot Viewer")
         .id(egui::Id::new("instance_screenshot_viewer_window"))
         .order(egui::Order::Foreground)
-        .open(&mut open)
         .fixed_pos(modal_pos)
         .fixed_size(egui::vec2(modal_width, modal_height))
         .collapsible(false)
@@ -924,7 +943,7 @@ fn render_instance_screenshot_viewer_modal(
             ui.painter().rect_filled(
                 canvas_rect,
                 egui::CornerRadius::same(12),
-                ui.visuals().widgets.noninteractive.bg_fill,
+                ui.visuals().faint_bg_color,
             );
 
             let image_rect = instance_fit_rect_to_aspect(
@@ -934,8 +953,10 @@ fn render_instance_screenshot_viewer_modal(
             if response.hovered() {
                 let scroll_delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
                 if scroll_delta.abs() > 0.0 {
-                    viewer_state.zoom =
-                        adjust_instance_screenshot_zoom(viewer_state.zoom, scroll_delta.signum());
+                    viewer_state.zoom = adjust_instance_screenshot_zoom_with_scroll(
+                        viewer_state.zoom,
+                        scroll_delta,
+                    );
                     clamp_instance_screenshot_pan(viewer_state);
                     ui.ctx().request_repaint();
                 }
@@ -955,6 +976,7 @@ fn render_instance_screenshot_viewer_modal(
                     .fit_to_exact_size(image_rect.size())
                     .maintain_aspect_ratio(false)
                     .uv(instance_viewer_uv_rect(viewer_state))
+                    .corner_radius(egui::CornerRadius::same(12))
                     .paint_at(ui, image_rect);
             } else {
                 ui.painter().rect_filled(
@@ -984,9 +1006,19 @@ fn render_instance_screenshot_viewer_modal(
         });
 
     if delete_requested {
-        state.pending_delete_screenshot_key = Some(selected_screenshot_key);
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = selected_screenshot_key.as_str(),
+            "Instance screenshot viewer requested delete."
+        );
+        state.pending_delete_screenshot_key = Some(selected_screenshot_key.clone());
     }
-    if !open || close_requested {
+    if close_requested {
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = selected_screenshot_key.as_str(),
+            "Instance screenshot viewer closed by explicit close button."
+        );
         state.screenshot_viewer = None;
     }
 }
@@ -1481,6 +1513,11 @@ fn poll_instance_screenshot_delete_results(state: &mut InstanceScreenState, inst
                     .as_ref()
                     .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
                 {
+                    tracing::info!(
+                        target: "vertexlauncher/screenshots",
+                        screenshot_key = screenshot_key.as_str(),
+                        "Instance screenshot viewer closed because the screenshot was deleted."
+                    );
                     state.screenshot_viewer = None;
                 }
                 state.pending_delete_screenshot_key = None;
@@ -1820,6 +1857,15 @@ fn instance_fit_rect_to_aspect(rect: egui::Rect, aspect_ratio: f32) -> egui::Rec
 
 fn adjust_instance_screenshot_zoom(current_zoom: f32, direction: f32) -> f32 {
     (current_zoom + direction * INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP).clamp(
+        INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
+        INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
+    )
+}
+
+fn adjust_instance_screenshot_zoom_with_scroll(current_zoom: f32, scroll_delta: f32) -> f32 {
+    let scale =
+        (1.0 + scroll_delta * INSTANCE_SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY).clamp(0.7, 1.3);
+    (current_zoom * scale).clamp(
         INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
         INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
     )

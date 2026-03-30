@@ -47,7 +47,8 @@ const SCREENSHOT_TILE_GAP: f32 = 10.0;
 const SCREENSHOT_PRELOAD_VIEWPORTS: f32 = 0.75;
 const SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
 const SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
-const SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.2;
+const SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.12;
+const SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY: f32 = 0.0015;
 const SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
 
 #[derive(Debug, Clone, Default)]
@@ -623,6 +624,11 @@ fn poll_delete_screenshot_results(
                     .as_ref()
                     .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
                 {
+                    tracing::info!(
+                        target: "vertexlauncher/screenshots",
+                        screenshot_key = screenshot_key.as_str(),
+                        "Home screenshot viewer closed because the screenshot was deleted."
+                    );
                     state.screenshot_viewer = None;
                 }
                 state.pending_delete_screenshot_key = None;
@@ -651,6 +657,10 @@ pub(super) fn handle_escape(ctx: &egui::Context) -> bool {
         };
         if state.pending_delete_screenshot_key.is_some() {
             if !state.delete_screenshot_in_flight {
+                tracing::info!(
+                    target: "vertexlauncher/screenshots",
+                    "Home screenshot delete confirmation closed by escape."
+                );
                 state.pending_delete_screenshot_key = None;
             }
             data.insert_temp(state_id, state);
@@ -658,6 +668,10 @@ pub(super) fn handle_escape(ctx: &egui::Context) -> bool {
             return;
         }
         if state.screenshot_viewer.take().is_some() {
+            tracing::info!(
+                target: "vertexlauncher/screenshots",
+                "Home screenshot viewer closed by escape."
+            );
             data.insert_temp(state_id, state);
             handled = true;
         }
@@ -751,7 +765,12 @@ pub fn render(
                     .screenshots
                     .iter()
                     .any(|screenshot| screenshot.key() == viewer.screenshot_key)
-            }) {
+            }) && !state.screenshot_scan_pending
+            {
+                tracing::info!(
+                    target: "vertexlauncher/screenshots",
+                    "Home screenshot viewer closed because the selected screenshot disappeared from the gallery state."
+                );
                 state.screenshot_viewer = None;
             }
             if state
@@ -1154,6 +1173,15 @@ fn render_screenshot_viewer_modal(
         .find(|entry| entry.key() == screenshot_key)
         .cloned()
     else {
+        if state.screenshot_scan_pending {
+            render_screenshot_viewer_loading_modal(ctx, text_ui, screenshot_key.as_str());
+            return;
+        }
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = screenshot_key.as_str(),
+            "Home screenshot viewer closed because the screenshot entry was no longer available."
+        );
         state.screenshot_viewer = None;
         return;
     };
@@ -1176,7 +1204,6 @@ fn render_screenshot_viewer_modal(
             .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
     );
     let now_ms = current_time_millis();
-    let mut open = true;
     let mut close_requested = false;
     let mut delete_requested = false;
     modal::show_scrim(ctx, "home_screenshot_viewer_scrim", viewport_rect);
@@ -1184,7 +1211,6 @@ fn render_screenshot_viewer_modal(
     egui::Window::new("Screenshot Viewer")
         .id(egui::Id::new("home_screenshot_viewer_window"))
         .order(egui::Order::Foreground)
-        .open(&mut open)
         .fixed_pos(modal_pos)
         .fixed_size(egui::vec2(modal_width, modal_height))
         .collapsible(false)
@@ -1261,7 +1287,7 @@ fn render_screenshot_viewer_modal(
             ui.painter().rect_filled(
                 canvas_rect,
                 egui::CornerRadius::same(12),
-                ui.visuals().widgets.noninteractive.bg_fill,
+                ui.visuals().faint_bg_color,
             );
 
             let image_rect = fit_rect_to_aspect(canvas_rect.shrink(8.0), screenshot.aspect_ratio());
@@ -1269,7 +1295,7 @@ fn render_screenshot_viewer_modal(
                 let scroll_delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
                 if scroll_delta.abs() > 0.0 {
                     viewer_state.zoom =
-                        adjust_viewer_zoom(viewer_state.zoom, scroll_delta.signum());
+                        adjust_viewer_zoom_with_scroll(viewer_state.zoom, scroll_delta);
                     clamp_viewer_pan(viewer_state);
                     ui.ctx().request_repaint();
                 }
@@ -1288,6 +1314,7 @@ fn render_screenshot_viewer_modal(
                     .fit_to_exact_size(image_rect.size())
                     .maintain_aspect_ratio(false)
                     .uv(viewer_uv_rect(viewer_state))
+                    .corner_radius(egui::CornerRadius::same(12))
                     .paint_at(ui, image_rect);
             } else {
                 ui.painter().rect_filled(
@@ -1317,11 +1344,88 @@ fn render_screenshot_viewer_modal(
         });
 
     if delete_requested {
-        state.pending_delete_screenshot_key = Some(screenshot_key);
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = screenshot_key.as_str(),
+            "Home screenshot viewer requested delete."
+        );
+        state.pending_delete_screenshot_key = Some(screenshot_key.clone());
     }
-    if !open || close_requested {
+    if close_requested {
+        tracing::info!(
+            target: "vertexlauncher/screenshots",
+            screenshot_key = screenshot_key.as_str(),
+            "Home screenshot viewer closed by explicit close button."
+        );
         state.screenshot_viewer = None;
     }
+}
+
+fn render_screenshot_viewer_loading_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    screenshot_key: &str,
+) {
+    let viewport_rect = ctx.input(|i| i.content_rect());
+    let modal_width = (viewport_rect.width() * 0.92).max(320.0);
+    let modal_height = (viewport_rect.height() * 0.9).max(280.0);
+    let modal_pos = egui::pos2(
+        (viewport_rect.center().x - modal_width * 0.5)
+            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
+        (viewport_rect.center().y - modal_height * 0.5)
+            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
+    );
+    let title = Path::new(screenshot_key)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .unwrap_or("Screenshot");
+
+    modal::show_scrim(ctx, "home_screenshot_viewer_scrim", viewport_rect);
+    egui::Window::new("Screenshot Viewer")
+        .id(egui::Id::new("home_screenshot_viewer_window"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(modal_pos)
+        .fixed_size(egui::vec2(modal_width, modal_height))
+        .collapsible(false)
+        .resizable(false)
+        .movable(false)
+        .title_bar(false)
+        .hscroll(false)
+        .vscroll(false)
+        .constrain(true)
+        .constrain_to(viewport_rect)
+        .frame(modal::window_frame(ctx))
+        .show(ctx, |ui| {
+            let title_style = style::heading(ui, 24.0, 28.0);
+            let body_style = style::muted(ui);
+            let _ = text_ui.label(
+                ui,
+                "home_screenshot_viewer_title_loading",
+                title,
+                &title_style,
+            );
+            let _ = text_ui.label(
+                ui,
+                "home_screenshot_viewer_loading",
+                "Refreshing screenshot preview...",
+                &body_style,
+            );
+            ui.add_space(12.0);
+            let canvas_size = ui.available_size().max(egui::vec2(1.0, 1.0));
+            let (canvas_rect, _) = ui.allocate_exact_size(canvas_size, egui::Sense::hover());
+            ui.painter().rect_filled(
+                canvas_rect,
+                egui::CornerRadius::same(12),
+                ui.visuals().faint_bg_color,
+            );
+            ui.painter().text(
+                canvas_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Loading screenshot...",
+                egui::TextStyle::Button.resolve(ui.style()),
+                ui.visuals().weak_text_color(),
+            );
+        });
 }
 
 fn render_delete_screenshot_modal(
@@ -1635,6 +1739,11 @@ fn fit_rect_to_aspect(rect: egui::Rect, aspect_ratio: f32) -> egui::Rect {
 fn adjust_viewer_zoom(current_zoom: f32, direction: f32) -> f32 {
     (current_zoom + direction * SCREENSHOT_VIEWER_ZOOM_STEP)
         .clamp(SCREENSHOT_VIEWER_MIN_ZOOM, SCREENSHOT_VIEWER_MAX_ZOOM)
+}
+
+fn adjust_viewer_zoom_with_scroll(current_zoom: f32, scroll_delta: f32) -> f32 {
+    let scale = (1.0 + scroll_delta * SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY).clamp(0.7, 1.3);
+    (current_zoom * scale).clamp(SCREENSHOT_VIEWER_MIN_ZOOM, SCREENSHOT_VIEWER_MAX_ZOOM)
 }
 
 fn clamp_viewer_pan(viewer_state: &mut ScreenshotViewerState) {

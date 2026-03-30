@@ -468,7 +468,9 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
 }
 
 fn paint_preview_background(ui: &Ui, painter: &egui::Painter, rect: Rect) {
-    painter.rect_filled(rect, CornerRadius::same(8), ui.visuals().faint_bg_color);
+    let fill = ui.visuals().faint_bg_color;
+
+    painter.rect_filled(rect, CornerRadius::same(8), fill);
     painter.rect_stroke(
         rect,
         CornerRadius::same(8),
