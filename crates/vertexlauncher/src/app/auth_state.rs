@@ -1045,7 +1045,7 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
 
     let _ = sender.send(AuthFlowEvent::AwaitingBrowser);
 
-    let callback_url = match webview_sign_in::open_microsoft_sign_in(
+    let auth_code = match webview_sign_in::open_microsoft_sign_in(
         &flow.auth_request_uri,
         &flow.redirect_uri,
         flow.expected_state(),
@@ -1066,19 +1066,30 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
     tracing::info!(
         target: "vertexlauncher/auth/signin",
         elapsed_ms = started_at.elapsed().as_millis() as u64,
-        callback_url = %webview_sign_in::sanitize_url_for_log(&callback_url),
-        "Microsoft sign-in webview returned a callback URL; exchanging tokens."
+        "Microsoft sign-in webview returned an auth code; exchanging tokens."
     );
 
     let _ = sender.send(AuthFlowEvent::WaitingForAuthorization);
 
-    finish_browser_sign_in_flow(
-        flow,
-        callback_url,
-        sender,
-        started_at,
-        "Microsoft sign-in webview returned a callback URL; exchanging tokens.",
-    );
+    match auth::login_finish(&auth_code, flow) {
+        Ok(account) => {
+            tracing::info!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                "Microsoft sign-in flow completed successfully."
+            );
+            let _ = sender.send(AuthFlowEvent::Completed(account));
+        }
+        Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
+                "Microsoft sign-in callback exchange failed."
+            );
+            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+        }
+    }
 }
 
 fn run_system_browser_sign_in_flow(
