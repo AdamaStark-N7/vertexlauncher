@@ -626,7 +626,11 @@ pub(super) fn save_instance_metadata_and_versions(
     if let Some(instance) = instances.find_mut(instance_id) {
         instance.name = trimmed_name.to_owned();
         instance.description = normalize_optional(state.description_input.as_str());
-        instance.thumbnail_path = normalize_optional(state.thumbnail_input.as_str());
+        instance.thumbnail_path = if state.thumbnail_input.as_os_str().is_empty() {
+            None
+        } else {
+            Some(state.thumbnail_input.clone())
+        };
     } else {
         return Err("Instance was removed before save.".to_owned());
     }
@@ -715,7 +719,15 @@ pub(super) fn sync_version_catalog(
                 "Instance version catalog fetch failed."
             ),
         }
-        let _ = tx.send((include_snapshots_and_betas, result));
+        if let Err(err) = tx.send((include_snapshots_and_betas, result)) {
+            tracing::error!(
+                target: "vertexlauncher/instance_runtime",
+                include_snapshots_and_betas,
+                force_refresh,
+                error = %err,
+                "Failed to deliver instance version catalog result."
+            );
+        }
     });
 }
 
@@ -784,12 +796,22 @@ pub(super) fn poll_version_catalog(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_runtime",
+                            "Instance version catalog worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_runtime",
+                    "Instance version catalog receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -797,6 +819,8 @@ pub(super) fn poll_version_catalog(state: &mut InstanceScreenState) {
         state.version_catalog_results_tx = None;
         state.version_catalog_results_rx = None;
         state.version_catalog_in_flight = false;
+        state.version_catalog_error =
+            Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
 
     for (include_snapshots_and_betas, result) in updates {
@@ -921,7 +945,16 @@ pub(super) fn request_modloader_versions(
                 "Instance modloader version fetch failed."
             ),
         }
-        let _ = tx.send((key, result));
+        if let Err(err) = tx.send((key.clone(), result)) {
+            tracing::error!(
+                target: "vertexlauncher/instance_runtime",
+                key = %key,
+                loader = %loader_for_log,
+                game_version = %game_for_log,
+                error = %err,
+                "Failed to deliver instance modloader version result."
+            );
+        }
     });
 }
 
@@ -935,12 +968,22 @@ pub(super) fn poll_modloader_versions(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_runtime",
+                            "Instance modloader-version worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_runtime",
+                    "Instance modloader-version receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -948,6 +991,8 @@ pub(super) fn poll_modloader_versions(state: &mut InstanceScreenState) {
         state.modloader_versions_results_tx = None;
         state.modloader_versions_results_rx = None;
         state.modloader_versions_in_flight.clear();
+        state.modloader_versions_status =
+            Some("Modloader version worker stopped unexpectedly.".to_owned());
     }
 
     for (key, result) in updates {
@@ -963,6 +1008,12 @@ pub(super) fn poll_modloader_versions(state: &mut InstanceScreenState) {
                 };
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/instance_runtime",
+                    cache_key = %key,
+                    error = %err,
+                    "Applying instance modloader-version fetch failure."
+                );
                 state.modloader_versions_cache.insert(key, Vec::new());
                 state.modloader_versions_status =
                     Some(format!("Failed to fetch modloader versions: {err}"));
@@ -1230,8 +1281,20 @@ pub(super) fn request_runtime_prepare(
     let _ = tokio_runtime::spawn_detached(async move {
         let progress_tx_done = progress_tx.clone();
         let result = tokio_runtime::spawn_blocking(move || {
+            let instance_root_for_progress = instance_root.clone();
+            let game_version_for_progress = game_version_for_task.clone();
+            let operation_for_progress = operation;
             let progress_callback: InstallProgressCallback = Arc::new(move |event| {
-                let _ = progress_tx.send(event);
+                if let Err(err) = progress_tx.send(event) {
+                    tracing::error!(
+                        target: "vertexlauncher/instance_runtime",
+                        instance_root = %instance_root_for_progress.display(),
+                        game_version = %game_version_for_progress,
+                        operation = ?operation_for_progress,
+                        error = %err,
+                        "Failed to deliver runtime prepare progress update."
+                    );
+                }
             });
             tracing::info!(
                 target: "vertexlauncher/instance_runtime",
@@ -1354,8 +1417,21 @@ pub(super) fn request_runtime_prepare(
             format!("{RUNTIME_PREPARE_TASK_KIND} failed: {err}")
         })
         .and_then(|result| result);
-        let _ = tx.send((game_version_for_result, instance_root_display, result));
-        let _ = progress_tx_done.send(InstallProgress {
+        if let Err(err) = tx.send((
+            game_version_for_result.clone(),
+            instance_root_display.clone(),
+            result,
+        )) {
+            tracing::error!(
+                target: "vertexlauncher/instance_runtime",
+                instance_root = %instance_root_for_join_log.display(),
+                game_version = %game_version_for_result,
+                operation = ?operation,
+                error = %err,
+                "Failed to deliver runtime prepare result."
+            );
+        }
+        if let Err(err) = progress_tx_done.send(InstallProgress {
             stage: InstallStage::Complete,
             message: format!("Install task ended for {instance_id_for_notifications}."),
             downloaded_files: 0,
@@ -1364,7 +1440,16 @@ pub(super) fn request_runtime_prepare(
             total_bytes: None,
             bytes_per_second: 0.0,
             eta_seconds: Some(0),
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/instance_runtime",
+                instance_root = %instance_root_for_join_log.display(),
+                game_version = %game_version_for_result,
+                operation = ?operation,
+                error = %err,
+                "Failed to deliver runtime prepare completion progress update."
+            );
+        }
     });
 }
 

@@ -736,7 +736,9 @@ fn managed_identity_matches_file_name(
     identity: &InstalledContentIdentity,
     disk_file_name: &str,
 ) -> bool {
-    let expected = Path::new(identity.file_path.as_str())
+    let expected = identity
+        .file_path
+        .as_path()
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();

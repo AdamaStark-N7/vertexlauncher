@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -6,7 +8,7 @@ pub struct VtmpackDownloadableEntry {
     pub project_key: String,
     #[serde(default)]
     pub name: String,
-    pub file_path: String,
+    pub file_path: PathBuf,
     #[serde(default)]
     pub modrinth_project_id: Option<String>,
     #[serde(default)]

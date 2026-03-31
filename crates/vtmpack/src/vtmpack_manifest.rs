@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::{VtmpackDownloadableEntry, VtmpackInstanceMetadata};
@@ -14,9 +16,9 @@ pub struct VtmpackManifest {
     #[serde(default)]
     pub downloadable_content: Vec<VtmpackDownloadableEntry>,
     #[serde(default)]
-    pub bundled_mods: Vec<String>,
+    pub bundled_mods: Vec<PathBuf>,
     #[serde(default)]
-    pub configs: Vec<String>,
+    pub configs: Vec<PathBuf>,
     #[serde(default)]
-    pub additional_paths: Vec<String>,
+    pub additional_paths: Vec<PathBuf>,
 }

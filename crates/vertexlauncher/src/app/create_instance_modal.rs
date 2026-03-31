@@ -34,7 +34,7 @@ const SECONDARY_ACTION_WIDTH: f32 = 100.0;
 pub struct CreateInstanceState {
     pub name: String,
     pub description: String,
-    pub thumbnail_path: String,
+    pub thumbnail_path: PathBuf,
     pub game_version: String,
     pub modloader_version: String,
     pub selected_modloader: usize,
@@ -68,7 +68,7 @@ impl Default for CreateInstanceState {
         Self {
             name: "New Instance".to_owned(),
             description: String::new(),
-            thumbnail_path: String::new(),
+            thumbnail_path: PathBuf::new(),
             game_version: String::new(),
             modloader_version: String::new(),
             selected_modloader: 0,
@@ -629,7 +629,19 @@ pub fn render(
                         state.error = None;
                         action = ModalAction::Create(draft);
                     }
-                    Err(error) => state.error = Some(error),
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "vertexlauncher/create_instance",
+                            name_present = !state.name.trim().is_empty(),
+                            selected_modloader = %MODLOADER_OPTIONS
+                                .get(state.selected_modloader)
+                                .copied()
+                                .unwrap_or(MODLOADER_OPTIONS[0]),
+                            game_version = %state.game_version.trim(),
+                            "Create-instance validation failed before submit."
+                        );
+                        state.error = Some(error);
+                    }
                 }
             }
         });
@@ -698,7 +710,15 @@ fn sync_version_catalog(
                 "Create-instance version catalog fetch failed."
             ),
         }
-        let _ = tx.send((include_snapshots_and_betas, result));
+        if let Err(err) = tx.send((include_snapshots_and_betas, result)) {
+            tracing::error!(
+                target: "vertexlauncher/create_instance",
+                include_snapshots_and_betas,
+                force_refresh,
+                error = %err,
+                "Failed to deliver create-instance version catalog result."
+            );
+        }
     });
 }
 
@@ -747,6 +767,12 @@ fn apply_version_catalog_error(
     include_snapshots_and_betas: bool,
     error: &str,
 ) {
+    tracing::warn!(
+        target: "vertexlauncher/create_instance",
+        include_snapshots_and_betas,
+        error = %error,
+        "Applying version catalog error to create-instance modal."
+    );
     state.version_catalog_error = Some(format!("Failed to fetch version catalog: {error}"));
     state.available_game_versions.clear();
     state.loader_support = LoaderSupportIndex::default();
@@ -765,6 +791,11 @@ fn poll_version_catalog(state: &mut CreateInstanceState) {
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/create_instance",
+                        include_snapshots_and_betas = ?state.version_catalog_include_snapshots,
+                        "Create-instance version catalog worker channel disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
@@ -776,6 +807,8 @@ fn poll_version_catalog(state: &mut CreateInstanceState) {
         state.version_catalog_results_tx = None;
         state.version_catalog_results_rx = None;
         state.version_catalog_in_flight = false;
+        state.version_catalog_error =
+            Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
 
     for (include_snapshots_and_betas, result) in updates {
@@ -810,8 +843,8 @@ fn render_thumbnail_picker(
                     egui::vec2(preview_inner_width, preview_height),
                     egui::Layout::centered_and_justified(egui::Direction::TopDown),
                     |ui| {
-                        let trimmed = state.thumbnail_path.trim();
-                        if trimmed.is_empty() {
+                        let path = state.thumbnail_path.as_path();
+                        if path.as_os_str().is_empty() {
                             let _ = text_ui.label(
                                 ui,
                                 "instance_create_thumbnail_empty",
@@ -825,7 +858,6 @@ fn render_thumbnail_picker(
                             return;
                         }
 
-                        let path = Path::new(trimmed);
                         if !path.is_file() {
                             let _ = text_ui.label(
                                 ui,
@@ -878,8 +910,10 @@ fn render_thumbnail_picker(
             }
         }
 
-        if should_open_picker && let Some(path) = pick_thumbnail_path(state.thumbnail_path.trim()) {
-            state.thumbnail_path = path.as_os_str().to_string_lossy().into_owned();
+        if should_open_picker
+            && let Some(path) = pick_thumbnail_path(state.thumbnail_path.as_path())
+        {
+            state.thumbnail_path = path;
         }
     });
 }
@@ -890,16 +924,15 @@ fn file_uri_from_path(path: &Path) -> String {
         .unwrap_or_else(|_| "file:///".to_owned())
 }
 
-fn pick_thumbnail_path(current_path: &str) -> Option<PathBuf> {
+fn pick_thumbnail_path(current_path: &Path) -> Option<PathBuf> {
     let mut dialog =
         rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-    let current = Path::new(current_path);
-    if current.is_file() {
-        if let Some(parent) = current.parent() {
+    if current_path.is_file() {
+        if let Some(parent) = current_path.parent() {
             dialog = dialog.set_directory(parent);
         }
-    } else if current.is_dir() {
-        dialog = dialog.set_directory(current);
+    } else if current_path.is_dir() {
+        dialog = dialog.set_directory(current_path);
     }
     dialog.pick_file()
 }
@@ -1026,7 +1059,15 @@ fn request_modloader_versions(
                 "Create-instance modloader version fetch failed."
             ),
         }
-        let _ = tx.send((key, result));
+        if let Err(err) = tx.send((key.clone(), result)) {
+            tracing::error!(
+                target: "vertexlauncher/create_instance",
+                key = %key,
+                force_refresh,
+                error = %err,
+                "Failed to deliver create-instance modloader version result."
+            );
+        }
     });
 }
 
@@ -1039,6 +1080,10 @@ fn poll_modloader_versions(state: &mut CreateInstanceState) {
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/create_instance",
+                        "Create-instance modloader version worker channel disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
@@ -1049,6 +1094,8 @@ fn poll_modloader_versions(state: &mut CreateInstanceState) {
     if should_reset_channel {
         state.modloader_versions_results_tx = None;
         state.modloader_versions_results_rx = None;
+        state.modloader_versions_status =
+            Some("Modloader version worker stopped unexpectedly.".to_owned());
     }
 
     for (key, result) in updates {
@@ -1064,6 +1111,12 @@ fn poll_modloader_versions(state: &mut CreateInstanceState) {
                 };
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/create_instance",
+                    cache_key = %key,
+                    error = %err,
+                    "Applying modloader-version fetch failure to create-instance modal."
+                );
                 state.modloader_versions_cache.insert(key, Vec::new());
                 state.modloader_versions_status =
                     Some(format!("Failed to fetch modloader versions: {err}"));
@@ -1154,11 +1207,10 @@ fn build_draft(state: &CreateInstanceState) -> Result<CreateInstanceDraft, Strin
         raw_modloader_version.to_owned()
     };
     let thumbnail_path = {
-        let trimmed = state.thumbnail_path.trim();
-        if trimmed.is_empty() {
+        if state.thumbnail_path.as_os_str().is_empty() {
             None
         } else {
-            Some(PathBuf::from(trimmed))
+            Some(state.thumbnail_path.clone())
         }
     };
     let description = {

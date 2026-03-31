@@ -210,7 +210,12 @@ fn render_contents(
 
     if let Some(path) = state.pending_skin_path.as_deref() {
         ui.add_space(style::SPACE_XS);
-        let _ = text_ui.label(ui, "skins_selected_path", path, &muted);
+        let _ = text_ui.label(
+            ui,
+            "skins_selected_path",
+            path.as_os_str().to_string_lossy().as_ref(),
+            &muted,
+        );
     }
 
     ui.add_space(style::SPACE_SM);
@@ -6758,7 +6763,7 @@ struct SkinManagerState {
     access_token: Option<String>,
     base_skin_png: Option<Vec<u8>>,
     pending_skin_png: Option<Vec<u8>>,
-    pending_skin_path: Option<String>,
+    pending_skin_path: Option<PathBuf>,
     initial_variant: MinecraftSkinVariant,
     pending_variant: MinecraftSkinVariant,
     available_capes: Vec<CapeChoice>,
@@ -6770,7 +6775,7 @@ struct SkinManagerState {
     refresh_in_progress: bool,
     worker_rx: Option<Arc<Mutex<Receiver<WorkerEvent>>>>,
     pick_skin_in_progress: bool,
-    pick_skin_results_rx: Option<Arc<Mutex<Receiver<Result<(String, Vec<u8>), String>>>>>,
+    pick_skin_results_rx: Option<Arc<Mutex<Receiver<Result<(PathBuf, Vec<u8>), String>>>>>,
     wgpu_target_format: Option<wgpu::TextureFormat>,
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
@@ -6961,6 +6966,11 @@ impl SkinManagerState {
                 }
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/skins",
+                    error = %err,
+                    "Failed to load cached accounts while preparing skin-manager snapshot."
+                );
                 notification::error!("skin_manager", "Failed to load account cache: {err}");
             }
         }
@@ -7101,7 +7111,7 @@ impl SkinManagerState {
                     Err(mpsc::TryRecvError::Disconnected) => {
                         self.save_in_progress = false;
                         self.refresh_in_progress = false;
-                        tracing::info!(
+                        tracing::error!(
                             target: "vertexlauncher/skins",
                             "Skin manager worker channel disconnected."
                         );
@@ -7124,6 +7134,10 @@ impl SkinManagerState {
         };
 
         let Ok(receiver) = rx.lock() else {
+            tracing::error!(
+                target: "vertexlauncher/skins",
+                "Pick-skin result receiver mutex was poisoned."
+            );
             return;
         };
         let Ok(result) = receiver.try_recv() else {
@@ -7142,6 +7156,11 @@ impl SkinManagerState {
                 self.preview_history = None;
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/skins",
+                    error = %err,
+                    "Pick-skin operation failed."
+                );
                 notification::error!("skin_manager", "{err}");
             }
         }
@@ -7270,7 +7289,6 @@ impl SkinManagerState {
         let (tx, rx) = mpsc::channel();
         self.pick_skin_in_progress = true;
         self.pick_skin_results_rx = Some(Arc::new(Mutex::new(rx)));
-        let path_for_result = path.display().to_string();
         let _ = tokio_runtime::spawn_detached(async move {
             let result =
                 tokio::fs::read(path.as_path())
@@ -7281,10 +7299,16 @@ impl SkinManagerState {
                             Err("Selected image must be a valid PNG skin (expected 64x64 or 64x32)."
                             .to_owned())
                         } else {
-                            Ok((path_for_result, bytes))
+                            Ok((path, bytes))
                         }
                     });
-            let _ = tx.send(result);
+            if let Err(err) = tx.send(result) {
+                tracing::error!(
+                    target: "vertexlauncher/skins",
+                    error = %err,
+                    "Failed to deliver picked skin-file result."
+                );
+            }
         });
     }
 
@@ -7340,9 +7364,16 @@ impl SkinManagerState {
             .unwrap_or_else(|| "unknown".to_owned());
         tokio_runtime::spawn_blocking_detached(move || {
             let result = fetch_and_cache_profile(profile_id, &token, display_name_for_log.as_str());
-            let _ = tx.send(WorkerEvent::Refreshed(
+            if let Err(err) = tx.send(WorkerEvent::Refreshed(
                 result.map(|loaded| (profile_id_for_result, loaded)),
-            ));
+            )) {
+                tracing::error!(
+                    target: "vertexlauncher/skins",
+                    display_name = %display_name_for_log,
+                    error = %err,
+                    "Failed to deliver skin manager refresh result."
+                );
+            }
         });
     }
 
@@ -7505,9 +7536,16 @@ impl SkinManagerState {
                     fetch_and_cache_profile(profile_id, &token, display_name_for_log.as_str())
                 }
             })();
-            let _ = tx.send(WorkerEvent::Saved(
+            if let Err(err) = tx.send(WorkerEvent::Saved(
                 result.map(|loaded| (profile_id_for_result, loaded)),
-            ));
+            )) {
+                tracing::error!(
+                    target: "vertexlauncher/skins",
+                    display_name = %display_name_for_log,
+                    error = %err,
+                    "Failed to deliver skin manager save result."
+                );
+            }
         });
     }
 

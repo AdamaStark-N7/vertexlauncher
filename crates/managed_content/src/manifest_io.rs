@@ -65,7 +65,7 @@ pub fn remove_content_manifest_entries_for_path(
         .strip_prefix(instance_root)
         .unwrap_or(content_path)
         .to_str()
-        .map(normalize_content_path_key)
+        .map(|value| normalize_content_path_key(Path::new(value)))
         .unwrap_or_default();
     if normalized_target.is_empty() {
         return Ok(false);
@@ -73,7 +73,7 @@ pub fn remove_content_manifest_entries_for_path(
 
     let previous_len = manifest.projects.len();
     manifest.projects.retain(|_, project| {
-        normalize_content_path_key(project.file_path.as_str()) != normalized_target
+        normalize_content_path_key(project.file_path.as_path()) != normalized_target
     });
     if manifest.projects.len() == previous_len {
         return Ok(false);
@@ -160,7 +160,7 @@ pub fn load_managed_content_identities(
         .filter_map(|project| {
             let source = project.selected_source?;
             Some((
-                normalize_content_path_key(project.file_path.as_str()),
+                normalize_content_path_key(project.file_path.as_path()),
                 InstalledContentIdentity {
                     name: project.name,
                     file_path: project.file_path,
@@ -179,7 +179,7 @@ pub fn normalize_content_manifest(instance_root: &Path, manifest: &mut ContentIn
     let mut missing_keys = Vec::new();
     for (key, value) in &mut manifest.projects {
         if let Some(resolved_path) =
-            resolve_content_manifest_path(instance_root, value.file_path.as_str())
+            resolve_content_manifest_path(instance_root, value.file_path.as_path())
         {
             value.file_path = resolved_path;
         } else {
@@ -194,7 +194,7 @@ pub fn normalize_content_manifest(instance_root: &Path, manifest: &mut ContentIn
         manifest.projects.keys().cloned().collect();
     for (key, value) in &mut manifest.projects {
         value.project_key = key.clone();
-        value.file_path = normalize_content_path(value.file_path.as_str());
+        value.file_path = normalize_content_path(value.file_path.as_path());
         value
             .direct_dependencies
             .retain(|dependency| dependency != key && project_keys.contains(dependency));
@@ -209,27 +209,26 @@ pub fn normalize_content_manifest(instance_root: &Path, manifest: &mut ContentIn
     }
 }
 
-fn resolve_content_manifest_path(instance_root: &Path, value: &str) -> Option<String> {
+fn resolve_content_manifest_path(instance_root: &Path, value: &Path) -> Option<PathBuf> {
     let normalized = normalize_content_path(value);
-    if normalized.is_empty() {
+    if normalized.as_os_str().is_empty() {
         return None;
     }
 
-    let exact_path = instance_root.join(normalized.as_str());
+    let exact_path = instance_root.join(normalized.as_path());
     if exact_path.exists() {
         return Some(normalized);
     }
 
     let mut current = instance_root.to_path_buf();
-    let mut resolved_components = Vec::new();
-    for component in Path::new(normalized.as_str()).components() {
+    let mut resolved_path = PathBuf::new();
+    for component in normalized.components() {
         match component {
             Component::CurDir => {}
             Component::Normal(part) => {
-                let part = part.to_string_lossy();
-                let exact_child = current.join(part.as_ref());
+                let exact_child = current.join(part);
                 let resolved_part = if exact_child.exists() {
-                    part.into_owned()
+                    part.to_os_string()
                 } else {
                     std::fs::read_dir(current.as_path())
                         .ok()?
@@ -238,31 +237,39 @@ fn resolve_content_manifest_path(instance_root: &Path, value: &str) -> Option<St
                             let file_name = entry.file_name();
                             let file_name = file_name.to_string_lossy();
                             file_name
-                                .eq_ignore_ascii_case(part.as_ref())
-                                .then(|| file_name.into_owned())
+                                .eq_ignore_ascii_case(part.to_string_lossy().as_ref())
+                                .then(|| entry.file_name())
                         })?
                 };
-                current.push(resolved_part.as_str());
-                resolved_components.push(resolved_part);
+                current.push(&resolved_part);
+                resolved_path.push(&resolved_part);
             }
             Component::Prefix(_) | Component::RootDir | Component::ParentDir => return None,
         }
     }
 
-    current.exists().then(|| resolved_components.join("/"))
+    current.exists().then_some(resolved_path)
 }
 
-fn normalize_content_path(value: &str) -> String {
-    value
+fn normalize_content_path(value: &Path) -> PathBuf {
+    let raw = value.to_string_lossy();
+    let normalized = raw
         .trim()
         .trim_start_matches("./")
         .trim_start_matches(".\\")
-        .replace('\\', "/")
+        .replace('\\', "/");
+    if normalized.is_empty() {
+        PathBuf::new()
+    } else {
+        PathBuf::from(normalized)
+    }
 }
 
 #[must_use]
-pub fn normalize_content_path_key(value: &str) -> String {
-    normalize_content_path(value).to_ascii_lowercase()
+pub fn normalize_content_path_key(value: &Path) -> String {
+    normalize_content_path(value)
+        .to_string_lossy()
+        .to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -296,7 +303,7 @@ mod tests {
                 project_key: String::new(),
                 name: "Sodium".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/sodium-fabric.jar".to_owned(),
+                file_path: PathBuf::from("mods/sodium-fabric.jar"),
                 modrinth_project_id: Some("AANobbMI".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
@@ -314,7 +321,7 @@ mod tests {
             .projects
             .get("mod::sodium")
             .expect("project should remain present");
-        assert_eq!(project.file_path, "mods/Sodium-Fabric.jar");
+        assert_eq!(project.file_path, PathBuf::from("mods/Sodium-Fabric.jar"));
 
         let _ = std::fs::remove_file(jar_path.as_path());
         let _ = std::fs::remove_dir_all(temp_root.as_path());
@@ -335,7 +342,7 @@ mod tests {
                 project_key: String::new(),
                 name: "Sodium".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/sodium-fabric.jar".to_owned(),
+                file_path: PathBuf::from("mods/sodium-fabric.jar"),
                 modrinth_project_id: Some("AANobbMI".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
@@ -352,7 +359,7 @@ mod tests {
                 project_key: String::new(),
                 name: "Missing".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/missing.jar".to_owned(),
+                file_path: PathBuf::from("mods/missing.jar"),
                 modrinth_project_id: Some("missing".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
@@ -374,7 +381,7 @@ mod tests {
                 .get("mod::sodium")
                 .expect("normalized project should remain")
                 .file_path,
-            "mods/Sodium-Fabric.jar"
+            PathBuf::from("mods/Sodium-Fabric.jar")
         );
 
         let persisted = std::fs::read_to_string(content_manifest_path(temp_root.as_path()))
@@ -388,7 +395,7 @@ mod tests {
                 .get("mod::sodium")
                 .expect("normalized project should persist")
                 .file_path,
-            "mods/Sodium-Fabric.jar"
+            PathBuf::from("mods/Sodium-Fabric.jar")
         );
 
         let _ = std::fs::remove_dir_all(temp_root.as_path());
@@ -411,7 +418,7 @@ mod tests {
                 project_key: "mod::example".to_owned(),
                 name: "Example".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/Example.jar".to_owned(),
+                file_path: PathBuf::from("mods/Example.jar"),
                 modrinth_project_id: Some("example".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
@@ -428,7 +435,7 @@ mod tests {
                 project_key: "mod::core".to_owned(),
                 name: "Core".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/Core.jar".to_owned(),
+                file_path: PathBuf::from("mods/Core.jar"),
                 modrinth_project_id: Some("core".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),

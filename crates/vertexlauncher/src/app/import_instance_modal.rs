@@ -118,8 +118,8 @@ fn fs_file_open_logged(path: &Path) -> std::io::Result<fs::File> {
 #[derive(Debug, Default)]
 pub struct ImportInstanceState {
     pub source_mode_index: usize,
-    pub package_path: String,
-    pub launcher_path: String,
+    pub package_path: PathBuf,
+    pub launcher_path: PathBuf,
     pub launcher_kind_index: usize,
     pub instance_name: String,
     pub error: Option<String>,
@@ -231,24 +231,68 @@ fn poll_preview_results(state: &mut ImportInstanceState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/import_instance",
+            request_serial = state.preview_request_serial,
+            "Import preview receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok((request_serial, result)) = receiver.try_recv() {
-        if request_serial != state.preview_request_serial {
-            continue;
-        }
-        state.preview_in_flight = false;
-        match result {
-            Ok(preview) => {
-                if state.instance_name.trim().is_empty() {
-                    state.instance_name = preview.detected_name.clone();
+    loop {
+        match receiver.try_recv() {
+            Ok((request_serial, result)) => {
+                if request_serial != state.preview_request_serial {
+                    tracing::debug!(
+                        target: "vertexlauncher/import_instance",
+                        request_serial,
+                        active_request_serial = state.preview_request_serial,
+                        "Ignoring stale import preview result."
+                    );
+                    continue;
                 }
-                state.preview = Some(preview);
-                state.error = None;
+                state.preview_in_flight = false;
+                match result {
+                    Ok(preview) => {
+                        tracing::info!(
+                            target: "vertexlauncher/import_instance",
+                            request_serial,
+                            preview_kind = %preview.kind.label(),
+                            detected_name = %preview.detected_name,
+                            game_version = %preview.game_version,
+                            modloader = %preview.modloader,
+                            modloader_version = %preview.modloader_version,
+                            "Import preview completed."
+                        );
+                        if state.instance_name.trim().is_empty() {
+                            state.instance_name = preview.detected_name.clone();
+                        }
+                        state.preview = Some(preview);
+                        state.error = None;
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "vertexlauncher/import_instance",
+                            request_serial,
+                            error = %err,
+                            "Import preview failed."
+                        );
+                        state.preview = None;
+                        state.error = Some(err);
+                    }
+                }
             }
-            Err(err) => {
-                state.preview = None;
-                state.error = Some(err);
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/import_instance",
+                    request_serial = state.preview_request_serial,
+                    "Import preview worker channel disconnected unexpectedly."
+                );
+                state.preview_in_flight = false;
+                state.error = Some("Import preview worker stopped unexpectedly.".to_owned());
+                state.preview_results_tx = None;
+                state.preview_results_rx = None;
+                break;
             }
         }
     }
@@ -358,6 +402,24 @@ fn selected_launcher_hint(state: &ImportInstanceState) -> Option<LauncherKind> {
     }
 }
 
+fn path_input_string(path: &Path) -> String {
+    path.as_os_str().to_string_lossy().into_owned()
+}
+
+fn update_path_from_input(path: &mut PathBuf, input: &str) -> bool {
+    let trimmed = input.trim();
+    let next = if trimmed.is_empty() {
+        PathBuf::new()
+    } else {
+        PathBuf::from(trimmed)
+    };
+    if *path == next {
+        return false;
+    }
+    *path = next;
+    true
+}
+
 pub fn render(
     ctx: &egui::Context,
     text_ui: &mut TextUi,
@@ -449,15 +511,18 @@ pub fn render(
             match selected_import_mode(state) {
                 ImportMode::ManifestFile => {
                     let previous_path = state.package_path.clone();
+                    let mut package_path_input = path_input_string(state.package_path.as_path());
                     let _ = settings_widgets::full_width_text_input_row(
                         text_ui,
                         ui,
                         "instance_import_package_path",
                         "Manifest file",
                         Some("Select a .vtmpack, .mrpack, or CurseForge modpack .zip file."),
-                        &mut state.package_path,
+                        &mut package_path_input,
                     );
-                    if state.package_path != previous_path {
+                    if update_path_from_input(&mut state.package_path, &package_path_input)
+                        || state.package_path != previous_path
+                    {
                         state.preview = None;
                         state.error = None;
                     }
@@ -474,7 +539,7 @@ pub fn render(
                         .clicked()
                         {
                             if let Some(path) = pick_import_file() {
-                                state.package_path = path.display().to_string();
+                                state.package_path = path;
                                 load_preview_from_state(state);
                             }
                         }
@@ -499,6 +564,8 @@ pub fn render(
                             Some(ImportPreviewKind::Manifest(ImportPackageKind::CurseForgePack))
                         ) || state
                             .package_path
+                            .as_os_str()
+                            .to_string_lossy()
                             .trim()
                             .to_ascii_lowercase()
                             .ends_with(".zip"));
@@ -520,6 +587,7 @@ pub fn render(
                 ImportMode::LauncherDirectory => {
                     let previous_path = state.launcher_path.clone();
                     let previous_launcher_kind = state.launcher_kind_index;
+                    let mut launcher_path_input = path_input_string(state.launcher_path.as_path());
                     let _ = settings_widgets::full_width_dropdown_row(
                         text_ui,
                         ui,
@@ -535,9 +603,10 @@ pub fn render(
                         "instance_import_launcher_path",
                         "Instance folder",
                         Some("Choose the instance directory from Modrinth, CurseForge, Prism, ATLauncher, or another launcher."),
-                        &mut state.launcher_path,
+                        &mut launcher_path_input,
                     );
-                    if state.launcher_path != previous_path
+                    if update_path_from_input(&mut state.launcher_path, &launcher_path_input)
+                        || state.launcher_path != previous_path
                         || state.launcher_kind_index != previous_launcher_kind
                     {
                         state.preview = None;
@@ -556,7 +625,7 @@ pub fn render(
                         .clicked()
                         {
                             if let Some(path) = pick_import_directory() {
-                                state.launcher_path = path.display().to_string();
+                                state.launcher_path = path;
                                 load_preview_from_state(state);
                             }
                         }
@@ -721,8 +790,8 @@ pub fn render(
                 }
 
                 let import_disabled = state.import_in_flight || match selected_import_mode(state) {
-                    ImportMode::ManifestFile => state.package_path.trim().is_empty(),
-                    ImportMode::LauncherDirectory => state.launcher_path.trim().is_empty(),
+                    ImportMode::ManifestFile => state.package_path.as_os_str().is_empty(),
+                    ImportMode::LauncherDirectory => state.launcher_path.as_os_str().is_empty(),
                 };
                 if ui
                     .add_enabled_ui(!import_disabled, |ui| {
@@ -745,13 +814,11 @@ pub fn render(
                         action = ModalAction::Import(ImportRequest {
                             source: match selected_import_mode(state) {
                                 ImportMode::ManifestFile => {
-                                    ImportSource::ManifestFile(PathBuf::from(
-                                        state.package_path.trim(),
-                                    ))
+                                    ImportSource::ManifestFile(state.package_path.clone())
                                 }
                                 ImportMode::LauncherDirectory => {
                                     ImportSource::LauncherDirectory {
-                                        path: PathBuf::from(state.launcher_path.trim()),
+                                        path: state.launcher_path.clone(),
                                         launcher: selected_launcher_hint(state),
                                     }
                                 }
@@ -917,7 +984,7 @@ fn load_preview_from_state(state: &mut ImportInstanceState) {
     };
     let request = match selected_import_mode(state) {
         ImportMode::ManifestFile => {
-            let path = PathBuf::from(state.package_path.trim());
+            let path = state.package_path.clone();
             if path.as_os_str().is_empty() {
                 state.preview = None;
                 state.error = Some(
@@ -928,7 +995,7 @@ fn load_preview_from_state(state: &mut ImportInstanceState) {
             (path, selected_launcher_hint(state), true)
         }
         ImportMode::LauncherDirectory => {
-            let path = PathBuf::from(state.launcher_path.trim());
+            let path = state.launcher_path.clone();
             if path.as_os_str().is_empty() {
                 state.preview = None;
                 state.error = Some("Choose an instance folder first.".to_owned());
@@ -954,7 +1021,14 @@ fn load_preview_from_state(state: &mut ImportInstanceState) {
         .await
         .map_err(|err| err.to_string())
         .and_then(|result| result);
-        let _ = tx.send((request_serial, result));
+        if let Err(err) = tx.send((request_serial, result)) {
+            tracing::error!(
+                target: "vertexlauncher/import_instance",
+                request_serial,
+                error = %err,
+                "Failed to deliver import preview result."
+            );
+        }
     });
 }
 
@@ -2121,7 +2195,7 @@ fn maybe_add_project_from_json(
         InstalledContentProject {
             project_key,
             name,
-            file_path,
+            file_path: PathBuf::from(file_path),
             modrinth_project_id,
             curseforge_project_id,
             selected_source: match source {
@@ -2363,7 +2437,10 @@ fn import_curseforge_pack(
         .map_err(ImportPackageError::message)?;
     let override_steps = count_curseforge_override_entries(
         package_path.as_path(),
-        manifest.overrides.as_deref().unwrap_or("overrides"),
+        manifest
+            .overrides
+            .as_deref()
+            .unwrap_or_else(|| Path::new("overrides")),
     )
     .map_err(ImportPackageError::message)?;
     let file_count = manifest.files.iter().filter(|file| file.required).count();
@@ -2504,11 +2581,11 @@ fn build_mrpack_base_manifest(
         ) {
             continue;
         }
-        let content_folder = managed_content_folder_for_relative_path(file.path.as_str());
+        let content_folder = managed_content_folder_for_relative_path(file.path.as_path());
         let Some(folder_name) = content_folder else {
             continue;
         };
-        let absolute_path = join_safe(instance_root, file.path.as_str())?;
+        let absolute_path = join_safe(instance_root, file.path.as_path())?;
         if !absolute_path.exists() || absolute_path.is_dir() {
             continue;
         }
@@ -2531,7 +2608,7 @@ fn build_mrpack_base_manifest(
                 project_key,
                 name: project.title,
                 folder_name: folder_name.to_owned(),
-                file_path: relative_path,
+                file_path: PathBuf::from(relative_path),
                 modrinth_project_id: Some(project.project_id),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
@@ -2579,7 +2656,7 @@ fn build_curseforge_base_manifest_from_resolved(
                     .map(|project| project.name.clone())
                     .unwrap_or_else(|| file.display_name.clone()),
                 folder_name: "mods".to_owned(),
-                file_path: format!("mods/{}", file.file_name),
+                file_path: PathBuf::from(format!("mods/{}", file.file_name)),
                 modrinth_project_id: None,
                 curseforge_project_id: Some(manifest_file.project_id),
                 selected_source: Some(ManagedContentSource::CurseForge),
@@ -2836,7 +2913,14 @@ fn download_curseforge_plans_concurrently(
                 ));
                 let result = download_file(plan.download_url.as_str(), staged_path.as_path())
                     .map(|_| staged_path);
-                let _ = tx.send((plan.requirement, result, plan.source_label));
+                if let Err(err) = tx.send((plan.requirement, result, plan.source_label)) {
+                    tracing::error!(
+                        target: "vertexlauncher/import_instance",
+                        source = %plan.source_label,
+                        error = %err,
+                        "Failed to deliver manual CurseForge download worker result."
+                    );
+                }
             }
         }));
     }
@@ -3007,8 +3091,8 @@ fn parse_modrinth_download_source(url: &str) -> Option<ResolvedModrinthDownloadS
     None
 }
 
-fn managed_content_folder_for_relative_path(relative_path: &str) -> Option<&'static str> {
-    let normalized = relative_path.replace('\\', "/");
+fn managed_content_folder_for_relative_path(relative_path: &Path) -> Option<&'static str> {
+    let normalized = relative_path.to_string_lossy().replace('\\', "/");
     let head = normalized.split('/').next()?.to_ascii_lowercase();
     match head.as_str() {
         "mods" => Some("mods"),
@@ -3028,12 +3112,10 @@ fn pack_managed_path_keys(
         .projects
         .values()
         .filter(|project| project.pack_managed)
-        .map(|project| managed_content::normalize_content_path_key(project.file_path.as_str()))
-        .chain(
-            base_manifest.projects.values().map(|project| {
-                managed_content::normalize_content_path_key(project.file_path.as_str())
-            }),
-        )
+        .map(|project| managed_content::normalize_content_path_key(project.file_path.as_path()))
+        .chain(base_manifest.projects.values().map(|project| {
+            managed_content::normalize_content_path_key(project.file_path.as_path())
+        }))
         .collect()
 }
 
@@ -3056,7 +3138,8 @@ fn preserve_non_pack_managed_content(
                 .unwrap_or(source_path.as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
-            let relative_key = managed_content::normalize_content_path_key(relative_path.as_str());
+            let relative_key =
+                managed_content::normalize_content_path_key(Path::new(relative_path.as_str()));
             if pack_managed_paths.contains(relative_key.as_str()) {
                 continue;
             }
@@ -3175,10 +3258,10 @@ fn populate_vtmpack_instance(
     )?;
 
     for downloadable in &manifest.downloadable_content {
-        if downloadable.file_path.trim().is_empty() {
+        if downloadable.file_path.as_os_str().is_empty() {
             continue;
         }
-        let destination = join_safe(instance_root, downloadable.file_path.as_str())?;
+        let destination = join_safe(instance_root, downloadable.file_path.as_path())?;
         if let Some(parent) = destination.parent() {
             fs_create_dir_all_logged(parent).map_err(|err| {
                 format!(
@@ -3255,7 +3338,7 @@ fn extract_vtmpack_payload(
             continue;
         }
         if let Some(relative) = entry_string.strip_prefix("bundled_mods/") {
-            let destination = join_safe(&instance_root.join("mods"), relative)?;
+            let destination = join_safe(&instance_root.join("mods"), Path::new(relative))?;
             progress(import_progress(
                 &format!("Restoring bundled mod {}", relative),
                 *completed_steps,
@@ -3278,7 +3361,7 @@ fn extract_vtmpack_payload(
             continue;
         }
         if let Some(relative) = entry_string.strip_prefix("configs/") {
-            let destination = join_safe(&instance_root.join("config"), relative)?;
+            let destination = join_safe(&instance_root.join("config"), Path::new(relative))?;
             progress(import_progress(
                 &format!("Restoring config {}", relative),
                 *completed_steps,
@@ -3298,7 +3381,7 @@ fn extract_vtmpack_payload(
             continue;
         }
         if let Some(relative) = entry_string.strip_prefix("root_entries/") {
-            let destination = join_safe(instance_root, relative)?;
+            let destination = join_safe(instance_root, Path::new(relative))?;
             progress(import_progress(
                 &format!("Restoring {}", relative),
                 *completed_steps,
@@ -3426,7 +3509,7 @@ fn populate_mrpack_instance(
         ) {
             continue;
         }
-        let destination = join_safe(instance_root, file.path.as_str())?;
+        let destination = join_safe(instance_root, file.path.as_path())?;
         if let Some(parent) = destination.parent() {
             fs_create_dir_all_logged(parent).map_err(|err| {
                 format!(
@@ -3435,14 +3518,15 @@ fn populate_mrpack_instance(
                 )
             })?;
         }
-        let download_url = file
-            .downloads
-            .first()
-            .cloned()
-            .ok_or_else(|| format!("Modrinth pack entry {} has no download URL", file.path))?;
+        let download_url = file.downloads.first().cloned().ok_or_else(|| {
+            format!(
+                "Modrinth pack entry {} has no download URL",
+                file.path.display()
+            )
+        })?;
         completed_steps += 1;
         progress(import_progress(
-            &format!("Downloading {}", file.path),
+            &format!("Downloading {}", file.path.display()),
             completed_steps,
             total_steps,
         ));
@@ -3464,7 +3548,10 @@ fn populate_curseforge_pack_instance(
     let mut completed_steps = starting_completed_steps;
     let total_mods = manifest.files.iter().filter(|file| file.required).count();
     let mut applied_mods = 0usize;
-    let overrides_root = manifest.overrides.as_deref().unwrap_or("overrides");
+    let overrides_root = manifest
+        .overrides
+        .as_deref()
+        .unwrap_or_else(|| Path::new("overrides"));
     extract_curseforge_overrides(
         package_path,
         instance_root,
@@ -3547,7 +3634,7 @@ fn extract_mrpack_overrides(
         if relative.is_empty() {
             continue;
         }
-        let destination = join_safe(instance_root, relative)?;
+        let destination = join_safe(instance_root, Path::new(relative))?;
         *completed_steps += 1;
         progress(import_progress(
             &format!("Restoring override {}", relative),
@@ -3589,7 +3676,7 @@ fn extract_mrpack_overrides(
 fn extract_curseforge_overrides(
     package_path: &Path,
     instance_root: &Path,
-    overrides_root: &str,
+    overrides_root: &Path,
     total_steps: usize,
     completed_steps: &mut usize,
     progress: &mut dyn FnMut(ImportProgress),
@@ -3598,7 +3685,14 @@ fn extract_curseforge_overrides(
         .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|err| format!("failed to read {}: {err}", package_path.display()))?;
-    let normalized_root = format!("{}/", overrides_root.trim().trim_matches('/'));
+    let normalized_root = format!(
+        "{}/",
+        overrides_root
+            .to_string_lossy()
+            .trim()
+            .trim_matches('/')
+            .replace('\\', "/")
+    );
 
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).map_err(|err| {
@@ -3614,7 +3708,7 @@ fn extract_curseforge_overrides(
         if relative.is_empty() {
             continue;
         }
-        let destination = join_safe(instance_root, relative)?;
+        let destination = join_safe(instance_root, Path::new(relative))?;
         *completed_steps += 1;
         progress(import_progress(
             &format!("Restoring override {}", relative),
@@ -3703,13 +3797,20 @@ fn count_mrpack_override_entries(package_path: &Path) -> Result<usize, String> {
 
 fn count_curseforge_override_entries(
     package_path: &Path,
-    overrides_root: &str,
+    overrides_root: &Path,
 ) -> Result<usize, String> {
     let file = fs_file_open_logged(package_path)
         .map_err(|err| format!("failed to open {}: {err}", package_path.display()))?;
     let mut archive = zip::ZipArchive::new(file)
         .map_err(|err| format!("failed to read {}: {err}", package_path.display()))?;
-    let normalized_root = format!("{}/", overrides_root.trim().trim_matches('/'));
+    let normalized_root = format!(
+        "{}/",
+        overrides_root
+            .to_string_lossy()
+            .trim()
+            .trim_matches('/')
+            .replace('\\', "/")
+    );
     let mut count = 0usize;
     for index in 0..archive.len() {
         let entry = archive.by_index(index).map_err(|err| {
@@ -3852,8 +3953,7 @@ fn normalize_source_name(source: Option<&str>) -> Option<ManagedSource> {
     }
 }
 
-fn join_safe(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let relative = Path::new(relative);
+fn join_safe(root: &Path, relative: &Path) -> Result<PathBuf, String> {
     let mut clean = PathBuf::new();
     for component in relative.components() {
         match component {
@@ -4263,6 +4363,12 @@ fn throttle_download_url(url: &str) {
     };
     let lock = download_throttle_store(url);
     let Ok(mut next_allowed) = lock.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/import_instance",
+            url,
+            throttle_spacing_ms = spacing.as_millis() as u64,
+            "Import-instance download throttle mutex was poisoned."
+        );
         return;
     };
     let now = Instant::now();
@@ -4410,7 +4516,7 @@ struct MrpackManifest {
 
 #[derive(Debug, Clone, Deserialize)]
 struct MrpackFile {
-    path: String,
+    path: PathBuf,
     #[serde(default)]
     downloads: Vec<String>,
     #[serde(default)]
@@ -4435,7 +4541,7 @@ struct CurseForgePackManifest {
     #[serde(default)]
     files: Vec<CurseForgePackFile>,
     #[serde(default)]
-    overrides: Option<String>,
+    overrides: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4495,7 +4601,7 @@ mod tests {
 
     #[test]
     fn safe_join_rejects_parent_traversal() {
-        let result = join_safe(Path::new("/tmp/root"), "../mods/evil.jar");
+        let result = join_safe(Path::new("/tmp/root"), Path::new("../mods/evil.jar"));
         assert!(result.is_err());
     }
 

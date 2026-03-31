@@ -66,8 +66,8 @@ where
         .projects
         .iter()
         .filter_map(|(project_key, project)| {
-            let normalized_path = normalize_pack_path(project.file_path.as_str());
-            if normalized_path.is_empty() {
+            let normalized_path = normalize_pack_path(project.file_path.as_path());
+            if normalized_path.as_os_str().is_empty() {
                 return None;
             }
             Some(VtmpackDownloadableEntry {
@@ -91,7 +91,7 @@ where
 
     let downloadable_paths = downloadable_entries
         .iter()
-        .map(|entry| normalize_pack_path(entry.file_path.as_str()))
+        .map(|entry| normalize_pack_path(entry.file_path.as_path()))
         .collect::<HashSet<_>>();
 
     let selected_root_entries = options
@@ -120,8 +120,8 @@ where
                 .strip_prefix(instance_root)
                 .unwrap_or(path.as_path())
                 .to_path_buf();
-            let normalized = normalize_pack_path(relative.display().to_string().as_str());
-            if !downloadable_paths.contains(normalized.as_str()) {
+            let normalized = normalize_pack_path(relative.as_path());
+            if !downloadable_paths.contains(&normalized) {
                 bundled_mod_files.push(path);
             }
         }
@@ -146,13 +146,7 @@ where
             let relative_from_mods = path
                 .strip_prefix(mods_dir.as_path())
                 .unwrap_or(path.as_path());
-            normalize_pack_path(
-                Path::new("bundled_mods")
-                    .join(relative_from_mods)
-                    .display()
-                    .to_string()
-                    .as_str(),
-            )
+            normalize_pack_path(Path::new("bundled_mods").join(relative_from_mods).as_path())
         })
         .collect::<Vec<_>>();
     let config_paths = config_files
@@ -161,13 +155,7 @@ where
             let relative_from_configs = path
                 .strip_prefix(configs_dir.as_path())
                 .unwrap_or(path.as_path());
-            normalize_pack_path(
-                Path::new("configs")
-                    .join(relative_from_configs)
-                    .display()
-                    .to_string()
-                    .as_str(),
-            )
+            normalize_pack_path(Path::new("configs").join(relative_from_configs).as_path())
         })
         .collect::<Vec<_>>();
     let mut additional_files = Vec::<PathBuf>::new();
@@ -197,7 +185,7 @@ where
         .iter()
         .map(|path| {
             let relative = path.strip_prefix(instance_root).unwrap_or(path.as_path());
-            normalize_pack_path(relative.display().to_string().as_str())
+            normalize_pack_path(relative)
         })
         .collect::<Vec<_>>();
 
@@ -428,11 +416,18 @@ fn progress_update(
     }
 }
 
-fn normalize_pack_path(path: &str) -> String {
-    path.trim()
+fn normalize_pack_path(path: &std::path::Path) -> PathBuf {
+    let normalized = path
+        .to_string_lossy()
+        .trim()
         .trim_start_matches("./")
         .trim_start_matches(".\\")
-        .replace('\\', "/")
+        .replace('\\', "/");
+    if normalized.is_empty() {
+        PathBuf::new()
+    } else {
+        PathBuf::from(normalized)
+    }
 }
 
 #[cfg(test)]
@@ -451,7 +446,7 @@ mod tests {
                     "mod::sodium".to_owned(),
                     InstalledContentProject {
                         name: "Sodium".to_owned(),
-                        file_path: "mods/sodium.jar".to_owned(),
+                        file_path: PathBuf::from("mods/sodium.jar"),
                         modrinth_project_id: Some("AANobbMI".to_owned()),
                         curseforge_project_id: Some(394468),
                         selected_source: Some(ManagedContentSource::Modrinth),
@@ -462,7 +457,7 @@ mod tests {
                     "mod::embeddium".to_owned(),
                     InstalledContentProject {
                         name: "Embeddium".to_owned(),
-                        file_path: "mods/embeddium.jar".to_owned(),
+                        file_path: PathBuf::from("mods/embeddium.jar"),
                         curseforge_project_id: Some(908741),
                         selected_source: Some(ManagedContentSource::CurseForge),
                         ..InstalledContentProject::default()

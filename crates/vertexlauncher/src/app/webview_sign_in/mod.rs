@@ -428,7 +428,13 @@ fn join_helper_stdout(
 ) -> Result<String, String> {
     match handle.join() {
         Ok(result) => result,
-        Err(_) => Err("Webview helper stdout reader thread panicked unexpectedly".to_owned()),
+        Err(_) => {
+            tracing::error!(
+                target: "vertexlauncher/auth/webview",
+                "Webview helper stdout reader thread panicked unexpectedly."
+            );
+            Err("Webview helper stdout reader thread panicked unexpectedly".to_owned())
+        }
     }
 }
 

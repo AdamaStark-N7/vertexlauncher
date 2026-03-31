@@ -130,10 +130,17 @@ impl AuthState {
         let (avatar_result_tx, avatar_result_rx) = mpsc::channel();
         let (accounts_state, status) = match auth::load_cached_accounts() {
             Ok(state) => (state, AuthUiStatus::Idle),
-            Err(err) => (
-                CachedAccountsState::default(),
-                AuthUiStatus::Error(format!("Failed to load cached account state: {err}")),
-            ),
+            Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/auth_state",
+                    error = %err,
+                    "Failed to load cached accounts during auth-state startup."
+                );
+                (
+                    CachedAccountsState::default(),
+                    AuthUiStatus::Error(format!("Failed to load cached account state: {err}")),
+                )
+            }
         };
         let account_avatars = decoded_cached_avatars(&accounts_state);
         let active_avatar_png = active_avatar_from_map(&accounts_state, &account_avatars);
@@ -162,6 +169,12 @@ impl AuthState {
                         .spawn_renewal_worker(client_id, AuthUiStatus::RefreshingCachedSession);
                 }
                 Err(err) => {
+                    tracing::warn!(
+                        target: "vertexlauncher/auth_state",
+                        error = %err,
+                        account_count = auth_state.accounts_state.accounts.len(),
+                        "Skipping cached-account renewal during startup."
+                    );
                     auth_state.status = AuthUiStatus::Error(format!(
                         "Loaded cached accounts, but token renewal was skipped: {err}"
                     ));
@@ -219,6 +232,13 @@ impl AuthState {
                                 } else {
                                     "Loaded cached accounts, but token renewal failed"
                                 };
+                            tracing::warn!(
+                                target: "vertexlauncher/auth_state",
+                                active_refresh = matches!(self.status, AuthUiStatus::RefreshingActiveSession),
+                                failed_accounts = failed_account_errors.len(),
+                                error = %err,
+                                "Account renewal worker returned an error."
+                            );
                             if is_http_auth_error(err.as_str()) {
                                 notification::warn!(
                                     "auth",
@@ -266,6 +286,11 @@ impl AuthState {
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/auth_state",
+                        account_count = self.accounts_state.accounts.len(),
+                        "Cached-account renewal worker disconnected unexpectedly."
+                    );
                     notification::error!(
                         "auth",
                         "Loaded cached accounts, but token renewal worker stopped unexpectedly."
@@ -308,6 +333,12 @@ impl AuthState {
                         self.status = AuthUiStatus::Idle;
 
                         if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
+                            tracing::warn!(
+                                target: "vertexlauncher/auth_state",
+                                error = %err,
+                                active_profile = self.accounts_state.active_profile_id.as_deref().unwrap_or_default(),
+                                "Sign-in succeeded but persisting cached account state failed."
+                            );
                             let message = format!(
                                 "Sign-in succeeded, but failed to cache account state: {err}"
                             );
@@ -323,6 +354,11 @@ impl AuthState {
                         self.schedule_missing_avatars();
                     }
                     AuthFlowEvent::Failed(err) => {
+                        tracing::error!(
+                            target: "vertexlauncher/auth_state",
+                            error = %err,
+                            "Interactive sign-in flow failed."
+                        );
                         notification::error!("auth", "{err}");
                         self.status = AuthUiStatus::Error(err);
                         flow_finished = true;
@@ -331,6 +367,10 @@ impl AuthState {
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
                     if !flow_finished {
+                        tracing::error!(
+                            target: "vertexlauncher/auth_state",
+                            "Interactive sign-in worker disconnected before completion."
+                        );
                         notification::error!(
                             "auth",
                             "Sign-in stopped unexpectedly before completion"
@@ -768,11 +808,17 @@ impl AuthState {
                 emit_cached_account_renewal_notification(event, streamer_mode);
             })
             .map_err(|err| err.to_string());
-            let _ = tx.send(RenewalResult::Bulk {
+            if let Err(err) = tx.send(RenewalResult::Bulk {
                 result,
                 failed_account_errors,
                 succeeded_profile_ids,
-            });
+            }) {
+                tracing::error!(
+                    target: "vertexlauncher/auth/renew",
+                    error = %err,
+                    "Failed to deliver bulk renewal result."
+                );
+            }
         });
         self.renewal = Some(rx);
         self.status = status;
@@ -790,7 +836,17 @@ impl AuthState {
         let _ = tokio_runtime::spawn_blocking_detached(move || {
             let result = auth::renew_cached_account_token(&client_id, profile_id.as_str())
                 .map_err(|err| err.to_string());
-            let _ = tx.send(RenewalResult::Single { profile_id, result });
+            if let Err(err) = tx.send(RenewalResult::Single {
+                profile_id: profile_id.clone(),
+                result,
+            }) {
+                tracing::error!(
+                    target: "vertexlauncher/auth/renew",
+                    profile_fingerprint = %webview_sign_in::fingerprint_for_log(&profile_id),
+                    error = %err,
+                    "Failed to deliver single-account renewal result."
+                );
+            }
         });
         self.renewal = Some(rx);
         self.status = if is_active_target {
@@ -880,7 +936,13 @@ impl AuthState {
                         error: Some(err.to_string()),
                     },
                 };
-                let _ = tx.send(result);
+                if let Err(err) = tx.send(result) {
+                    tracing::error!(
+                        target: "vertexlauncher/auth/avatar",
+                        error = %err,
+                        "Failed to deliver avatar background-load result."
+                    );
+                }
             });
         }
     }
@@ -932,7 +994,13 @@ impl AuthState {
                     }
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/auth/avatar",
+                        "Avatar background-load worker disconnected unexpectedly."
+                    );
+                    break;
+                }
             }
         }
     }
@@ -1015,6 +1083,43 @@ fn renewal_replace_key(profile_id: &str) -> String {
     format!("login-renewal:{:016x}", hasher.finish())
 }
 
+fn emit_auth_flow_event(
+    sender: &mpsc::Sender<AuthFlowEvent>,
+    target: &'static str,
+    event_name: &'static str,
+    started_at: std::time::Instant,
+    event: AuthFlowEvent,
+) -> bool {
+    if let Err(err) = sender.send(event) {
+        match target {
+            "vertexlauncher/auth/signin" => tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                event = event_name,
+                error = %err,
+                "Failed to deliver auth flow event to UI."
+            ),
+            "vertexlauncher/auth/signin/browser" => tracing::error!(
+                target: "vertexlauncher/auth/signin/browser",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                event = event_name,
+                error = %err,
+                "Failed to deliver auth flow event to UI."
+            ),
+            _ => tracing::error!(
+                target: "vertexlauncher/auth/signin",
+                elapsed_ms = started_at.elapsed().as_millis() as u64,
+                event = event_name,
+                error = %err,
+                requested_target = target,
+                "Failed to deliver auth flow event to UI."
+            ),
+        };
+        return false;
+    }
+    true
+}
+
 fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
     let started_at = std::time::Instant::now();
     tracing::info!(
@@ -1030,7 +1135,13 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
                 error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
                 "Failed to initialize Microsoft sign-in flow."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "failed:init",
+                started_at,
+                AuthFlowEvent::Failed(err.to_string()),
+            );
             return;
         }
     };
@@ -1043,7 +1154,15 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
         "Microsoft sign-in flow initialized; opening embedded webview."
     );
 
-    let _ = sender.send(AuthFlowEvent::AwaitingBrowser);
+    if !emit_auth_flow_event(
+        &sender,
+        "vertexlauncher/auth/signin",
+        "awaiting_browser",
+        started_at,
+        AuthFlowEvent::AwaitingBrowser,
+    ) {
+        return;
+    }
 
     let auth_code = match webview_sign_in::open_microsoft_sign_in(
         &flow.auth_request_uri,
@@ -1058,7 +1177,13 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
                 error = %webview_sign_in::sanitize_message_for_log(&err),
                 "Microsoft sign-in webview failed before returning a callback URL."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "failed:webview",
+                started_at,
+                AuthFlowEvent::Failed(err),
+            );
             return;
         }
     };
@@ -1069,7 +1194,15 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
         "Microsoft sign-in webview returned an auth code; exchanging tokens."
     );
 
-    let _ = sender.send(AuthFlowEvent::WaitingForAuthorization);
+    if !emit_auth_flow_event(
+        &sender,
+        "vertexlauncher/auth/signin",
+        "waiting_for_authorization",
+        started_at,
+        AuthFlowEvent::WaitingForAuthorization,
+    ) {
+        return;
+    }
 
     match auth::login_finish(&auth_code, flow) {
         Ok(account) => {
@@ -1078,7 +1211,13 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "Microsoft sign-in flow completed successfully."
             );
-            let _ = sender.send(AuthFlowEvent::Completed(account));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "completed",
+                started_at,
+                AuthFlowEvent::Completed(account),
+            );
         }
         Err(err) => {
             tracing::error!(
@@ -1087,7 +1226,13 @@ fn run_sign_in_flow(client_id: String, sender: mpsc::Sender<AuthFlowEvent>) {
                 error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
                 "Microsoft sign-in callback exchange failed."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "failed:exchange",
+                started_at,
+                AuthFlowEvent::Failed(err.to_string()),
+            );
         }
     }
 }
@@ -1110,7 +1255,13 @@ fn run_system_browser_sign_in_flow(
                 error = %webview_sign_in::sanitize_message_for_log(&err),
                 "Failed to allocate localhost loopback redirect URI."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin/browser",
+                "failed:prepare_listener",
+                started_at,
+                AuthFlowEvent::Failed(err),
+            );
             return;
         }
     };
@@ -1124,7 +1275,13 @@ fn run_system_browser_sign_in_flow(
                 error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
                 "Failed to initialize Microsoft system-browser sign-in flow."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin/browser",
+                "failed:init",
+                started_at,
+                AuthFlowEvent::Failed(err.to_string()),
+            );
             return;
         }
     };
@@ -1137,7 +1294,15 @@ fn run_system_browser_sign_in_flow(
         "Microsoft system-browser sign-in flow initialized; opening default browser."
     );
 
-    let _ = sender.send(AuthFlowEvent::AwaitingExternalBrowser);
+    if !emit_auth_flow_event(
+        &sender,
+        "vertexlauncher/auth/signin/browser",
+        "awaiting_external_browser",
+        started_at,
+        AuthFlowEvent::AwaitingExternalBrowser,
+    ) {
+        return;
+    }
 
     let callback_url = match system_browser_sign_in::open_microsoft_sign_in(
         &flow.auth_request_uri,
@@ -1152,12 +1317,26 @@ fn run_system_browser_sign_in_flow(
                 error = %webview_sign_in::sanitize_message_for_log(&err),
                 "Microsoft system-browser sign-in failed before returning a callback URL."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin/browser",
+                "failed:browser",
+                started_at,
+                AuthFlowEvent::Failed(err),
+            );
             return;
         }
     };
 
-    let _ = sender.send(AuthFlowEvent::WaitingForAuthorization);
+    if !emit_auth_flow_event(
+        &sender,
+        "vertexlauncher/auth/signin/browser",
+        "waiting_for_authorization",
+        started_at,
+        AuthFlowEvent::WaitingForAuthorization,
+    ) {
+        return;
+    }
 
     finish_browser_sign_in_flow(
         flow,
@@ -1190,7 +1369,13 @@ fn finish_browser_sign_in_flow(
                 elapsed_ms = started_at.elapsed().as_millis() as u64,
                 "Microsoft sign-in flow completed successfully."
             );
-            let _ = sender.send(AuthFlowEvent::Completed(account));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "completed",
+                started_at,
+                AuthFlowEvent::Completed(account),
+            );
         }
         Err(err) => {
             tracing::error!(
@@ -1199,7 +1384,13 @@ fn finish_browser_sign_in_flow(
                 error = %webview_sign_in::sanitize_message_for_log(&err.to_string()),
                 "Microsoft sign-in callback exchange failed."
             );
-            let _ = sender.send(AuthFlowEvent::Failed(err.to_string()));
+            let _ = emit_auth_flow_event(
+                &sender,
+                "vertexlauncher/auth/signin",
+                "failed:exchange",
+                started_at,
+                AuthFlowEvent::Failed(err.to_string()),
+            );
         }
     }
 }

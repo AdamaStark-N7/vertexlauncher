@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ManagedContentSource;
@@ -11,7 +13,7 @@ pub struct InstalledContentProject {
     #[serde(default)]
     pub folder_name: String,
     #[serde(default)]
-    pub file_path: String,
+    pub file_path: PathBuf,
     #[serde(default)]
     pub modrinth_project_id: Option<String>,
     #[serde(default)]

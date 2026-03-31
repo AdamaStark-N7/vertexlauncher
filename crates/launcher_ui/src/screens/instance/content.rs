@@ -1196,7 +1196,17 @@ fn request_content_metadata_lookup_batch(
             loader.as_str(),
             hash_cache,
         );
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/instance_content",
+                kind = %kind.folder_name(),
+                scheduled_count,
+                game_version = %game_version,
+                loader = %loader,
+                error = %err,
+                "Failed to deliver installed-content metadata lookup result."
+            );
+        }
     });
 
     scheduled_count
@@ -1207,6 +1217,12 @@ pub(super) fn poll_content_lookup_results(state: &mut InstanceScreenState) {
         return;
     };
     let Ok(guard) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/instance_content",
+            in_flight = state.content_lookup_in_flight.len(),
+            tracked_keys = state.content_lookup_latest_serial_by_key.len(),
+            "Instance content lookup receiver mutex was poisoned while polling metadata results."
+        );
         return;
     };
 
@@ -1568,11 +1584,20 @@ fn request_content_update(
             ),
         }
         let focus_lookup_keys = vec![lookup_key.clone()];
-        let _ = tx.send(ContentApplyResult {
+        if let Err(err) = tx.send(ContentApplyResult {
             kind,
             focus_lookup_keys,
             status_message: result,
-        });
+        }) {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance = %instance_name,
+                lookup_key = %lookup_key,
+                project = %project_name,
+                error = %err,
+                "Failed to deliver individual content update result."
+            );
+        }
     });
 }
 
@@ -1630,11 +1655,19 @@ fn request_content_delete(
             })
         })();
 
-        let _ = tx.send(ContentApplyResult {
+        if let Err(err) = tx.send(ContentApplyResult {
             kind,
             focus_lookup_keys: vec![lookup_key],
             status_message: result,
-        });
+        }) {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance = %instance_name,
+                path = %path_display,
+                error = %err,
+                "Failed to deliver installed content delete result."
+            );
+        }
     });
 }
 
@@ -1720,11 +1753,20 @@ fn request_bulk_content_update(
                 "bulk content update failed: {err}"
             ),
         }
-        let _ = tx.send(ContentApplyResult {
+        if let Err(err) = tx.send(ContentApplyResult {
             kind,
             focus_lookup_keys: Vec::new(),
             status_message: result,
-        });
+        }) {
+            tracing::error!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                instance = %instance_name,
+                kind = %kind.folder_name(),
+                operation = %operation_label,
+                error = %err,
+                "Failed to deliver bulk content update result."
+            );
+        }
     });
 }
 
@@ -1917,7 +1959,7 @@ fn stale_managed_content_path_for_update(
         return None;
     }
 
-    let managed_path = instance_root.join(project.file_path.as_str());
+    let managed_path = instance_root.join(project.file_path.as_path());
     if !managed_path.exists()
         || content_paths_match(managed_path.as_path(), file.file_path.as_path())
     {
@@ -2766,12 +2808,22 @@ fn poll_content_apply_results(state: &mut InstanceScreenState, instance_root: &P
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_content",
+                            "Content-apply worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_content",
+                    "Content-apply receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -2780,6 +2832,7 @@ fn poll_content_apply_results(state: &mut InstanceScreenState, instance_root: &P
         state.content_apply_results_rx = None;
         state.content_apply_in_flight = false;
         install_activity::clear_instance(state.name_input.as_str());
+        state.status_message = Some("Content apply worker stopped unexpectedly.".to_owned());
     }
 
     for result in updates {
@@ -2797,6 +2850,11 @@ fn poll_content_apply_results(state: &mut InstanceScreenState, instance_root: &P
                 state.status_message = Some(message);
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_content",
+                    error = %err,
+                    "Applying content changes failed."
+                );
                 state.status_message = Some(format!("Failed to apply content changes: {err}"));
             }
         }

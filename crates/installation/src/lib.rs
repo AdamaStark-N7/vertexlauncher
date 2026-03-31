@@ -441,13 +441,14 @@ pub enum InstallationError {
         stderr: String,
     },
     #[error(
-        "{loader} installer did not produce a usable version profile for Minecraft {game_version} ({loader_version}) in {versions_dir}"
+        "{loader} installer did not produce a usable version profile for Minecraft {game_version} ({loader_version}) in {}",
+        .versions_dir.display()
     )]
     ModloaderInstallOutputMissing {
         loader: String,
         game_version: String,
         loader_version: String,
-        versions_dir: String,
+        versions_dir: PathBuf,
     },
     #[error("OpenJDK provisioning is not supported on this platform ({0})")]
     UnsupportedPlatform(String),
@@ -460,10 +461,10 @@ pub enum InstallationError {
     },
     #[error("Launch profile {profile_id} is missing mainClass")]
     LaunchMainClassMissing { profile_id: String },
-    #[error("Launch profile {profile_id} is missing required file: {path}")]
-    LaunchFileMissing { profile_id: String, path: String },
-    #[error("Minecraft exited immediately (status: {status}). See launch log: {log_path}")]
-    LaunchExitedImmediately { status: String, log_path: String },
+    #[error("Launch profile {profile_id} is missing required file: {}", .path.display())]
+    LaunchFileMissing { profile_id: String, path: PathBuf },
+    #[error("Minecraft exited immediately (status: {status}). See launch log: {}", .log_path.display())]
+    LaunchExitedImmediately { status: String, log_path: PathBuf },
     #[error("Minecraft for {instance_root} is already running (pid {pid})")]
     InstanceAlreadyRunning { instance_root: String, pid: u32 },
     #[error("Account '{account}' is already running Minecraft in {instance_root}")]
@@ -1156,7 +1157,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
                 .code()
                 .map(|code| code.to_string())
                 .unwrap_or_else(|| "terminated by signal".to_owned()),
-            log_path: launch_log_for_error,
+            log_path: PathBuf::from(launch_log_for_error),
         });
     }
     let pid = child.id();
@@ -1657,7 +1658,7 @@ fn build_classpath_entries(
             } else {
                 return Err(InstallationError::LaunchFileMissing {
                     profile_id: profile_id.to_owned(),
-                    path: launch_jar.display().to_string(),
+                    path: launch_jar,
                 });
             }
         }
@@ -3606,7 +3607,7 @@ fn run_modloader_installer_and_verify(
                 loader: loader_label.to_owned(),
                 game_version: game_version.to_owned(),
                 loader_version: loader_version.to_owned(),
-                versions_dir: instance_root.join("versions").display().to_string(),
+                versions_dir: instance_root.join("versions"),
             },
         )?;
     let installer_path = match fs_canonicalize(installer_path.as_path()) {
@@ -3643,7 +3644,7 @@ fn run_modloader_installer_and_verify(
                 loader: loader_label.to_owned(),
                 game_version: game_version.to_owned(),
                 loader_version: loader_version.to_owned(),
-                versions_dir: instance_root.join("versions").display().to_string(),
+                versions_dir: instance_root.join("versions"),
             });
         }
         last_failure = Some((command_line, output.status.code(), output.stderr));

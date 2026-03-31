@@ -1033,6 +1033,10 @@ fn memory_slider_max_mib() -> (u128, bool) {
                         pending = true;
                     }
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/settings",
+                            "Memory slider max probe worker disconnected unexpectedly."
+                        );
                         state.load_complete = true;
                         state.rx = None;
                     }
@@ -1045,7 +1049,13 @@ fn memory_slider_max_mib() -> (u128, bool) {
                 pending = true;
                 let _ = tokio_runtime::spawn_detached(async move {
                     let result = platform::detect_total_memory_mib();
-                    let _ = tx.send(result);
+                    if let Err(err) = tx.send(result) {
+                        tracing::error!(
+                            target: "vertexlauncher/settings",
+                            error = %err,
+                            "Failed to deliver memory slider max probe result."
+                        );
+                    }
                 });
             }
         }

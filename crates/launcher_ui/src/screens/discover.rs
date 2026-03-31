@@ -1148,11 +1148,18 @@ fn request_search(state: &mut DiscoverState, show_cached_status: bool, mode: Sea
     let request_for_task = request.clone();
     let _ = tokio_runtime::spawn_detached(async move {
         let outcome = Ok(perform_search(&request_for_task));
-        let _ = tx.send(DiscoverSearchResult {
+        if let Err(err) = tx.send(DiscoverSearchResult {
             request_serial,
             request,
             outcome,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/discover",
+                request_serial,
+                error = %err,
+                "Failed to deliver discover search result."
+            );
+        }
     });
 }
 
@@ -1161,28 +1168,62 @@ fn poll_search_results(state: &mut DiscoverState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/discover",
+            request_serial = state.search_request_serial,
+            "Discover search receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok(result) = receiver.try_recv() {
-        if result.request_serial != state.search_request_serial {
-            continue;
-        }
-        state.search_in_flight = false;
-        match result.outcome {
-            Ok(snapshot) => {
-                let mode = if result.request.page <= 1 {
-                    SearchMode::Replace
-                } else {
-                    SearchMode::Append
-                };
-                apply_search_snapshot(state, &result.request, snapshot.clone(), mode);
-                state.cached_snapshots.insert(result.request, snapshot);
-                state.status_message = Some(format!("Showing {} modpacks.", state.entries.len()));
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => {
+                if result.request_serial != state.search_request_serial {
+                    tracing::debug!(
+                        target: "vertexlauncher/discover",
+                        request_serial = result.request_serial,
+                        active_request_serial = state.search_request_serial,
+                        "Ignoring stale discover search result."
+                    );
+                    continue;
+                }
+                state.search_in_flight = false;
+                match result.outcome {
+                    Ok(snapshot) => {
+                        let mode = if result.request.page <= 1 {
+                            SearchMode::Replace
+                        } else {
+                            SearchMode::Append
+                        };
+                        apply_search_snapshot(state, &result.request, snapshot.clone(), mode);
+                        state.cached_snapshots.insert(result.request, snapshot);
+                        state.status_message =
+                            Some(format!("Showing {} modpacks.", state.entries.len()));
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "vertexlauncher/discover",
+                            request_serial = result.request_serial,
+                            error = %error,
+                            "Discover search failed."
+                        );
+                        state.status_message = Some(format!("Discover search failed: {error}"));
+                        state.entries.clear();
+                        state.warnings.clear();
+                    }
+                }
             }
-            Err(error) => {
-                state.status_message = Some(format!("Discover search failed: {error}"));
-                state.entries.clear();
-                state.warnings.clear();
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/discover",
+                    request_serial = state.search_request_serial,
+                    "Discover search worker disconnected unexpectedly."
+                );
+                state.search_in_flight = false;
+                state.status_message =
+                    Some("Discover search worker stopped unexpectedly.".to_owned());
+                break;
             }
         }
     }
@@ -1648,7 +1689,13 @@ fn request_version_catalog(state: &mut DiscoverState) {
                 VERSION_CATALOG_FETCH_TIMEOUT.as_secs()
             )),
         };
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/discover",
+                error = %err,
+                "Failed to deliver discover version catalog result."
+            );
+        }
     });
 }
 
@@ -1672,12 +1719,22 @@ fn poll_version_catalog(state: &mut DiscoverState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/discover",
+                            "Discover version catalog worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/discover",
+                    "Discover version catalog receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -1685,6 +1742,8 @@ fn poll_version_catalog(state: &mut DiscoverState) {
         state.version_catalog_tx = None;
         state.version_catalog_rx = None;
         state.version_catalog_in_flight = false;
+        state.version_catalog_error =
+            Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -1695,6 +1754,11 @@ fn poll_version_catalog(state: &mut DiscoverState) {
                 state.version_catalog_error = None;
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/discover",
+                    error = %err,
+                    "Discover version catalog fetch failed."
+                );
                 state.version_catalog_error = Some(err);
             }
         }
@@ -1863,10 +1927,17 @@ fn request_detail_versions(state: &mut DiscoverState) {
                 DETAIL_VERSIONS_FETCH_TIMEOUT.as_secs()
             )),
         };
-        let _ = tx.send(DiscoverVersionsResult {
+        if let Err(err) = tx.send(DiscoverVersionsResult {
             request_serial,
             versions,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/discover",
+                request_serial,
+                error = %err,
+                "Failed to deliver discover detail versions result."
+            );
+        }
     });
 }
 
@@ -1884,21 +1955,55 @@ fn poll_detail_versions(state: &mut DiscoverState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/discover",
+            request_serial = state.detail_version_request_serial,
+            "Discover detail-version receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok(result) = receiver.try_recv() {
-        if result.request_serial != state.detail_version_request_serial {
-            continue;
-        }
-        state.detail_versions_in_flight = false;
-        match result.versions {
-            Ok(versions) => {
-                state.detail_versions = versions;
-                state.detail_versions_error = None;
+    loop {
+        match receiver.try_recv() {
+            Ok(result) => {
+                if result.request_serial != state.detail_version_request_serial {
+                    tracing::debug!(
+                        target: "vertexlauncher/discover",
+                        request_serial = result.request_serial,
+                        active_request_serial = state.detail_version_request_serial,
+                        "Ignoring stale discover detail-version result."
+                    );
+                    continue;
+                }
+                state.detail_versions_in_flight = false;
+                match result.versions {
+                    Ok(versions) => {
+                        state.detail_versions = versions;
+                        state.detail_versions_error = None;
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "vertexlauncher/discover",
+                            request_serial = result.request_serial,
+                            error = %error,
+                            "Discover detail-version fetch failed."
+                        );
+                        state.detail_versions.clear();
+                        state.detail_versions_error = Some(error);
+                    }
+                }
             }
-            Err(error) => {
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/discover",
+                    request_serial = state.detail_version_request_serial,
+                    "Discover detail-version worker disconnected unexpectedly."
+                );
+                state.detail_versions_in_flight = false;
                 state.detail_versions.clear();
-                state.detail_versions_error = Some(error);
+                state.detail_versions_error =
+                    Some("Version detail worker stopped unexpectedly.".to_owned());
+                break;
             }
         }
     }

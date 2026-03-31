@@ -87,7 +87,7 @@ pub(super) struct InstanceScreenState {
     pub(super) status_message: Option<String>,
     pub(super) name_input: String,
     pub(super) description_input: String,
-    pub(super) thumbnail_input: String,
+    pub(super) thumbnail_input: PathBuf,
     pub(super) selected_modloader: usize,
     pub(super) custom_modloader: String,
     pub(super) game_version_input: String,

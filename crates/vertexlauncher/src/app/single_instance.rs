@@ -69,7 +69,13 @@ fn start_responder(
     let (completion_tx, completion_rx) = mpsc::channel::<()>();
     let _ = tokio_runtime::spawn_blocking_detached(move || {
         run_responder(socket, worker_stop);
-        let _ = completion_tx.send(());
+        if let Err(err) = completion_tx.send(()) {
+            tracing::error!(
+                target: "vertexlauncher/single_instance",
+                error = %err,
+                "Failed to deliver single-instance responder completion signal."
+            );
+        }
     });
     Ok(SingleInstanceGuard {
         endpoint,

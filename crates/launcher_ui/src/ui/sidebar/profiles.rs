@@ -42,8 +42,7 @@ pub fn render(
                         let thumbnail = profile
                             .thumbnail_path
                             .as_deref()
-                            .map(str::trim)
-                            .filter(|value| !value.is_empty())
+                            .filter(|path| !path.as_os_str().is_empty())
                             .and_then(|path| {
                                 let key = thumbnail_cache_key(profile.id.as_str(), path);
                                 match thumbnail_cache().lock() {
@@ -55,10 +54,9 @@ pub fn render(
                             && let Some(path) = profile
                                 .thumbnail_path
                                 .as_deref()
-                                .map(str::trim)
-                                .filter(|value| !value.is_empty())
+                                .filter(|path| !path.as_os_str().is_empty())
                         {
-                            request_thumbnail(profile.id.as_str(), path.to_owned());
+                            request_thumbnail(profile.id.as_str(), path.to_path_buf());
                         }
                         render_profile_icon(
                             ui,
@@ -157,12 +155,12 @@ fn thumbnail_results_channel() -> &'static (
     })
 }
 
-fn thumbnail_cache_key(instance_id: &str, path: &str) -> String {
-    format!("{instance_id}\n{path}")
+fn thumbnail_cache_key(instance_id: &str, path: &std::path::Path) -> String {
+    format!("{instance_id}\n{}", path.display())
 }
 
-fn request_thumbnail(instance_id: &str, path: String) {
-    let key = thumbnail_cache_key(instance_id, path.as_str());
+fn request_thumbnail(instance_id: &str, path: std::path::PathBuf) {
+    let key = thumbnail_cache_key(instance_id, path.as_path());
     if let Ok(cache) = thumbnail_cache().lock()
         && cache.contains_key(key.as_str())
     {
@@ -176,22 +174,53 @@ fn request_thumbnail(instance_id: &str, path: String) {
     }
     let tx = thumbnail_results_channel().0.clone();
     let _ = tokio_runtime::spawn_detached(async move {
-        let bytes = tokio::fs::read(path.as_str())
-            .await
-            .ok()
-            .map(|bytes| Arc::<[u8]>::from(bytes.into_boxed_slice()));
-        let _ = tx.send((key, bytes));
+        let bytes = match tokio::fs::read(path.as_path()).await {
+            Ok(bytes) => Some(Arc::<[u8]>::from(bytes.into_boxed_slice())),
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/sidebar",
+                    thumbnail_key = %key,
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to read sidebar thumbnail."
+                );
+                None
+            }
+        };
+        if let Err(err) = tx.send((key.clone(), bytes)) {
+            tracing::error!(
+                target: "vertexlauncher/sidebar",
+                thumbnail_key = %key,
+                path = %path.display(),
+                error = %err,
+                "Failed to deliver sidebar thumbnail result."
+            );
+        }
     });
 }
 
 fn poll_thumbnail_results() {
     let rx = thumbnail_results_channel().1.clone();
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/sidebar",
+            "Sidebar thumbnail receiver mutex was poisoned."
+        );
         return;
     };
     let mut updates = Vec::new();
-    while let Ok(update) = receiver.try_recv() {
-        updates.push(update);
+    loop {
+        match receiver.try_recv() {
+            Ok(update) => updates.push(update),
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/sidebar",
+                    "Sidebar thumbnail worker disconnected unexpectedly."
+                );
+                break;
+            }
+        }
     }
     if updates.is_empty() {
         return;

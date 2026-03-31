@@ -1,4 +1,5 @@
 use egui::{Context, ScrollArea, SidePanel, Ui};
+use std::path::PathBuf;
 use textui::{ButtonOptions, TextUi};
 
 use crate::assets;
@@ -19,7 +20,7 @@ struct SidebarLayout {
 pub struct ProfileShortcut {
     pub id: String,
     pub name: String,
-    pub thumbnail_path: Option<String>,
+    pub thumbnail_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]

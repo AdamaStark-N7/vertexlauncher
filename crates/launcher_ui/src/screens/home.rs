@@ -431,6 +431,11 @@ fn build_screenshot_scan_request(
 
 fn poll_home_activity_results(state: &mut HomeState) {
     let Ok(channel) = home_activity_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            request_id = state.latest_requested_activity_scan_id,
+            "Home activity results receiver mutex was poisoned while polling scan results."
+        );
         return;
     };
 
@@ -449,6 +454,11 @@ fn poll_home_activity_results(state: &mut HomeState) {
 
 fn poll_screenshot_results(state: &mut HomeState) {
     let Ok(channel) = screenshot_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            request_id = state.latest_requested_screenshot_scan_id,
+            "Home screenshot results receiver mutex was poisoned while polling screenshot entries."
+        );
         return;
     };
 
@@ -505,6 +515,14 @@ fn spawn_screenshot_load_page(state: &mut HomeState, request_id: u64, page_size:
     }
 
     let Ok(channel) = screenshot_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            request_id,
+            start = start,
+            end = end,
+            page_size,
+            "Home screenshot results channel mutex was poisoned while spawning screenshot page load."
+        );
         return;
     };
     let result_tx = channel.tx.clone();
@@ -534,15 +552,35 @@ fn spawn_screenshot_load_page(state: &mut HomeState, request_id: u64, page_size:
                 })
             })();
             if let Some(entry) = entry {
-                let _ = tx.send(ScreenshotScanMessage::EntryLoaded { request_id, entry });
+                if let Err(err) = tx.send(ScreenshotScanMessage::EntryLoaded { request_id, entry })
+                {
+                    tracing::error!(
+                        target: "vertexlauncher/home",
+                        request_id,
+                        error = %err,
+                        "Failed to deliver home screenshot entry."
+                    );
+                }
             }
-            let _ = tx.send(ScreenshotScanMessage::TaskDone { request_id });
+            if let Err(err) = tx.send(ScreenshotScanMessage::TaskDone { request_id }) {
+                tracing::error!(
+                    target: "vertexlauncher/home",
+                    request_id,
+                    error = %err,
+                    "Failed to deliver home screenshot task completion."
+                );
+            }
         });
     }
 }
 
 fn poll_server_ping_results(state: &mut HomeState) {
     let Ok(channel) = server_ping_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            in_flight = state.server_ping_in_flight.len(),
+            "Home server ping results receiver mutex was poisoned while polling ping results."
+        );
         return;
     };
 
@@ -583,7 +621,15 @@ fn request_screenshot_delete(
             tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err, context = "delete home screenshot");
             format!("failed to remove {}: {err}", path.display())
         });
-        let _ = tx.send((screenshot_key, file_name, result));
+        if let Err(err) = tx.send((screenshot_key.clone(), file_name.clone(), result)) {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                screenshot_key = %screenshot_key,
+                file_name = %file_name,
+                error = %err,
+                "Failed to deliver home screenshot-delete result."
+            );
+        }
     });
 }
 
@@ -604,18 +650,32 @@ fn poll_delete_screenshot_results(
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/home",
+                        "Home screenshot-delete worker disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
             }
         },
-        Err(_) => should_reset_channel = true,
+        Err(_) => {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                "Home screenshot-delete receiver mutex was poisoned."
+            );
+            should_reset_channel = true;
+        }
     }
 
     if should_reset_channel {
         state.delete_screenshot_results_tx = None;
         state.delete_screenshot_results_rx = None;
         state.delete_screenshot_in_flight = false;
+        notification::error!(
+            "home/screenshots",
+            "Screenshot delete worker stopped unexpectedly."
+        );
     }
 
     for (screenshot_key, file_name, result) in updates {
@@ -1813,8 +1873,7 @@ fn render_instance_usage(
                 let thumbnail_png = instance
                     .thumbnail_path
                     .as_deref()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
+                    .filter(|path| !path.as_os_str().is_empty())
                     .and_then(|path| {
                         let key = instance_thumbnail_cache_key(instance.id.as_str(), path);
                         match state.instance_thumbnail_cache.get(&key).cloned() {
@@ -1823,7 +1882,7 @@ fn render_instance_usage(
                                 request_instance_thumbnail(
                                     state,
                                     instance.id.as_str(),
-                                    path.to_owned(),
+                                    path.to_path_buf(),
                                 );
                                 None
                             }
@@ -1942,12 +2001,12 @@ fn ensure_instance_thumbnail_channel(state: &mut HomeState) {
     state.instance_thumbnail_results_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
-fn instance_thumbnail_cache_key(instance_id: &str, path: &str) -> String {
-    format!("{instance_id}\n{path}")
+fn instance_thumbnail_cache_key(instance_id: &str, path: &Path) -> String {
+    format!("{instance_id}\n{}", path.display())
 }
 
-fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: String) {
-    let key = instance_thumbnail_cache_key(instance_id, path.as_str());
+fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: PathBuf) {
+    let key = instance_thumbnail_cache_key(instance_id, path.as_path());
     if state.instance_thumbnail_in_flight.contains(key.as_str()) {
         return;
     }
@@ -1957,11 +2016,28 @@ fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: St
     };
     state.instance_thumbnail_in_flight.insert(key.clone());
     let _ = tokio_runtime::spawn_detached(async move {
-        let bytes = tokio::fs::read(path.as_str())
-            .await
-            .ok()
-            .map(|bytes| Arc::<[u8]>::from(bytes.into_boxed_slice()));
-        let _ = tx.send((key, bytes));
+        let bytes = match tokio::fs::read(path.as_path()).await {
+            Ok(bytes) => Some(Arc::<[u8]>::from(bytes.into_boxed_slice())),
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/home",
+                    thumbnail_key = %key,
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to read home instance thumbnail."
+                );
+                None
+            }
+        };
+        if let Err(err) = tx.send((key.clone(), bytes)) {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                thumbnail_key = %key,
+                path = %path.display(),
+                error = %err,
+                "Failed to deliver home instance thumbnail result."
+            );
+        }
     });
 }
 
@@ -1977,12 +2053,22 @@ fn poll_instance_thumbnail_results(state: &mut HomeState) {
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/home",
+                        "Home thumbnail worker disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
             }
         },
-        Err(_) => should_reset_channel = true,
+        Err(_) => {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                "Home thumbnail receiver mutex was poisoned."
+            );
+            should_reset_channel = true;
+        }
     }
     if should_reset_channel {
         state.instance_thumbnail_results_tx = None;
@@ -2684,6 +2770,12 @@ fn refresh_home_state(
     let request_id = state.latest_requested_activity_scan_id.saturating_add(1);
     let request = build_home_activity_scan_request(instances, config);
     let Ok(channel) = home_activity_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            request_id,
+            scanned_instance_count = request.scanned_instance_count,
+            "Home activity results channel mutex was poisoned while scheduling a home activity scan."
+        );
         return;
     };
     let result_tx = channel.tx.clone();
@@ -2699,7 +2791,14 @@ fn refresh_home_state(
             worlds: collect_worlds_from_request(&request),
             servers: collect_servers_from_request(&request),
         };
-        let _ = result_tx.send(result);
+        if let Err(err) = result_tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                request_id,
+                error = %err,
+                "Failed to deliver home activity scan result."
+            );
+        }
     });
 }
 
@@ -2901,6 +3000,11 @@ fn queue_server_pings(state: &mut HomeState) {
     }
 
     let Ok(channel) = server_ping_results().lock() else {
+        tracing::error!(
+            target: "vertexlauncher/home",
+            queued_pings = stale_addresses.len(),
+            "Home server ping results channel mutex was poisoned while scheduling server pings."
+        );
         return;
     };
     let result_tx = channel.tx.clone();
@@ -2912,7 +3016,17 @@ fn queue_server_pings(state: &mut HomeState) {
         let result_tx = result_tx.clone();
         let _ = tokio_runtime::spawn_detached(async move {
             let snapshot = query_server_snapshot(worker_address.as_str());
-            let _ = result_tx.send(ServerPingResult { address, snapshot });
+            if let Err(err) = result_tx.send(ServerPingResult {
+                address: address.clone(),
+                snapshot,
+            }) {
+                tracing::error!(
+                    target: "vertexlauncher/home",
+                    address = %address,
+                    error = %err,
+                    "Failed to deliver home server ping result."
+                );
+            }
         });
     }
 }

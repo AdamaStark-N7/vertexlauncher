@@ -96,8 +96,12 @@ fn severity_name(severity: Severity) -> &'static str {
 
 pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<String>) {
     let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
-    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
+    let source = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
+    );
+    let message = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
+    );
     match severity {
         Severity::Log => {
             tracing::debug!(target: "notification", source = %source, message = %message)
@@ -112,7 +116,7 @@ pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<St
             tracing::error!(target: "notification", source = %source, message = %message)
         }
     }
-    let _ = center().tx.send(Notification {
+    if let Err(err) = center().tx.send(Notification {
         severity,
         source,
         message,
@@ -120,7 +124,13 @@ pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<St
         spinner: false,
         replace_key: None,
         when: Instant::now(),
-    });
+    }) {
+        tracing::error!(
+            target: "notification",
+            error = %err,
+            "Failed to enqueue notification."
+        );
+    }
 }
 
 pub fn emit_progress(
@@ -130,10 +140,21 @@ pub fn emit_progress(
     progress: f32,
 ) {
     let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
-    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
+    let source = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
+    );
+    let message = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
+    );
     let progress = progress.clamp(0.0, 1.0);
-    let _ = center().tx.send(Notification {
+    tracing::info!(
+        target: "notification",
+        source = %source,
+        message = %message,
+        progress,
+        "notification progress update"
+    );
+    if let Err(err) = center().tx.send(Notification {
         severity,
         source: source.clone(),
         message,
@@ -141,7 +162,15 @@ pub fn emit_progress(
         spinner: false,
         replace_key: Some(source.clone()),
         when: Instant::now(),
-    });
+    }) {
+        tracing::error!(
+            target: "notification",
+            source = %source,
+            progress,
+            error = %err,
+            "Failed to enqueue progress notification."
+        );
+    }
 }
 
 pub fn emit_spinner(
@@ -151,11 +180,24 @@ pub fn emit_spinner(
     replace_key: impl Into<String>,
 ) {
     let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
-    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
-    let replace_key =
-        privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned();
-    let _ = center().tx.send(Notification {
+    let source = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
+    );
+    let message = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
+    );
+    let replace_key = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned(),
+    );
+    tracing::info!(
+        target: "notification",
+        source = %source,
+        message = %message,
+        replace_key = %replace_key,
+        spinner = true,
+        "notification spinner update"
+    );
+    if let Err(err) = center().tx.send(Notification {
         severity,
         source,
         message,
@@ -163,7 +205,13 @@ pub fn emit_spinner(
         spinner: true,
         replace_key: Some(replace_key),
         when: Instant::now(),
-    });
+    }) {
+        tracing::error!(
+            target: "notification",
+            error = %err,
+            "Failed to enqueue spinner notification."
+        );
+    }
 }
 
 pub fn emit_replace(
@@ -173,11 +221,23 @@ pub fn emit_replace(
     replace_key: impl Into<String>,
 ) {
     let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned();
-    let message = privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned();
-    let replace_key =
-        privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned();
-    let _ = center().tx.send(Notification {
+    let source = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
+    );
+    let message = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
+    );
+    let replace_key = privacy::sanitize_text_for_log(
+        &privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned(),
+    );
+    tracing::info!(
+        target: "notification",
+        source = %source,
+        message = %message,
+        replace_key = %replace_key,
+        "notification replacement update"
+    );
+    if let Err(err) = center().tx.send(Notification {
         severity,
         source,
         message,
@@ -185,15 +245,29 @@ pub fn emit_replace(
         spinner: false,
         replace_key: Some(replace_key),
         when: Instant::now(),
-    });
+    }) {
+        tracing::error!(
+            target: "notification",
+            error = %err,
+            "Failed to enqueue replacement notification."
+        );
+    }
 }
 
 fn drain_notifications() {
     let center = center();
     let Ok(rx) = center.rx.lock() else {
+        tracing::error!(
+            target: "notification",
+            "Notification receiver mutex was poisoned while draining notifications."
+        );
         return;
     };
     let Ok(mut store) = center.store.lock() else {
+        tracing::error!(
+            target: "notification",
+            "Notification store mutex was poisoned while draining notifications."
+        );
         return;
     };
 

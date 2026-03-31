@@ -105,7 +105,7 @@ pub struct InstanceRecord {
     pub name: String,
     pub description: Option<String>,
     pub minecraft_root: String,
-    pub thumbnail_path: Option<String>,
+    pub thumbnail_path: Option<PathBuf>,
     pub modloader: String,
     pub game_version: String,
     pub modloader_version: String,
@@ -696,7 +696,7 @@ fn normalize_instance(instance: &mut InstanceRecord) {
         instance.minecraft_root = sanitize_root_name(&instance.minecraft_root);
     }
 
-    instance.thumbnail_path = normalize_optional_string(instance.thumbnail_path.as_deref());
+    instance.thumbnail_path = normalize_optional_path(instance.thumbnail_path.as_deref());
     instance.description = normalize_optional_string(instance.description.as_deref());
     instance.modloader = required(
         std::mem::take(&mut instance.modloader),
@@ -811,10 +811,11 @@ fn normalize_optional_string(value: Option<&str>) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
-fn normalize_optional_path(value: Option<&Path>) -> Option<String> {
+fn normalize_optional_path(value: Option<&Path>) -> Option<PathBuf> {
     value
         .map(|path| path.as_os_str().to_string_lossy().trim().to_owned())
         .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn normalize_java_override(enabled: bool, runtime_major: Option<u8>) -> Option<u8> {

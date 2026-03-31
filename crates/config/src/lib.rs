@@ -743,17 +743,17 @@ pub struct Config {
     )]
     default_instance_max_memory_mib: u128,
     default_instance_cli_args: String,
-    minecraft_installations_root: String,
+    minecraft_installations_root: PathBuf,
     #[serde(alias = "download_starts_per_second")]
     download_max_concurrent: u32,
     download_speed_limit_enabled: bool,
     download_speed_limit: String,
     curseforge_api_key: String,
-    java_8_jvm_path: Option<String>,
-    java_16_jvm_path: Option<String>,
-    java_17_jvm_path: Option<String>,
-    java_21_jvm_path: Option<String>,
-    java_25_jvm_path: Option<String>,
+    java_8_jvm_path: Option<PathBuf>,
+    java_16_jvm_path: Option<PathBuf>,
+    java_17_jvm_path: Option<PathBuf>,
+    java_21_jvm_path: Option<PathBuf>,
+    java_25_jvm_path: Option<PathBuf>,
 }
 
 impl Config {
@@ -992,25 +992,29 @@ impl Config {
 
     /// Returns root directory for instance installations.
     pub fn minecraft_installations_root(&self) -> &str {
-        &self.minecraft_installations_root
+        self.minecraft_installations_root
+            .as_os_str()
+            .to_str()
+            .unwrap_or_default()
     }
 
     /// Returns root directory for instance installations as a path.
     pub fn minecraft_installations_root_path(&self) -> &Path {
-        Path::new(&self.minecraft_installations_root)
+        self.minecraft_installations_root.as_path()
     }
 
     /// Sets root directory for instance installations and normalizes empties.
     pub fn set_minecraft_installations_root(&mut self, path: impl Into<String>) {
-        self.minecraft_installations_root = path.into();
-        let default_root = default_minecraft_installations_root();
-        normalize_required_path(&mut self.minecraft_installations_root, &default_root);
+        self.set_minecraft_installations_root_path(PathBuf::from(path.into()));
     }
 
     /// Sets root directory for instance installations from a path value.
     pub fn set_minecraft_installations_root_path(&mut self, path: impl AsRef<Path>) {
-        self.set_minecraft_installations_root(
-            path.as_ref().as_os_str().to_string_lossy().into_owned(),
+        self.minecraft_installations_root = path.as_ref().to_path_buf();
+        let default_root = default_minecraft_installations_root_path();
+        normalize_required_path(
+            &mut self.minecraft_installations_root,
+            default_root.as_path(),
         );
     }
 
@@ -1070,6 +1074,12 @@ impl Config {
 
     /// Returns user-provided Java runtime path for the requested runtime major.
     pub fn java_runtime_path(&self, runtime: JavaRuntimeVersion) -> Option<&str> {
+        self.java_runtime_path_ref(runtime)
+            .and_then(|path| path.as_os_str().to_str())
+    }
+
+    /// Returns user-provided Java runtime path for the requested runtime major as a path.
+    pub fn java_runtime_path_ref(&self, runtime: JavaRuntimeVersion) -> Option<&Path> {
         match runtime {
             JavaRuntimeVersion::Java8 => self.java_8_jvm_path.as_deref(),
             JavaRuntimeVersion::Java16 => self.java_16_jvm_path.as_deref(),
@@ -1079,13 +1089,14 @@ impl Config {
         }
     }
 
-    /// Returns user-provided Java runtime path for the requested runtime major as a path.
-    pub fn java_runtime_path_ref(&self, runtime: JavaRuntimeVersion) -> Option<&Path> {
-        self.java_runtime_path(runtime).map(Path::new)
-    }
-
     /// Sets Java runtime path for the requested runtime major.
     pub fn set_java_runtime_path(&mut self, runtime: JavaRuntimeVersion, path: Option<String>) {
+        self.set_java_runtime_path_ref(runtime, path.as_deref().map(Path::new));
+    }
+
+    /// Sets Java runtime path for the requested runtime major from a path value.
+    pub fn set_java_runtime_path_ref(&mut self, runtime: JavaRuntimeVersion, path: Option<&Path>) {
+        let path = path.map(Path::to_path_buf);
         match runtime {
             JavaRuntimeVersion::Java8 => self.java_8_jvm_path = path,
             JavaRuntimeVersion::Java16 => self.java_16_jvm_path = path,
@@ -1093,14 +1104,6 @@ impl Config {
             JavaRuntimeVersion::Java21 => self.java_21_jvm_path = path,
             JavaRuntimeVersion::Java25 => self.java_25_jvm_path = path,
         }
-    }
-
-    /// Sets Java runtime path for the requested runtime major from a path value.
-    pub fn set_java_runtime_path_ref(&mut self, runtime: JavaRuntimeVersion, path: Option<&Path>) {
-        self.set_java_runtime_path(
-            runtime,
-            path.map(|path| path.as_os_str().to_string_lossy().into_owned()),
-        );
     }
 
     /// Normalizes all config values into launcher-supported ranges/defaults.
@@ -1150,8 +1153,11 @@ impl Config {
             .clamp(DOWNLOAD_CONCURRENCY_MIN, DOWNLOAD_CONCURRENCY_MAX);
         self.download_speed_limit = self.download_speed_limit.trim().to_owned();
         self.curseforge_api_key = self.curseforge_api_key.trim().to_owned();
-        let default_root = default_minecraft_installations_root();
-        normalize_required_path(&mut self.minecraft_installations_root, &default_root);
+        let default_root = default_minecraft_installations_root_path();
+        normalize_required_path(
+            &mut self.minecraft_installations_root,
+            default_root.as_path(),
+        );
         normalize_optional_path(&mut self.java_8_jvm_path);
         normalize_optional_path(&mut self.java_16_jvm_path);
         normalize_optional_path(&mut self.java_17_jvm_path);
@@ -1479,20 +1485,20 @@ impl Config {
     }
 }
 
-fn normalize_optional_path(path: &mut Option<String>) {
+fn normalize_optional_path(path: &mut Option<PathBuf>) {
     *path = path
         .as_ref()
-        .map(|value| value.trim())
+        .map(|value| value.as_os_str().to_string_lossy().trim().to_owned())
         .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+        .map(PathBuf::from);
 }
 
-fn normalize_required_path(path: &mut String, fallback: &str) {
-    let normalized = path.trim();
+fn normalize_required_path(path: &mut PathBuf, fallback: &Path) {
+    let normalized = path.as_os_str().to_string_lossy().trim().to_owned();
     if normalized.is_empty() {
-        *path = fallback.to_owned();
+        *path = fallback.to_path_buf();
     } else {
-        *path = normalized.to_owned();
+        *path = PathBuf::from(normalized);
     }
 }
 
@@ -1530,7 +1536,7 @@ impl Default for Config {
             force_java_21_minimum: true,
             default_instance_max_memory_mib: 4096,
             default_instance_cli_args: String::new(),
-            minecraft_installations_root: default_minecraft_installations_root(),
+            minecraft_installations_root: default_minecraft_installations_root_path(),
             download_max_concurrent: DEFAULT_DOWNLOAD_CONCURRENCY,
             download_speed_limit_enabled: false,
             download_speed_limit: String::new(),
@@ -1584,13 +1590,6 @@ pub fn parse_bitrate_to_bps(value: &str) -> Option<u64> {
 pub enum LoadConfigResult {
     Loaded(Config),
     Missing { default_format: ConfigFormat },
-}
-
-fn default_minecraft_installations_root() -> String {
-    default_minecraft_installations_root_path()
-        .as_os_str()
-        .to_string_lossy()
-        .into_owned()
 }
 
 fn default_minecraft_installations_root_path() -> PathBuf {

@@ -37,12 +37,22 @@ impl LazyImageBytes {
                         Ok(update) => updates.push(update),
                         Err(mpsc::TryRecvError::Empty) => break,
                         Err(mpsc::TryRecvError::Disconnected) => {
+                            tracing::error!(
+                                target: "vertexlauncher/lazy_image",
+                                "Lazy image worker disconnected unexpectedly."
+                            );
                             should_reset = true;
                             break;
                         }
                     }
                 },
-                Err(_) => should_reset = true,
+                Err(_) => {
+                    tracing::error!(
+                        target: "vertexlauncher/lazy_image",
+                        "Lazy image receiver mutex was poisoned."
+                    );
+                    should_reset = true;
+                }
             }
         }
 
@@ -57,7 +67,13 @@ impl LazyImageBytes {
                 Ok(bytes) => {
                     self.states.insert(key, LazyImageBytesState::Ready(bytes));
                 }
-                Err(_) => {
+                Err(err) => {
+                    tracing::warn!(
+                        target: "vertexlauncher/lazy_image",
+                        image_key = %key,
+                        error = %err,
+                        "Lazy image load failed."
+                    );
                     self.states.insert(key, LazyImageBytesState::Failed);
                 }
             }
@@ -114,7 +130,15 @@ impl LazyImageBytes {
                 .await
                 .map(Arc::<[u8]>::from)
                 .map_err(|err| format!("failed to read '{path_label}': {err}"));
-            let _ = tx.send((key_for_task, result));
+            if let Err(err) = tx.send((key_for_task.clone(), result)) {
+                tracing::error!(
+                    target: "vertexlauncher/lazy_image",
+                    key = %key_for_task,
+                    path = %path.display(),
+                    error = %err,
+                    "Failed to deliver lazy-image bytes result."
+                );
+            }
         });
 
         LazyImageBytesStatus::Loading

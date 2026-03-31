@@ -1,9 +1,11 @@
+use std::path::PathBuf;
+
 use modprovider::ContentSource;
 
 #[derive(Clone, Debug)]
 pub struct InstalledContentIdentity {
     pub name: String,
-    pub file_path: String,
+    pub file_path: PathBuf,
     pub pack_managed: bool,
     pub source: ContentSource,
     pub modrinth_project_id: Option<String>,

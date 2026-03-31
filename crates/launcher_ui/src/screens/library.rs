@@ -1219,10 +1219,18 @@ fn request_runtime_launch(
         })
         .and_then(|result| result);
 
-        let _ = tx.send(RuntimeLaunchResult {
+        if let Err(err) = tx.send(RuntimeLaunchResult {
             instance_id: instance_id_for_result,
             result,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/library_runtime",
+                instance_id = %instance_id_for_join_log,
+                instance_root = %instance_root_for_join_log.display(),
+                error = %err,
+                "Failed to deliver library runtime launch result."
+            );
+        }
     });
     true
 }
@@ -1241,12 +1249,24 @@ fn poll_runtime_actions(
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/library",
+                            pending = state.pending_launch_contexts.len(),
+                            "Library runtime worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/library",
+                    pending = state.pending_launch_contexts.len(),
+                    "Library runtime receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -1261,6 +1281,10 @@ fn poll_runtime_actions(
         state.pending_launch_contexts.clear();
         state.results_tx = None;
         state.results_rx = None;
+        notification::error!(
+            "library/runtime",
+            "Launch worker stopped unexpectedly before returning a result."
+        );
     }
 
     for update in updates {
@@ -1318,6 +1342,12 @@ fn poll_runtime_actions(
                 );
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/library",
+                    instance_id = %update.instance_id,
+                    error = %err,
+                    "Library launch failed."
+                );
                 if let Some(context) = context.as_ref() {
                     let tab_id = console::ensure_instance_tab(
                         context.instance_name.as_str(),
@@ -1450,7 +1480,13 @@ fn request_instance_delete(
         let result = delete_instance_root_path(instance_root.as_path())
             .map(|()| instance_for_result)
             .map_err(|err| err.to_string());
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/library",
+                error = %err,
+                "Failed to deliver instance delete result."
+            );
+        }
     });
 }
 
@@ -1467,18 +1503,31 @@ fn poll_delete_instance_results(state: &mut LibraryRuntimeState, instances: &mut
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/library",
+                        target = ?state.delete_target_instance_id,
+                        "Instance-delete worker disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
             }
         },
-        Err(_) => should_reset_channel = true,
+        Err(_) => {
+            tracing::error!(
+                target: "vertexlauncher/library",
+                target = ?state.delete_target_instance_id,
+                "Instance-delete receiver mutex was poisoned."
+            );
+            should_reset_channel = true;
+        }
     }
 
     if should_reset_channel {
         state.delete_results_tx = None;
         state.delete_results_rx = None;
         state.delete_in_flight = false;
+        state.delete_error = Some("Delete worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -1503,6 +1552,11 @@ fn poll_delete_instance_results(state: &mut LibraryRuntimeState, instances: &mut
                 );
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/library",
+                    error = %err,
+                    "Instance delete failed."
+                );
                 state.delete_error = Some(format!("Failed to delete instance: {err}"));
             }
         }
@@ -1518,11 +1572,11 @@ fn ensure_thumbnail_channel(state: &mut LibraryRuntimeState) {
     state.thumbnail_results_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
-fn thumbnail_cache_key(instance_id: &str, path: &str) -> String {
-    format!("{instance_id}\n{path}")
+fn thumbnail_cache_key(instance_id: &str, path: &Path) -> String {
+    format!("{instance_id}\n{}", path.display())
 }
 
-fn thumbnail_uri(instance_id: &str, path: &str) -> String {
+fn thumbnail_uri(instance_id: &str, path: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     instance_id.hash(&mut hasher);
     path.hash(&mut hasher);
@@ -1532,7 +1586,7 @@ fn thumbnail_uri(instance_id: &str, path: &str) -> String {
     )
 }
 
-fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str, path: &str) {
+fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str, path: &Path) {
     let key = thumbnail_cache_key(instance_id, path);
     if state.thumbnail_in_flight.contains(key.as_str()) {
         return;
@@ -1542,15 +1596,22 @@ fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str
     let Some(tx) = state.thumbnail_results_tx.as_ref().cloned() else {
         return;
     };
-
     state.thumbnail_in_flight.insert(key.clone());
-    let path = PathBuf::from(path);
+    let path = path.to_path_buf();
     let _ = tokio_runtime::spawn_detached(async move {
         let bytes = tokio::fs::read(path.as_path())
             .await
             .ok()
             .map(|bytes| Arc::<[u8]>::from(bytes.into_boxed_slice()));
-        let _ = tx.send((key, bytes));
+        if let Err(err) = tx.send((key.clone(), bytes)) {
+            tracing::error!(
+                target: "vertexlauncher/library",
+                thumbnail_key = %key,
+                path = %path.display(),
+                error = %err,
+                "Failed to deliver library thumbnail result."
+            );
+        }
     });
 }
 
@@ -1606,8 +1667,7 @@ fn render_instance_thumbnail(
         if let Some(path) = instance
             .thumbnail_path
             .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
+            .filter(|path| !path.as_os_str().is_empty())
         {
             let key = thumbnail_cache_key(instance.id.as_str(), path);
             match state.thumbnail_cache.get(&key).cloned() {

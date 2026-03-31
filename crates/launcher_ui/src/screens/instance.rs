@@ -1454,15 +1454,32 @@ fn poll_instance_screenshot_scan_results(state: &mut InstanceScreenState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/instance",
+            "Instance screenshot-scan receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok((request_id, screenshots)) = receiver.try_recv() {
-        if request_id != state.screenshot_scan_request_serial {
-            continue;
+    loop {
+        match receiver.try_recv() {
+            Ok((request_id, screenshots)) => {
+                if request_id != state.screenshot_scan_request_serial {
+                    continue;
+                }
+                state.screenshots = screenshots;
+                state.last_screenshot_scan_at = Some(Instant::now());
+                state.screenshot_scan_in_flight = false;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance",
+                    "Instance screenshot-scan worker disconnected unexpectedly."
+                );
+                state.screenshot_scan_in_flight = false;
+                break;
+            }
         }
-        state.screenshots = screenshots;
-        state.last_screenshot_scan_at = Some(Instant::now());
-        state.screenshot_scan_in_flight = false;
     }
 }
 
@@ -1497,7 +1514,15 @@ fn request_instance_screenshot_delete(
             tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err, context = "delete instance screenshot");
             format!("failed to remove {}: {err}", path.display())
         });
-        let _ = tx.send((screenshot_key, file_name, result));
+        if let Err(err) = tx.send((screenshot_key.clone(), file_name.clone(), result)) {
+            tracing::error!(
+                target: "vertexlauncher/instance",
+                screenshot_key = %screenshot_key,
+                file_name = %file_name,
+                error = %err,
+                "Failed to deliver instance screenshot-delete result."
+            );
+        }
     });
 }
 
@@ -1506,36 +1531,58 @@ fn poll_instance_screenshot_delete_results(state: &mut InstanceScreenState, inst
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/instance",
+            "Instance screenshot-delete receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok((screenshot_key, file_name, result)) = receiver.try_recv() {
-        state.delete_screenshot_in_flight = false;
-        match result {
-            Ok(()) => {
-                if state
-                    .screenshot_viewer
-                    .as_ref()
-                    .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
-                {
-                    tracing::info!(
-                        target: "vertexlauncher/screenshots",
-                        screenshot_key = screenshot_key.as_str(),
-                        "Instance screenshot viewer closed because the screenshot was deleted."
-                    );
-                    state.screenshot_viewer = None;
+    loop {
+        match receiver.try_recv() {
+            Ok((screenshot_key, file_name, result)) => {
+                state.delete_screenshot_in_flight = false;
+                match result {
+                    Ok(()) => {
+                        if state
+                            .screenshot_viewer
+                            .as_ref()
+                            .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
+                        {
+                            tracing::info!(
+                                target: "vertexlauncher/screenshots",
+                                screenshot_key = screenshot_key.as_str(),
+                                "Instance screenshot viewer closed because the screenshot was deleted."
+                            );
+                            state.screenshot_viewer = None;
+                        }
+                        state.pending_delete_screenshot_key = None;
+                        refresh_instance_screenshots(state, instance_root, true);
+                        notification::info!(
+                            "instance/screenshots",
+                            "Deleted '{}' from disk.",
+                            file_name
+                        );
+                    }
+                    Err(err) => {
+                        state.pending_delete_screenshot_key = None;
+                        notification::error!(
+                            "instance/screenshots",
+                            "Failed to delete '{}': {}",
+                            file_name,
+                            err
+                        );
+                    }
                 }
-                state.pending_delete_screenshot_key = None;
-                refresh_instance_screenshots(state, instance_root, true);
-                notification::info!("instance/screenshots", "Deleted '{}' from disk.", file_name);
             }
-            Err(err) => {
-                state.pending_delete_screenshot_key = None;
-                notification::error!(
-                    "instance/screenshots",
-                    "Failed to delete '{}': {}",
-                    file_name,
-                    err
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance",
+                    "Instance screenshot-delete worker disconnected unexpectedly."
                 );
+                state.delete_screenshot_in_flight = false;
+                state.pending_delete_screenshot_key = None;
+                break;
             }
         }
     }
@@ -1560,7 +1607,14 @@ fn refresh_instance_screenshots(
     let instance_root = instance_root.to_path_buf();
     let _ = tokio_runtime::spawn_detached(async move {
         let screenshots = collect_instance_screenshots(instance_root.as_path());
-        let _ = tx.send((request_id, screenshots));
+        if let Err(err) = tx.send((request_id, screenshots)) {
+            tracing::error!(
+                target: "vertexlauncher/instance",
+                request_id,
+                error = %err,
+                "Failed to deliver instance screenshot scan result."
+            );
+        }
     });
 }
 
@@ -1613,22 +1667,39 @@ fn poll_instance_log_scan_results(state: &mut InstanceScreenState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/instance",
+            "Instance log-scan receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok((request_id, logs)) = receiver.try_recv() {
-        if request_id != state.log_scan_request_serial {
-            continue;
+    loop {
+        match receiver.try_recv() {
+            Ok((request_id, logs)) => {
+                if request_id != state.log_scan_request_serial {
+                    continue;
+                }
+                state.logs = logs;
+                if state
+                    .selected_log_path
+                    .as_ref()
+                    .is_some_and(|selected| !state.logs.iter().any(|entry| entry.path == *selected))
+                {
+                    state.selected_log_path = None;
+                }
+                state.last_log_scan_at = Some(Instant::now());
+                state.log_scan_in_flight = false;
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance",
+                    "Instance log-scan worker disconnected unexpectedly."
+                );
+                state.log_scan_in_flight = false;
+                break;
+            }
         }
-        state.logs = logs;
-        if state
-            .selected_log_path
-            .as_ref()
-            .is_some_and(|selected| !state.logs.iter().any(|entry| entry.path == *selected))
-        {
-            state.selected_log_path = None;
-        }
-        state.last_log_scan_at = Some(Instant::now());
-        state.log_scan_in_flight = false;
     }
 }
 
@@ -1647,7 +1718,14 @@ fn refresh_instance_logs(state: &mut InstanceScreenState, instance_root: &Path, 
     let instance_root = instance_root.to_path_buf();
     let _ = tokio_runtime::spawn_detached(async move {
         let logs = collect_instance_logs(instance_root.as_path());
-        let _ = tx.send((request_id, logs));
+        if let Err(err) = tx.send((request_id, logs)) {
+            tracing::error!(
+                target: "vertexlauncher/instance",
+                request_id,
+                error = %err,
+                "Failed to deliver instance log scan result."
+            );
+        }
     });
 }
 
@@ -1733,27 +1811,48 @@ fn poll_instance_log_load_results(state: &mut InstanceScreenState) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/instance",
+            "Instance log-load receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok((request_id, path, modified_at_ms, result)) = receiver.try_recv() {
-        if request_id != state.log_load_request_serial {
-            continue;
-        }
-        state.log_load_in_flight = false;
-        state.requested_log_load_path = None;
-        state.requested_log_load_modified_at_ms = None;
-        state.loaded_log_path = Some(path.clone());
-        state.loaded_log_modified_at_ms = modified_at_ms;
-        match result {
-            Ok((lines, truncated)) => {
-                state.loaded_log_lines = lines;
-                state.loaded_log_error = None;
-                state.loaded_log_truncated = truncated;
+    loop {
+        match receiver.try_recv() {
+            Ok((request_id, path, modified_at_ms, result)) => {
+                if request_id != state.log_load_request_serial {
+                    continue;
+                }
+                state.log_load_in_flight = false;
+                state.requested_log_load_path = None;
+                state.requested_log_load_modified_at_ms = None;
+                state.loaded_log_path = Some(path.clone());
+                state.loaded_log_modified_at_ms = modified_at_ms;
+                match result {
+                    Ok((lines, truncated)) => {
+                        state.loaded_log_lines = lines;
+                        state.loaded_log_error = None;
+                        state.loaded_log_truncated = truncated;
+                    }
+                    Err(err) => {
+                        state.loaded_log_lines.clear();
+                        state.loaded_log_error = Some(err);
+                        state.loaded_log_truncated = false;
+                    }
+                }
             }
-            Err(err) => {
-                state.loaded_log_lines.clear();
-                state.loaded_log_error = Some(err);
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance",
+                    "Instance log-load worker disconnected unexpectedly."
+                );
+                state.log_load_in_flight = false;
+                state.requested_log_load_path = None;
+                state.requested_log_load_modified_at_ms = None;
+                state.loaded_log_error = Some("Log load worker stopped unexpectedly.".to_owned());
                 state.loaded_log_truncated = false;
+                break;
             }
         }
     }
@@ -1785,7 +1884,20 @@ fn load_selected_instance_log(state: &mut InstanceScreenState) {
     let path_for_worker = selected_log_path.clone();
     let _ = tokio_runtime::spawn_detached(async move {
         let result = read_instance_log_lines(path_for_worker.as_path());
-        let _ = tx.send((request_id, selected_log_path, modified_at_ms, result));
+        if let Err(err) = tx.send((
+            request_id,
+            selected_log_path.clone(),
+            modified_at_ms,
+            result,
+        )) {
+            tracing::error!(
+                target: "vertexlauncher/instance",
+                request_id,
+                path = %selected_log_path.display(),
+                error = %err,
+                "Failed to deliver instance log load result."
+            );
+        }
     });
 }
 
@@ -2031,14 +2143,24 @@ fn render_instance_settings_modal(
                     );
                     ui.add_space(6.0);
 
-                    let _ = settings_widgets::full_width_text_input_row(
+                    let mut thumbnail_input = state.thumbnail_input.as_os_str().to_string_lossy().into_owned();
+                    let thumbnail_changed = settings_widgets::full_width_text_input_row(
                         text_ui,
                         ui,
                         ("instance_thumbnail_input", instance_id),
                         "Thumbnail path (optional)",
                         Some("Local image path for this instance."),
-                        &mut state.thumbnail_input,
-                    );
+                        &mut thumbnail_input,
+                    )
+                    .changed();
+                    if thumbnail_changed {
+                        let trimmed = thumbnail_input.trim();
+                        state.thumbnail_input = if trimmed.is_empty() {
+                            PathBuf::new()
+                        } else {
+                            PathBuf::from(trimmed)
+                        };
+                    }
                     ui.add_space(6.0);
 
                     if text_ui
@@ -3075,20 +3197,36 @@ fn request_vtmpack_export(
     let instance_name = instance.name.clone();
     let export_path_for_task = output_path.clone();
     let _ = tokio_runtime::spawn_detached(async move {
+        let instance_name_for_progress = instance_name.clone();
+        let output_path_for_progress = output_path.clone();
         let result = export_instance_as_vtmpack_with_progress(
             &instance,
             instance_root.as_path(),
             export_path_for_task.as_path(),
             &options,
             |progress| {
-                let _ = progress_tx.send(progress);
+                if let Err(err) = progress_tx.send(progress) {
+                    tracing::error!(
+                        target: "vertexlauncher/instance_export",
+                        instance_name = %instance_name_for_progress,
+                        output_path = %output_path_for_progress.display(),
+                        error = %err,
+                        "Failed to deliver vtmpack export progress update."
+                    );
+                }
             },
         );
-        let _ = results_tx.send(VtmpackExportOutcome {
+        if let Err(err) = results_tx.send(VtmpackExportOutcome {
             instance_name,
             output_path,
             result,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/instance_export",
+                error = %err,
+                "Failed to deliver vtmpack export result."
+            );
+        }
     });
 }
 
@@ -3102,12 +3240,22 @@ fn poll_vtmpack_export_progress(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_export",
+                            "vtmpack export progress worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    "vtmpack export progress receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3131,12 +3279,22 @@ fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_export",
+                            "vtmpack export result worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    "vtmpack export result receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3157,6 +3315,13 @@ fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                 ));
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    instance_name = %update.instance_name,
+                    output_path = %update.output_path.display(),
+                    error = %err,
+                    "vtmpack export failed."
+                );
                 state.status_message = Some(format!("Failed to export .vtmpack: {err}"));
             }
         }
@@ -3501,6 +3666,8 @@ fn request_server_export(
     let instance_name = instance.name.clone();
     let output_path_for_task = output_path.clone();
     let _ = tokio_runtime::spawn_detached(async move {
+        let instance_name_for_progress = instance_name.clone();
+        let output_path_for_progress = output_path.clone();
         let result = tokio_runtime::spawn_blocking(move || {
             export_instance_as_server_zip_with_progress(
                 &instance,
@@ -3509,18 +3676,32 @@ fn request_server_export(
                 &included_root_entries,
                 force_java_21_minimum,
                 |progress| {
-                    let _ = progress_tx.send(progress);
+                    if let Err(err) = progress_tx.send(progress) {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_export",
+                            instance_name = %instance_name_for_progress,
+                            output_path = %output_path_for_progress.display(),
+                            error = %err,
+                            "Failed to deliver server export progress update."
+                        );
+                    }
                 },
             )
         })
         .await
         .map_err(|err| err.to_string())
         .and_then(|result| result);
-        let _ = results_tx.send(ServerExportOutcome {
+        if let Err(err) = results_tx.send(ServerExportOutcome {
             instance_name,
             output_path,
             result,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/instance_export",
+                error = %err,
+                "Failed to deliver server export result."
+            );
+        }
     });
 }
 
@@ -3534,12 +3715,22 @@ fn poll_server_export_progress(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_export",
+                            "Server export progress worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    "Server export progress receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3563,12 +3754,22 @@ fn poll_server_export_results(state: &mut InstanceScreenState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/instance_export",
+                            "Server export result worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    "Server export result receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3586,6 +3787,13 @@ fn poll_server_export_results(state: &mut InstanceScreenState) {
                 ));
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/instance_export",
+                    instance_name = %update.instance_name,
+                    output_path = %update.output_path.display(),
+                    error = %err,
+                    "Server export failed."
+                );
                 state.status_message = Some(format!("Failed to export server zip: {err}"));
             }
         }
@@ -3852,19 +4060,19 @@ where
         .values()
         .filter(|project| {
             project.selected_source == Some(managed_content::ManagedContentSource::CurseForge)
-                && normalize_path_key(Path::new(project.file_path.as_str())).starts_with("mods/")
+                && normalize_path_key(project.file_path.as_path()).starts_with("mods/")
         })
         .map(|project| {
             let display_name = project.name.trim().to_owned();
             let name = if display_name.is_empty() {
-                project.file_path.clone()
+                project.file_path.to_string_lossy().into_owned()
             } else {
                 display_name
             };
             (
                 name,
-                instance_root.join(project.file_path.as_str()),
-                project.file_path.clone(),
+                instance_root.join(project.file_path.as_path()),
+                project.file_path.to_string_lossy().into_owned(),
             )
         })
         .collect::<Vec<_>>();
@@ -4176,7 +4384,13 @@ fn memory_slider_max_mib() -> (u128, bool) {
                 pending = true;
                 let _ = tokio_runtime::spawn_detached(async move {
                     let result = screen_platform::detect_total_memory_mib();
-                    let _ = tx.send(result);
+                    if let Err(err) = tx.send(result) {
+                        tracing::error!(
+                            target: "vertexlauncher/instance",
+                            error = %err,
+                            "Failed to deliver server-export memory probe result."
+                        );
+                    }
                 });
             }
         }

@@ -2282,10 +2282,16 @@ fn request_detail_versions(state: &mut ContentBrowserState) {
                 DETAIL_VERSIONS_FETCH_TIMEOUT.as_secs()
             )),
         };
-        let _ = tx.send(DetailVersionsResult {
+        if let Err(err) = tx.send(DetailVersionsResult {
             project_key,
             versions,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                error = %err,
+                "Failed to deliver content detail-version result."
+            );
+        }
     });
 }
 
@@ -2322,7 +2328,13 @@ fn request_version_catalog(state: &mut ContentBrowserState) {
                 VERSION_CATALOG_FETCH_TIMEOUT.as_secs()
             )),
         };
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                error = %err,
+                "Failed to deliver content version catalog result."
+            );
+        }
     });
 }
 
@@ -2331,6 +2343,10 @@ fn apply_pending_external_detail_open(state: &mut ContentBrowserState) {
         return;
     };
     let Ok(mut pending) = store.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/content_browser",
+            "Content browser pending external detail-open store mutex was poisoned."
+        );
         return;
     };
     let Some(entry) = pending.take() else {
@@ -2410,12 +2426,20 @@ fn poll_version_catalog(state: &mut ContentBrowserState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/content_browser",
+                            "Content-browser version catalog worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
             Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/content_browser",
+                    "Content-browser version catalog receiver mutex was poisoned."
+                );
                 should_reset_channel = true;
             }
         }
@@ -2425,6 +2449,8 @@ fn poll_version_catalog(state: &mut ContentBrowserState) {
         state.version_catalog_tx = None;
         state.version_catalog_rx = None;
         state.version_catalog_in_flight = false;
+        state.version_catalog_error =
+            Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -2469,7 +2495,14 @@ fn request_identify_file(state: &mut ContentBrowserState, selected_path: PathBuf
     let _ = tokio_runtime::spawn_detached(async move {
         let path_for_result = selected_path.clone();
         let result = identify_mod_file_by_hash(selected_path.as_path());
-        let _ = tx.send((path_for_result, result));
+        if let Err(err) = tx.send((path_for_result.clone(), result)) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                path = %path_for_result.display(),
+                error = %err,
+                "Failed to deliver content identification result."
+            );
+        }
     });
 }
 
@@ -2486,18 +2519,30 @@ fn poll_identify_results(state: &mut ContentBrowserState) {
                 Ok(update) => updates.push(update),
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
+                    tracing::error!(
+                        target: "vertexlauncher/content_browser",
+                        "Content identification worker disconnected unexpectedly."
+                    );
                     should_reset_channel = true;
                     break;
                 }
             }
         },
-        Err(_) => should_reset_channel = true,
+        Err(_) => {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                "Content identification receiver mutex was poisoned."
+            );
+            should_reset_channel = true;
+        }
     }
 
     if should_reset_channel {
         state.identify_tx = None;
         state.identify_rx = None;
         state.identify_in_flight = false;
+        state.status_message =
+            Some("Content identification worker stopped unexpectedly.".to_owned());
     }
 
     for (path, result) in updates {
@@ -2514,6 +2559,12 @@ fn poll_identify_results(state: &mut ContentBrowserState) {
                 ));
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/content_browser",
+                    path = %path.display(),
+                    error = %err,
+                    "Content identification failed."
+                );
                 state.status_message =
                     Some(format!("Could not identify {}: {err}", path.display()));
             }
@@ -2579,10 +2630,16 @@ fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest
         match result {
             Ok(()) => {}
             Err(err) => {
-                let _ = tx.send(SearchUpdate::Failed {
+                if let Err(err_send) = tx.send(SearchUpdate::Failed {
                     request: request_for_failure,
                     error: err,
-                });
+                }) {
+                    tracing::error!(
+                        target: "vertexlauncher/content_browser",
+                        error = %err_send,
+                        "Failed to deliver content search failure update."
+                    );
+                }
             }
         }
     });
@@ -3008,7 +3065,7 @@ fn resolve_installed_file_paths_for_update(
     requested_installed_file_path: &Path,
 ) -> (PathBuf, Option<PathBuf>) {
     let managed_installed_file_path = installed_project_for_entry(manifest, entry)
-        .map(|(_, project)| instance_root.join(project.file_path.as_str()))
+        .map(|(_, project)| instance_root.join(project.file_path.as_path()))
         .filter(|path| path.exists());
     let effective_installed_file_path = managed_installed_file_path
         .clone()
@@ -3187,7 +3244,7 @@ fn run_search_request(
         .saturating_mul(CONTENT_SEARCH_PER_PROVIDER_LIMIT);
     let total_tasks = content_scope_task_count(request.content_scope);
     if total_tasks == 0 {
-        let _ = tx.send(SearchUpdate::Snapshot {
+        if let Err(err) = tx.send(SearchUpdate::Snapshot {
             request,
             snapshot: BrowserSearchSnapshot {
                 entries: Vec::new(),
@@ -3196,7 +3253,13 @@ fn run_search_request(
             completed_tasks: 0,
             total_tasks: 0,
             finished: true,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                error = %err,
+                "Failed to deliver empty content search snapshot."
+            );
+        }
         return Ok(());
     }
 
@@ -3249,7 +3312,7 @@ fn run_search_request(
         completed_tasks = completed_tasks.saturating_add(1);
         provider_entries.extend(outcome.entries);
         warnings.extend(outcome.warnings);
-        let _ = tx.send(SearchUpdate::Snapshot {
+        if let Err(err) = tx.send(SearchUpdate::Snapshot {
             request: request.clone(),
             snapshot: build_search_snapshot(
                 provider_entries.as_slice(),
@@ -3259,7 +3322,15 @@ fn run_search_request(
             completed_tasks,
             total_tasks,
             finished: completed_tasks >= total_tasks,
-        });
+        }) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                completed_tasks,
+                total_tasks,
+                error = %err,
+                "Failed to deliver incremental content search snapshot."
+            );
+        }
     }
 
     Ok(())
@@ -3428,12 +3499,24 @@ fn poll_search(state: &mut ContentBrowserState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/content_browser",
+                            request = ?state.active_search_request,
+                            "Content search worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/content_browser",
+                    request = ?state.active_search_request,
+                    "Content search receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3443,6 +3526,10 @@ fn poll_search(state: &mut ContentBrowserState) {
         state.search_in_flight = false;
         state.search_completed_tasks = 0;
         state.search_total_tasks = 0;
+        state
+            .results
+            .warnings
+            .push("Content search worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -3498,6 +3585,12 @@ fn poll_search(state: &mut ContentBrowserState) {
                 if state.search_notification_active {
                     state.search_notification_active = false;
                 }
+                tracing::warn!(
+                    target: "vertexlauncher/content_browser",
+                    request = ?request,
+                    error = %error,
+                    "Content search failed."
+                );
                 state.results.warnings.push(error.clone());
                 notification::warn!("content-browser/search", "Content search failed: {}", error);
             }
@@ -3515,12 +3608,24 @@ fn poll_detail_versions(state: &mut ContentBrowserState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/content_browser",
+                            project = ?state.detail_versions_project_key,
+                            "Detail-versions worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/content_browser",
+                    project = ?state.detail_versions_project_key,
+                    "Detail-versions receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3528,6 +3633,8 @@ fn poll_detail_versions(state: &mut ContentBrowserState) {
         state.detail_versions_tx = None;
         state.detail_versions_rx = None;
         state.detail_versions_in_flight = false;
+        state.detail_versions_error =
+            Some("Version details worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -3547,6 +3654,12 @@ fn poll_detail_versions(state: &mut ContentBrowserState) {
                     state.detail_versions_error = None;
                 }
                 Err(err) => {
+                    tracing::warn!(
+                        target: "vertexlauncher/content_browser",
+                        project = %update.project_key,
+                        error = %err,
+                        "Detail version lookup failed."
+                    );
                     state.detail_versions_project_key = Some(update.project_key);
                     state.detail_versions.clear();
                     state.detail_versions_error = Some(err);
@@ -3747,7 +3860,13 @@ fn maybe_start_queued_download(
 
     let _ = tokio_runtime::spawn_detached(async move {
         let result = apply_content_install_request(root.as_path(), request);
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/content_browser",
+                error = %err,
+                "Failed to deliver queued content operation result."
+            );
+        }
     });
 }
 
@@ -3761,12 +3880,24 @@ fn poll_downloads(state: &mut ContentBrowserState) {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/content_browser",
+                            active_download = ?state.active_download,
+                            "Content download worker disconnected unexpectedly."
+                        );
                         should_reset_channel = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset_channel = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/content_browser",
+                    active_download = ?state.active_download,
+                    "Content download receiver mutex was poisoned."
+                );
+                should_reset_channel = true;
+            }
         }
     }
 
@@ -3778,6 +3909,7 @@ fn poll_downloads(state: &mut ContentBrowserState) {
         if let Some(instance_name) = state.active_instance_name.as_deref() {
             install_activity::clear_instance(instance_name);
         }
+        state.status_message = Some("Content download worker stopped unexpectedly.".to_owned());
     }
 
     for update in updates {
@@ -3805,6 +3937,11 @@ fn poll_downloads(state: &mut ContentBrowserState) {
                 );
             }
             Err(err) => {
+                tracing::error!(
+                    target: "vertexlauncher/content_browser",
+                    error = %err,
+                    "Queued content operation failed."
+                );
                 state.status_message = Some(format!("Content download failed: {err}"));
                 notification::error!(
                     "content-browser/download",
@@ -4069,7 +4206,7 @@ fn install_project_recursive(
 
     let previous_file_path = existing
         .as_ref()
-        .map(|project| instance_root.join(project.file_path.as_str()));
+        .map(|project| instance_root.join(project.file_path.as_path()));
     let staged_previous_path = match previous_file_path.as_ref() {
         Some(previous_file_path) => {
             stage_existing_file_for_update(previous_file_path.as_path(), target_path.as_path())?
@@ -4155,7 +4292,7 @@ fn install_project_recursive(
                 project_key: project_key.clone(),
                 name: entry.name.clone(),
                 folder_name: entry.content_type.folder_name().to_owned(),
-                file_path,
+                file_path: PathBuf::from(file_path),
                 modrinth_project_id: entry.modrinth_project_id.clone(),
                 curseforge_project_id: entry.curseforge_project_id,
                 selected_source: Some(resolved.source),
@@ -4314,7 +4451,7 @@ fn remove_installed_project(
             .retain(|dependency| dependency != project_key);
     }
 
-    let file_path = instance_root.join(existing.file_path.as_str());
+    let file_path = instance_root.join(existing.file_path.as_path());
     tracing::debug!(
         target: CONTENT_UPDATE_LOG_TARGET,
         instance_root = %instance_root.display(),
@@ -4445,7 +4582,7 @@ fn apply_deferred_content_cleanup(
     let active_paths = manifest
         .projects
         .values()
-        .map(|project| instance_root.join(project.file_path.as_str()))
+        .map(|project| instance_root.join(project.file_path.as_path()))
         .collect::<HashSet<_>>();
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
@@ -4976,6 +5113,12 @@ fn throttle_download_url(url: &str) {
     };
     let lock = download_throttle_store(url);
     let Ok(mut next_allowed) = lock.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/content_browser",
+            url,
+            throttle_spacing_ms = spacing.as_millis() as u64,
+            "Content browser download throttle mutex was poisoned."
+        );
         return;
     };
     let now = Instant::now();
@@ -5117,7 +5260,7 @@ mod tests {
                 project_key: "mod::example".to_owned(),
                 name: "Example".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/example.jar".to_owned(),
+                file_path: PathBuf::from("mods/example.jar"),
                 modrinth_project_id: None,
                 curseforge_project_id: None,
                 selected_source: None,
@@ -5180,7 +5323,7 @@ mod tests {
                 project_key: "mod::example".to_owned(),
                 name: "Example".to_owned(),
                 folder_name: "mods".to_owned(),
-                file_path: "mods/example-2.0.jar".to_owned(),
+                file_path: PathBuf::from("mods/example-2.0.jar"),
                 modrinth_project_id: Some("example-project".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),

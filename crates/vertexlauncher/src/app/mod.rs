@@ -965,7 +965,13 @@ fn start_pending_config_save(app: &mut VertexApp) {
     app.config_save_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
         let result = save_config(&config).map_err(|err| err.to_string());
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/config",
+                error = %err,
+                "Failed to deliver config-save result."
+            );
+        }
     });
 }
 
@@ -994,6 +1000,10 @@ fn poll_config_save_results(app: &mut VertexApp) {
             }
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/app/config",
+                    "Config-save worker disconnected unexpectedly."
+                );
                 should_reset_channel = true;
                 app.config_save_in_flight = false;
                 break;
@@ -1037,7 +1047,13 @@ fn start_pending_instance_store_save(app: &mut VertexApp) {
     app.instance_store_save_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
         let result = save_instance_store(&store).map_err(|err| err.to_string());
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/instances",
+                error = %err,
+                "Failed to deliver instance-store save result."
+            );
+        }
     });
 }
 
@@ -1070,6 +1086,10 @@ fn poll_instance_store_save_results(app: &mut VertexApp) {
             }
             Err(mpsc::TryRecvError::Empty) => break,
             Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/app/instances",
+                    "Instance-store save worker disconnected unexpectedly."
+                );
                 should_reset_channel = true;
                 app.instance_store_save_in_flight = false;
                 break;
@@ -1125,7 +1145,13 @@ fn start_create_instance_task(
         )
         .map(|instance| (store, instance))
         .map_err(|err| err.to_string());
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/create_instance",
+                error = %err,
+                "Failed to deliver create-instance task result."
+            );
+        }
     });
 }
 
@@ -1147,6 +1173,10 @@ fn poll_create_instance_result(app: &mut VertexApp) {
             app.create_instance_state.create_in_flight = false;
             app.create_instance_state.error =
                 Some("Create instance task stopped unexpectedly.".to_owned());
+            tracing::error!(
+                target: "vertexlauncher/app/create_instance",
+                "Create-instance worker channel stopped unexpectedly."
+            );
             return;
         }
     };
@@ -1164,6 +1194,11 @@ fn poll_create_instance_result(app: &mut VertexApp) {
             app.refresh_instance_shortcuts();
         }
         Err(err) => {
+            tracing::error!(
+                target: "vertexlauncher/app/create_instance",
+                error = %err,
+                "Create-instance task failed."
+            );
             app.create_instance_state.error = Some(format!("Failed to create instance: {err}"));
         }
     }
@@ -1236,7 +1271,13 @@ fn start_curseforge_manual_download_preflight(
         .await
         .map_err(|err| err.to_string())
         .and_then(|result| result);
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/import",
+                error = %err,
+                "Failed to deliver CurseForge manual-download preflight result."
+            );
+        }
     });
 }
 
@@ -1264,6 +1305,11 @@ fn poll_curseforge_manual_download_preflight(app: &mut VertexApp) {
             ) {
                 Ok(mut pending) => {
                     if let Err(err) = scan_curseforge_manual_downloads(&mut pending) {
+                        tracing::error!(
+                            target: "vertexlauncher/app/import",
+                            error = %err,
+                            "Failed to prepare manual CurseForge downloads after preflight."
+                        );
                         app.import_instance_state.error = Some(format!(
                             "Failed to prepare manual CurseForge downloads: {err}"
                         ));
@@ -1282,6 +1328,11 @@ fn poll_curseforge_manual_download_preflight(app: &mut VertexApp) {
                     }
                 }
                 Err(err) => {
+                    tracing::error!(
+                        target: "vertexlauncher/app/import",
+                        error = %err,
+                        "Failed to initialize pending manual CurseForge download state."
+                    );
                     app.import_instance_state.error = Some(format!(
                         "Failed to prepare manual CurseForge downloads: {err}"
                     ));
@@ -1292,6 +1343,11 @@ fn poll_curseforge_manual_download_preflight(app: &mut VertexApp) {
             spawn_import_instance_task(app, request);
         }
         (_, Err(err)) => {
+            tracing::error!(
+                target: "vertexlauncher/app/import",
+                error = %err,
+                "CurseForge manual-download preflight failed."
+            );
             app.import_instance_state.error =
                 Some(format!("Failed to prepare CurseForge import: {err}"));
         }
@@ -1327,7 +1383,13 @@ fn spawn_import_instance_task(app: &mut VertexApp, request: import_instance_moda
     let installations_root = app.config.minecraft_installations_root_path().to_path_buf();
     let _ = tokio_runtime::spawn_detached(async move {
         let result = import_package_in_background(store, installations_root, request, progress_tx);
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/import",
+                error = %err,
+                "Failed to deliver import task result."
+            );
+        }
     });
 }
 
@@ -1341,6 +1403,10 @@ fn poll_import_instance_progress(app: &mut VertexApp) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/app/import",
+            "Import progress receiver mutex was poisoned."
+        );
         return;
     };
     while let Ok(progress) = receiver.try_recv() {
@@ -1358,6 +1424,10 @@ fn poll_import_instance_result(app: &mut VertexApp) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/app/import",
+            "Import result receiver mutex was poisoned."
+        );
         return;
     };
     let Ok(result) = receiver.try_recv() else {
@@ -1398,6 +1468,11 @@ fn poll_import_instance_result(app: &mut VertexApp) {
                 ) {
                     Ok(mut pending) => {
                         if let Err(scan_err) = scan_curseforge_manual_downloads(&mut pending) {
+                            tracing::error!(
+                                target: "vertexlauncher/app/import",
+                                error = %scan_err,
+                                "Failed to rescan reopened manual CurseForge downloads."
+                            );
                             cleanup_pending_curseforge_manual_download(Some(pending));
                             app.import_instance_state.error = Some(format!(
                                 "Failed to reopen manual CurseForge downloads: {scan_err}"
@@ -1418,6 +1493,11 @@ fn poll_import_instance_result(app: &mut VertexApp) {
                         return;
                     }
                     Err(setup_err) => {
+                        tracing::error!(
+                            target: "vertexlauncher/app/import",
+                            error = %setup_err,
+                            "Failed to rebuild manual CurseForge download state from import error."
+                        );
                         app.import_instance_state.error = Some(format!(
                             "Failed to reopen manual CurseForge downloads: {setup_err}"
                         ));
@@ -1702,6 +1782,12 @@ fn poll_pending_curseforge_manual_download(app: &mut VertexApp) {
                 }
             }
             Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/app/import",
+                    error = %err,
+                    remaining_files = state.pending_files.len(),
+                    "Pending manual CurseForge download scan failed."
+                );
                 state.error = Some(err);
             }
         }
@@ -1965,7 +2051,15 @@ fn start_discover_curseforge_manual_download_preflight(
         .await
         .map_err(|err| err.to_string())
         .and_then(|result| result);
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/discover",
+                project_id,
+                file_id,
+                error = %err,
+                "Failed to deliver discover manual-download preflight result."
+            );
+        }
     });
 }
 
@@ -2059,7 +2153,13 @@ fn spawn_discover_install_task(app: &mut VertexApp, request: screens::DiscoverIn
     let _ = tokio_runtime::spawn_detached(async move {
         let result =
             install_discover_modpack_in_background(store, installations_root, request, progress_tx);
-        let _ = tx.send(result);
+        if let Err(err) = tx.send(result) {
+            tracing::error!(
+                target: "vertexlauncher/app/discover",
+                error = %err,
+                "Failed to deliver discover install result."
+            );
+        }
     });
 }
 
@@ -2068,14 +2168,30 @@ fn poll_discover_install_progress(app: &mut VertexApp) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/app/discover",
+            "Discover install progress receiver mutex was poisoned."
+        );
         return;
     };
-    while let Ok(progress) = receiver.try_recv() {
-        app.discover_state.apply_install_progress(
-            progress.message,
-            progress.completed_steps,
-            progress.total_steps,
-        );
+    loop {
+        match receiver.try_recv() {
+            Ok(progress) => {
+                app.discover_state.apply_install_progress(
+                    progress.message,
+                    progress.completed_steps,
+                    progress.total_steps,
+                );
+            }
+            Err(mpsc::TryRecvError::Empty) => break,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                tracing::error!(
+                    target: "vertexlauncher/app/discover",
+                    "Discover install progress worker disconnected unexpectedly."
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -2084,10 +2200,24 @@ fn poll_discover_install_result(app: &mut VertexApp) {
         return;
     };
     let Ok(receiver) = rx.lock() else {
+        tracing::error!(
+            target: "vertexlauncher/app/discover",
+            "Discover install result receiver mutex was poisoned."
+        );
         return;
     };
-    let Ok(result) = receiver.try_recv() else {
-        return;
+    let result = match receiver.try_recv() {
+        Ok(result) => result,
+        Err(mpsc::TryRecvError::Empty) => return,
+        Err(mpsc::TryRecvError::Disconnected) => {
+            tracing::error!(
+                target: "vertexlauncher/app/discover",
+                "Discover install result worker disconnected unexpectedly."
+            );
+            app.discover_state
+                .finish_install(Err("Install task stopped unexpectedly.".to_owned()));
+            return;
+        }
     };
 
     match result {
@@ -2305,11 +2435,18 @@ fn download_discover_modpack_file(
         .as_reader()
         .read_to_end(&mut bytes)
         .map_err(|err| format!("failed to read modpack download from {url}: {err}"))?;
-    let _ = progress_tx.send(import_instance_modal::ImportProgress {
+    if let Err(err) = progress_tx.send(import_instance_modal::ImportProgress {
         message: "Downloaded modpack package. Importing instance...".to_owned(),
         completed_steps: 1,
         total_steps: 1,
-    });
+    }) {
+        tracing::error!(
+            target: "vertexlauncher/app/discover",
+            url,
+            error = %err,
+            "Failed to deliver discover-download progress update."
+        );
+    }
     let temp_path = std::env::temp_dir().join(format!(
         "vertex-discover-{}-{}",
         std::process::id(),
@@ -2353,7 +2490,7 @@ fn download_discover_thumbnail(
     url: &str,
     instance_root: &Path,
     instance_id: &str,
-) -> Result<Option<String>, String> {
+) -> Result<Option<PathBuf>, String> {
     let mut response = ureq::get(url)
         .call()
         .map_err(|err| format!("failed to download thumbnail from {url}: {err}"))?;
@@ -2375,7 +2512,7 @@ fn download_discover_thumbnail(
         tracing::warn!(target: "vertexlauncher/io", op = "write", path = %path.display(), error = %err, context = "write discover thumbnail");
         format!("failed to write thumbnail {}: {err}", path.display())
     })?;
-    Ok(Some(path.to_string_lossy().to_string()))
+    Ok(Some(path))
 }
 
 fn thumbnail_extension_from_url(url: &str) -> &'static str {
@@ -2409,7 +2546,13 @@ fn import_package_in_background(
         installations_root.as_path(),
         request,
         |progress| {
-            let _ = progress_tx.send(progress);
+            if let Err(err) = progress_tx.send(progress) {
+                tracing::error!(
+                    target: "vertexlauncher/app/import",
+                    error = %err,
+                    "Failed to deliver import progress update."
+                );
+            }
         },
     )?;
     Ok((store, instance))

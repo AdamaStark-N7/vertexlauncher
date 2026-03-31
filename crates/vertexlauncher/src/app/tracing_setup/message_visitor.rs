@@ -23,6 +23,7 @@ impl tracing::field::Visit for MessageVisitor {
 
 fn sanitize_field_value(field_name: &str, rendered: &str) -> String {
     let normalized = field_name.to_ascii_lowercase();
+    let sanitized_rendered = launcher_ui::privacy::sanitize_text_for_log(rendered);
     let sensitive = [
         "token",
         "secret",
@@ -42,6 +43,6 @@ fn sanitize_field_value(field_name: &str, rendered: &str) -> String {
     if sensitive.iter().any(|needle| normalized.contains(needle)) {
         "\"[redacted]\"".to_owned()
     } else {
-        rendered.to_owned()
+        sanitized_rendered
     }
 }

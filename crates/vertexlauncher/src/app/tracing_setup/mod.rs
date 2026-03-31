@@ -44,17 +44,10 @@ fn initialize_tracing() -> Option<PathBuf> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let stderr_layer = tracing_subscriber::fmt::layer()
-        .with_ansi(false)
-        .without_time()
-        .with_target(false)
-        .with_level(false)
-        .with_writer(std::io::stderr);
     let app_layer = AppLogLayer { writer };
 
     let _ = tracing_subscriber::registry()
         .with(env_filter)
-        .with(stderr_layer)
         .with(app_layer)
         .try_init();
 

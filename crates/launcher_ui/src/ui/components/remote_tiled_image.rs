@@ -63,12 +63,22 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
+                        tracing::error!(
+                            target: "vertexlauncher/remote_image",
+                            "Remote image worker disconnected unexpectedly."
+                        );
                         should_reset = true;
                         break;
                     }
                 }
             },
-            Err(_) => should_reset = true,
+            Err(_) => {
+                tracing::error!(
+                    target: "vertexlauncher/remote_image",
+                    "Remote image receiver mutex was poisoned."
+                );
+                should_reset = true;
+            }
         }
     }
 
@@ -83,7 +93,13 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
             Ok(image) => {
                 cache.states.insert(url, RemoteImageState::Ready(image));
             }
-            Err(_) => {
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/remote_image",
+                    url = %url,
+                    error = %err,
+                    "Remote image load failed."
+                );
                 cache.states.insert(url, RemoteImageState::Failed);
             }
         }
@@ -137,7 +153,14 @@ pub fn show(
                 let url_owned = normalized_url.to_owned();
                 tokio_runtime::spawn_blocking_detached(move || {
                     let result = fetch_and_tile_remote_image(url_owned.as_str());
-                    let _ = tx.send((url_owned, result));
+                    if let Err(err) = tx.send((url_owned.clone(), result)) {
+                        tracing::error!(
+                            target: "vertexlauncher/remote_image",
+                            url = %url_owned,
+                            error = %err,
+                            "Failed to deliver remote tiled image result."
+                        );
+                    }
                 });
             }
         }
