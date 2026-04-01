@@ -64,8 +64,10 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
                     native_adapter_selector: None,
                     device_descriptor: Arc::new(|adapter| {
                         let info = adapter.get_info();
+                        let graphics_api = graphics_api_label(&format!("{:?}", info.backend));
                         app_metadata::record_graphics_adapter(
                             &info.name,
+                            &graphics_api,
                             &info.driver,
                             &info.driver_info,
                         );
@@ -100,6 +102,16 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
         },
         ..Default::default()
     }
+}
+
+fn graphics_api_label(backend_name: &str) -> String {
+    let backend_name = match backend_name {
+        "Dx12" => "DX12",
+        "Dx11" => "DX11",
+        "Gl" => "OpenGL",
+        other => other,
+    };
+    format!("WGPU({backend_name})")
 }
 
 fn transparent_backend_options(

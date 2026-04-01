@@ -6,6 +6,7 @@ use super::platform;
 #[derive(Debug, Clone)]
 struct GraphicsInfo {
     gpu: String,
+    graphics_api: String,
     driver_name: String,
     driver_version: String,
 }
@@ -28,6 +29,7 @@ fn apply_graphics_overrides(info: &mut SettingsInfo) {
         if !graphics.gpu.is_empty() {
             info.gpu = graphics.gpu.clone();
         }
+        info.graphics_api = clean_value(&graphics.graphics_api);
 
         let driver_name = clean_value(&graphics.driver_name);
         let driver_version = clean_value(&graphics.driver_version);
@@ -40,9 +42,15 @@ fn apply_graphics_overrides(info: &mut SettingsInfo) {
     }
 }
 
-pub fn record_graphics_adapter(gpu: &str, driver_name: &str, driver_version: &str) {
+pub fn record_graphics_adapter(
+    gpu: &str,
+    graphics_api: &str,
+    driver_name: &str,
+    driver_version: &str,
+) {
     let _ = GRAPHICS_INFO.set(GraphicsInfo {
         gpu: clean_value(gpu),
+        graphics_api: clean_value(graphics_api),
         driver_name: clean_value(driver_name),
         driver_version: clean_value(driver_version),
     });
@@ -56,6 +64,7 @@ fn build_base_settings_info() -> SettingsInfo {
         cpu: platform::detect_cpu_name(),
         gpu: "Unknown".to_owned(),
         memory: platform::detect_total_memory(),
+        graphics_api: "Unknown".to_owned(),
         graphics_driver: "Unknown".to_owned(),
         app_version: format!("{version} ({revision})"),
     }

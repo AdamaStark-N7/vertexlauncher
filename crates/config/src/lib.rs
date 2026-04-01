@@ -50,14 +50,16 @@ pub enum SkinPreviewAaMode {
     Smaa,
     Fxaa,
     Taa,
+    FxaaTaa,
 }
 
 impl SkinPreviewAaMode {
-    pub const ALL: [SkinPreviewAaMode; 5] = [
+    pub const ALL: [SkinPreviewAaMode; 6] = [
         SkinPreviewAaMode::Msaa,
         SkinPreviewAaMode::Smaa,
         SkinPreviewAaMode::Fxaa,
         SkinPreviewAaMode::Taa,
+        SkinPreviewAaMode::FxaaTaa,
         SkinPreviewAaMode::Off,
     ];
 
@@ -68,6 +70,28 @@ impl SkinPreviewAaMode {
             SkinPreviewAaMode::Smaa => "SMAA (GPU Post)",
             SkinPreviewAaMode::Fxaa => "FXAA (Post)",
             SkinPreviewAaMode::Taa => "TAA (Temporal)",
+            SkinPreviewAaMode::FxaaTaa => "FXAA + TAA (Temporal)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkinPreviewTexelAaMode {
+    Off,
+    TexelBoundary,
+}
+
+impl SkinPreviewTexelAaMode {
+    pub const ALL: [SkinPreviewTexelAaMode; 2] = [
+        SkinPreviewTexelAaMode::Off,
+        SkinPreviewTexelAaMode::TexelBoundary,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            SkinPreviewTexelAaMode::Off => "Off",
+            SkinPreviewTexelAaMode::TexelBoundary => "Texel Border AA",
         }
     }
 }
@@ -722,6 +746,7 @@ pub struct Config {
     notification_expiry_bars_empty_left: bool,
     ui_font_family: UiFontFamily,
     skin_preview_aa_mode: SkinPreviewAaMode,
+    skin_preview_texel_aa_mode: SkinPreviewTexelAaMode,
     svg_aa_mode: SvgAaMode,
     skin_preview_msaa_samples: i32,
     skin_preview_motion_blur_enabled: bool,
@@ -784,6 +809,14 @@ impl Config {
     /// Sets skin preview anti-aliasing mode.
     pub fn set_skin_preview_aa_mode(&mut self, mode: SkinPreviewAaMode) {
         self.skin_preview_aa_mode = mode;
+    }
+
+    pub fn skin_preview_texel_aa_mode(&self) -> SkinPreviewTexelAaMode {
+        self.skin_preview_texel_aa_mode
+    }
+
+    pub fn set_skin_preview_texel_aa_mode(&mut self, mode: SkinPreviewTexelAaMode) {
+        self.skin_preview_texel_aa_mode = mode;
     }
 
     /// Returns configured SVG rasterization anti-aliasing mode.
@@ -1186,6 +1219,7 @@ impl Config {
             notification_expiry_bars_empty_left,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_texel_aa_mode: _,
             svg_aa_mode: _,
             skin_preview_msaa_samples: _,
             skin_preview_motion_blur_enabled: _,
@@ -1282,6 +1316,7 @@ impl Config {
             notification_expiry_bars_empty_left: _,
             ui_font_family,
             skin_preview_aa_mode: _,
+            skin_preview_texel_aa_mode: _,
             svg_aa_mode: _,
             skin_preview_msaa_samples: _,
             skin_preview_motion_blur_enabled: _,
@@ -1332,6 +1367,7 @@ impl Config {
             notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_texel_aa_mode: _,
             svg_aa_mode: _,
             skin_preview_msaa_samples: _,
             skin_preview_motion_blur_enabled: _,
@@ -1390,6 +1426,7 @@ impl Config {
             notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_texel_aa_mode: _,
             svg_aa_mode: _,
             skin_preview_motion_blur_enabled: _,
             skin_preview_motion_blur_amount: _,
@@ -1449,6 +1486,7 @@ impl Config {
             notification_expiry_bars_empty_left: _,
             ui_font_family: _,
             skin_preview_aa_mode: _,
+            skin_preview_texel_aa_mode: _,
             svg_aa_mode: _,
             skin_preview_msaa_samples: _,
             skin_preview_motion_blur_enabled: _,
@@ -1519,6 +1557,7 @@ impl Default for Config {
             notification_expiry_bars_empty_left: false,
             ui_font_family: UiFontFamily::included_default(),
             skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
+            skin_preview_texel_aa_mode: SkinPreviewTexelAaMode::Off,
             svg_aa_mode: SvgAaMode::Balanced,
             skin_preview_msaa_samples: 4,
             skin_preview_motion_blur_enabled: false,

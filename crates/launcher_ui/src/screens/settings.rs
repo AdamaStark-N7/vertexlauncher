@@ -1,7 +1,8 @@
 use config::{
     Config, DOWNLOAD_CONCURRENCY_MAX, DOWNLOAD_CONCURRENCY_MIN, DropdownSettingId, FloatSettingId,
     INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
-    JavaRuntimeVersion, SkinPreviewAaMode, SvgAaMode, UiFontFamily, parse_bitrate_to_bps,
+    JavaRuntimeVersion, SkinPreviewAaMode, SkinPreviewTexelAaMode, SvgAaMode, UiFontFamily,
+    parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::purge_cache as purge_installation_cache;
@@ -186,6 +187,14 @@ fn render_info_section(ui: &mut Ui, text_ui: &mut TextUi, settings_info: &Settin
                         ui,
                         "Memory",
                         &settings_info.memory,
+                        &key_style,
+                        &value_style,
+                    );
+                    render_info_row(
+                        text_ui,
+                        ui,
+                        "Graphics API",
+                        &settings_info.graphics_api,
                         &key_style,
                         &value_style,
                     );
@@ -411,6 +420,31 @@ fn render_svg_aa_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config)
 }
 
 fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let mut texel_selected = SkinPreviewTexelAaMode::ALL
+        .iter()
+        .position(|mode| *mode == config.skin_preview_texel_aa_mode())
+        .unwrap_or(0);
+    let texel_labels: Vec<&str> = SkinPreviewTexelAaMode::ALL
+        .iter()
+        .map(|mode| mode.label())
+        .collect();
+    let texel_response = settings_widgets::dropdown_row(
+        text_ui,
+        ui,
+        "skins_preview_texel_aa_mode",
+        "Skin Preview Texel Edge AA",
+        Some("Controls texel-boundary smoothing in the skin shader itself."),
+        &mut texel_selected,
+        &texel_labels,
+    );
+    if texel_response.changed() {
+        if let Some(next) = SkinPreviewTexelAaMode::ALL.get(texel_selected).copied() {
+            config.set_skin_preview_texel_aa_mode(next);
+        }
+    }
+
+    ui.add_space(style::SPACE_MD);
+
     let mut selected = SkinPreviewAaMode::ALL
         .iter()
         .position(|mode| *mode == config.skin_preview_aa_mode())
@@ -423,8 +457,10 @@ fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut C
         text_ui,
         ui,
         "skins_preview_aa_mode",
-        "Skin Preview Anti-Aliasing",
-        Some("MSAA, SMAA, FXAA, and TAA all run on the GPU. Changes apply immediately."),
+        "Skin Preview Post Anti-Aliasing",
+        Some(
+            "MSAA, SMAA, FXAA, TAA, and FXAA + TAA all run on the GPU after the scene is rendered. Changes apply immediately.",
+        ),
         &mut selected,
         &labels,
     );

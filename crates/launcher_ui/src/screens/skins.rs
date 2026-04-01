@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use auth::{CachedAccount, MinecraftProfileState, MinecraftSkinVariant};
 use bytemuck::{Pod, Zeroable};
-use config::SkinPreviewAaMode;
+use config::{SkinPreviewAaMode, SkinPreviewTexelAaMode};
 use eframe::egui_wgpu::wgpu::util::DeviceExt as _;
 use eframe::egui_wgpu::{self, wgpu};
 use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, TextureHandle, TextureOptions, Ui};
@@ -44,6 +44,7 @@ pub fn render(
     wgpu_target_format: Option<wgpu::TextureFormat>,
     skin_preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_texel_aa_mode: SkinPreviewTexelAaMode,
     preview_motion_blur_enabled: bool,
     preview_motion_blur_amount: f32,
     preview_motion_blur_shutter_frames: f32,
@@ -75,6 +76,7 @@ pub fn render(
     state.wgpu_target_format = wgpu_target_format;
     state.preview_msaa_samples = skin_preview_msaa_samples.max(1);
     state.preview_aa_mode = preview_aa_mode;
+    state.preview_texel_aa_mode = preview_texel_aa_mode;
     state.preview_motion_blur_enabled = preview_motion_blur_enabled;
     state.preview_motion_blur_amount = preview_motion_blur_amount.clamp(0.0, 1.0);
     state.preview_motion_blur_shutter_frames = preview_motion_blur_shutter_frames.max(0.0);
@@ -82,6 +84,7 @@ pub fn render(
     state.preview_3d_layers_enabled = preview_3d_layers_enabled;
     state.expressions_enabled = expressions_enabled;
     if state.last_preview_aa_mode != state.preview_aa_mode
+        || state.last_preview_texel_aa_mode != state.preview_texel_aa_mode
         || state.last_preview_motion_blur_enabled != state.preview_motion_blur_enabled
         || (state.last_preview_motion_blur_amount - state.preview_motion_blur_amount).abs()
             > f32::EPSILON
@@ -96,6 +99,7 @@ pub fn render(
         state.preview_texture = None;
         state.preview_history = None;
         state.last_preview_aa_mode = state.preview_aa_mode;
+        state.last_preview_texel_aa_mode = state.preview_texel_aa_mode;
         state.last_preview_motion_blur_enabled = state.preview_motion_blur_enabled;
         state.last_preview_motion_blur_amount = state.preview_motion_blur_amount;
         state.last_preview_motion_blur_shutter_frames = state.preview_motion_blur_shutter_frames;
@@ -378,6 +382,7 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
     let preview_motion_blur_shutter_frames = state.preview_motion_blur_shutter_frames;
     let preview_motion_blur_sample_count = state.preview_motion_blur_sample_count;
     let preview_3d_layers_enabled = state.preview_3d_layers_enabled;
+    let preview_texel_aa_mode = state.preview_texel_aa_mode;
     let preview_texture = &mut state.preview_texture;
     let preview_history = &mut state.preview_history;
 
@@ -403,6 +408,7 @@ fn render_preview(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerStat
             wgpu_target_format,
             preview_msaa_samples,
             preview_aa_mode,
+            preview_texel_aa_mode,
             preview_motion_blur_enabled,
             preview_motion_blur_amount,
             preview_motion_blur_shutter_frames,
@@ -505,6 +511,7 @@ fn draw_character(
     wgpu_target_format: Option<wgpu::TextureFormat>,
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_texel_aa_mode: SkinPreviewTexelAaMode,
     preview_motion_blur_enabled: bool,
     preview_motion_blur_amount: f32,
     preview_motion_blur_shutter_frames: f32,
@@ -569,6 +576,7 @@ fn draw_character(
                     },
                     preview_msaa_samples.max(1),
                     preview_aa_mode,
+                    preview_texel_aa_mode,
                 );
                 return;
             }
@@ -587,6 +595,7 @@ fn draw_character(
         wgpu_target_format,
         preview_msaa_samples,
         preview_aa_mode,
+        preview_texel_aa_mode,
         preview_texture,
         preview_history,
     );
@@ -3377,6 +3386,7 @@ fn render_motion_blur_wgpu_scene(
     scene_msaa_samples: u32,
     present_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_texel_aa_mode: SkinPreviewTexelAaMode,
 ) {
     let callback = SkinPreviewPostProcessWgpuCallback::from_weighted_scenes(
         scenes,
@@ -3386,6 +3396,7 @@ fn render_motion_blur_wgpu_scene(
         scene_msaa_samples,
         present_msaa_samples,
         preview_aa_mode,
+        preview_texel_aa_mode,
     );
     let callback_shape = egui_wgpu::Callback::new_paint_callback(rect, callback);
     ui.painter().add(callback_shape);
@@ -3567,6 +3578,7 @@ fn render_depth_buffered_scene(
     wgpu_target_format: Option<wgpu::TextureFormat>,
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
+    preview_texel_aa_mode: SkinPreviewTexelAaMode,
     preview_texture: &mut Option<TextureHandle>,
     preview_history: &mut Option<PreviewHistory>,
 ) {
@@ -3592,6 +3604,7 @@ fn render_depth_buffered_scene(
         },
         preview_msaa_samples.max(1),
         preview_aa_mode,
+        preview_texel_aa_mode,
     );
     let callback_shape = egui_wgpu::Callback::new_paint_callback(rect, callback);
     ui.painter().add(callback_shape);
@@ -3673,6 +3686,10 @@ fn render_cpu_post_aa_scene(
         SkinPreviewAaMode::Smaa => apply_fxaa_rgba(&mut color, width, height),
         SkinPreviewAaMode::Fxaa => apply_fxaa_rgba(&mut color, width, height),
         SkinPreviewAaMode::Taa => apply_taa_rgba(&mut color, width, height, preview_history, 0.35),
+        SkinPreviewAaMode::FxaaTaa => {
+            apply_taa_rgba(&mut color, width, height, preview_history, 0.22);
+            apply_fxaa_rgba(&mut color, width, height);
+        }
         _ => {}
     }
 
@@ -4151,6 +4168,7 @@ struct SkinPreviewPostProcessWgpuCallback {
     scene_msaa_samples: u32,
     present_msaa_samples: u32,
     aa_mode: SkinPreviewAaMode,
+    texel_aa_mode: SkinPreviewTexelAaMode,
 }
 
 impl SkinPreviewPostProcessWgpuCallback {
@@ -4162,6 +4180,7 @@ impl SkinPreviewPostProcessWgpuCallback {
         scene_msaa_samples: u32,
         present_msaa_samples: u32,
         aa_mode: SkinPreviewAaMode,
+        texel_aa_mode: SkinPreviewTexelAaMode,
     ) -> Self {
         Self {
             scene_batches: vec![build_gpu_preview_scene_batch(triangles, 1.0)],
@@ -4175,6 +4194,7 @@ impl SkinPreviewPostProcessWgpuCallback {
             scene_msaa_samples,
             present_msaa_samples,
             aa_mode,
+            texel_aa_mode,
         }
     }
 
@@ -4186,6 +4206,7 @@ impl SkinPreviewPostProcessWgpuCallback {
         scene_msaa_samples: u32,
         present_msaa_samples: u32,
         aa_mode: SkinPreviewAaMode,
+        texel_aa_mode: SkinPreviewTexelAaMode,
     ) -> Self {
         let scene_batches = scenes
             .iter()
@@ -4203,6 +4224,7 @@ impl SkinPreviewPostProcessWgpuCallback {
             scene_msaa_samples,
             present_msaa_samples,
             aa_mode,
+            texel_aa_mode,
         }
     }
 }
@@ -4245,6 +4267,7 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
                 screen_descriptor.size_in_pixels[1] as f32 / screen_descriptor.pixels_per_point,
             ],
         );
+        resources.update_scene_texture_aa_mode(queue, self.texel_aa_mode);
         resources.ensure_render_targets(device, screen_descriptor.size_in_pixels);
         resources.update_texture(
             device,
@@ -4264,8 +4287,15 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
         });
 
         let use_smaa = self.aa_mode == SkinPreviewAaMode::Smaa;
-        let use_fxaa = self.aa_mode == SkinPreviewAaMode::Fxaa;
-        let use_taa = self.aa_mode == SkinPreviewAaMode::Taa;
+        let use_fxaa = matches!(
+            self.aa_mode,
+            SkinPreviewAaMode::Fxaa | SkinPreviewAaMode::FxaaTaa
+        );
+        let use_taa = matches!(
+            self.aa_mode,
+            SkinPreviewAaMode::Taa | SkinPreviewAaMode::FxaaTaa
+        );
+        let use_fxaa_after_taa = self.aa_mode == SkinPreviewAaMode::FxaaTaa;
         resources.present_source = PresentSource::Accumulation;
 
         for (index, batch) in self.scene_batches.iter().enumerate() {
@@ -4344,7 +4374,7 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
             }
             resources.present_source = PresentSource::PostProcess;
             resources.taa_history_valid = false;
-        } else if use_fxaa {
+        } else if use_fxaa && !use_taa {
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("skins-preview-fxaa-pass"),
@@ -4367,12 +4397,14 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
             }
             resources.present_source = PresentSource::PostProcess;
         } else if use_taa {
+            let taa_scalar = if use_fxaa_after_taa { 0.22 } else { 0.35 };
+            let mut taa_source = PresentSource::Accumulation;
             if resources.taa_history_valid {
                 queue.write_buffer(
                     &resources.scalar_uniform_buffer,
                     0,
                     bytemuck::bytes_of(&GpuPreviewScalarUniform {
-                        value: [0.22, 0.0, 0.0, 0.0],
+                        value: [taa_scalar, 0.0, 0.0, 0.0],
                     }),
                 );
                 {
@@ -4412,7 +4444,7 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
                     },
                     resources.render_target_extent(),
                 );
-                resources.present_source = PresentSource::PostProcess;
+                taa_source = PresentSource::PostProcess;
             } else {
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -4429,9 +4461,45 @@ impl egui_wgpu::CallbackTrait for SkinPreviewPostProcessWgpuCallback {
                     },
                     resources.render_target_extent(),
                 );
-                resources.present_source = PresentSource::Accumulation;
             }
             resources.taa_history_valid = true;
+            if use_fxaa_after_taa {
+                let (source_bind_group, target_view, present_source, label) = match taa_source {
+                    PresentSource::Accumulation => (
+                        &resources.accumulation_bind_group,
+                        &resources.post_process_view,
+                        PresentSource::PostProcess,
+                        "skins-preview-fxaa-after-taa-pass",
+                    ),
+                    PresentSource::PostProcess => (
+                        &resources.post_process_bind_group,
+                        &resources.accumulation_view,
+                        PresentSource::Accumulation,
+                        "skins-preview-fxaa-after-taa-pass",
+                    ),
+                };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some(label),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+                pass.set_pipeline(&resources.fxaa_pipeline);
+                pass.set_bind_group(0, source_bind_group, &[]);
+                pass.draw(0..3, 0..1);
+                resources.present_source = present_source;
+            } else {
+                resources.present_source = taa_source;
+            }
         } else {
             resources.taa_history_valid = false;
         }
@@ -4651,7 +4719,11 @@ impl SkinPreviewPostProcessWgpuResources {
         let scene_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("skins-preview-post-scene-layout"),
-                bind_group_layouts: &[&texture_bind_group_layout, &scene_uniform_layout],
+                bind_group_layouts: &[
+                    &texture_bind_group_layout,
+                    &scene_uniform_layout,
+                    &scalar_uniform_layout,
+                ],
                 push_constant_ranges: &[],
             });
         let scene_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -5145,6 +5217,29 @@ impl SkinPreviewPostProcessWgpuResources {
         queue.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniform));
     }
 
+    fn update_scene_texture_aa_mode(
+        &self,
+        queue: &wgpu::Queue,
+        texel_aa_mode: SkinPreviewTexelAaMode,
+    ) {
+        queue.write_buffer(
+            &self.scalar_uniform_buffer,
+            0,
+            bytemuck::bytes_of(&GpuPreviewScalarUniform {
+                value: [
+                    if texel_aa_mode == SkinPreviewTexelAaMode::TexelBoundary {
+                        1.0
+                    } else {
+                        0.0
+                    },
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+            }),
+        );
+    }
+
     fn scene_color_attachment(&self, _clear: bool) -> wgpu::RenderPassColorAttachment<'_> {
         if let Some(view) = self.scene_msaa_view.as_ref() {
             wgpu::RenderPassColorAttachment {
@@ -5180,6 +5275,7 @@ impl SkinPreviewPostProcessWgpuResources {
     ) {
         render_pass.set_pipeline(&self.scene_pipeline);
         render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(2, &self.scalar_uniform_bind_group, &[]);
 
         if let Some(texture) = self.skin_texture.as_ref() {
             render_pass.set_bind_group(0, &texture.bind_group, &[]);
@@ -6780,6 +6876,8 @@ struct SkinManagerState {
     preview_msaa_samples: u32,
     preview_aa_mode: SkinPreviewAaMode,
     last_preview_aa_mode: SkinPreviewAaMode,
+    preview_texel_aa_mode: SkinPreviewTexelAaMode,
+    last_preview_texel_aa_mode: SkinPreviewTexelAaMode,
     preview_motion_blur_enabled: bool,
     last_preview_motion_blur_enabled: bool,
     preview_motion_blur_amount: f32,
@@ -6842,6 +6940,8 @@ impl Default for SkinManagerState {
             preview_msaa_samples: 1,
             preview_aa_mode: SkinPreviewAaMode::Msaa,
             last_preview_aa_mode: SkinPreviewAaMode::Msaa,
+            preview_texel_aa_mode: SkinPreviewTexelAaMode::Off,
+            last_preview_texel_aa_mode: SkinPreviewTexelAaMode::Off,
             preview_motion_blur_enabled: false,
             last_preview_motion_blur_enabled: false,
             preview_motion_blur_amount: 0.15,

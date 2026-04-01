@@ -10,6 +10,10 @@ struct Globals {
     _pad: vec2<f32>,
 };
 
+struct Scalars {
+    value: vec4<f32>,
+};
+
 struct VertexOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) uv: vec2<f32>,
@@ -22,6 +26,8 @@ var preview_tex: texture_2d<f32>;
 var preview_sampler: sampler;
 @group(1) @binding(0)
 var<uniform> globals: Globals;
+@group(2) @binding(0)
+var<uniform> scalars: Scalars;
 
 fn sample_preview_pixel_art(uv: vec2<f32>) -> vec4<f32> {
     let dims_i = textureDimensions(preview_tex);
@@ -53,6 +59,30 @@ fn sample_preview_pixel_art(uv: vec2<f32>) -> vec4<f32> {
     return mix(nearest, filtered, filtered_mix);
 }
 
+fn load_preview_texel(texel: vec2<i32>, dims_i: vec2<u32>) -> vec4<f32> {
+    let max_texel = vec2<i32>(dims_i) - vec2<i32>(1);
+    return textureLoad(preview_tex, clamp(texel, vec2<i32>(0), max_texel), 0);
+}
+
+fn sample_preview_texel_border_aa(uv: vec2<f32>) -> vec4<f32> {
+    let dims_i = textureDimensions(preview_tex);
+    let dims = vec2<f32>(dims_i);
+    let texel = 0.5 / dims;
+    let clamped_uv = clamp(uv, texel, vec2<f32>(1.0) - texel);
+    let p = clamped_uv * dims - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(p));
+    let f = fract(p);
+    let edge_width = clamp(max(fwidth(p), vec2<f32>(0.0001)) * 0.75, vec2<f32>(0.0), vec2<f32>(0.5));
+    let t = smoothstep(vec2<f32>(0.5) - edge_width, vec2<f32>(0.5) + edge_width, f);
+    let c00 = load_preview_texel(base, dims_i);
+    let c10 = load_preview_texel(base + vec2<i32>(1, 0), dims_i);
+    let c01 = load_preview_texel(base + vec2<i32>(0, 1), dims_i);
+    let c11 = load_preview_texel(base + vec2<i32>(1, 1), dims_i);
+    let cx0 = mix(c00, c10, t.x);
+    let cx1 = mix(c01, c11, t.x);
+    return mix(cx0, cx1, t.y);
+}
+
 @vertex
 fn vs_main(input: VertexIn) -> VertexOut {
     var out: VertexOut;
@@ -69,7 +99,11 @@ fn vs_main(input: VertexIn) -> VertexOut {
 
 @fragment
 fn fs_main(input: VertexOut) -> @location(0) vec4<f32> {
-    let sampled = sample_preview_pixel_art(input.uv) * input.color;
+    let sampled = select(
+        sample_preview_pixel_art(input.uv),
+        sample_preview_texel_border_aa(input.uv),
+        scalars.value.x > 0.5,
+    ) * input.color;
     if sampled.a <= 0.001 {
         discard;
     }

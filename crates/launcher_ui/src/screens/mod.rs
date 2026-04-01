@@ -100,6 +100,7 @@ pub struct SettingsInfo {
     pub cpu: String,
     pub gpu: String,
     pub memory: String,
+    pub graphics_api: String,
     pub graphics_driver: String,
     pub app_version: String,
 }
@@ -268,6 +269,7 @@ pub fn render(
                 wgpu_target_format,
                 skin_preview_msaa_samples,
                 config.skin_preview_aa_mode(),
+                config.skin_preview_texel_aa_mode(),
                 config.skin_preview_motion_blur_enabled(),
                 config.skin_preview_motion_blur_amount(),
                 config.skin_preview_motion_blur_shutter_frames(),

@@ -22,11 +22,15 @@ fn emit_version_metadata() {
     let display_version = format_display_version(&package_version);
     println!("cargo:rustc-env=VERTEX_APP_VERSION={display_version}");
 
-    if let Some(repo_root) = locate_repo_root() {
+    let repo_root = locate_repo_root();
+    if let Some(repo_root) = repo_root.as_ref() {
         emit_repo_rerun_rules(&repo_root);
     }
 
-    let revision = git_revision().unwrap_or_else(|| "unknown".to_owned());
+    let revision = repo_root
+        .as_deref()
+        .and_then(git_revision)
+        .unwrap_or_else(|| "unknown".to_owned());
     println!("cargo:rustc-env=VERTEX_GIT_REVISION={revision}");
 }
 
@@ -97,19 +101,13 @@ fn emit_git_rerun_rules(repo_root: &Path, git_dir: &Path) {
     }
 }
 
-fn git_revision() -> Option<String> {
-    let repo_root = locate_repo_root()?;
-
-    match git_worktree_clean(&repo_root) {
-        Some(true) => git_output(&repo_root, &["rev-parse", "--short=8", "HEAD"]),
-        Some(false) => {
-            let tree_hash = git_current_tree_hash(&repo_root)?;
-            Some(format!("tree-{}", shorten_hash(&tree_hash)))
-        }
-        // git status failed (e.g. safe.directory restriction, no git in build env) —
-        // fall back to the commit hash directly rather than returning None.
-        None => git_output(&repo_root, &["rev-parse", "--short=8", "HEAD"]),
-    }
+fn git_revision(repo_root: &Path) -> Option<String> {
+    let revision = git_output(repo_root, &["rev-parse", "--short=8", "HEAD"])
+        .or_else(|| git_head_revision(repo_root))?;
+    let dirty_suffix = matches!(git_worktree_clean(repo_root), Some(false))
+        .then_some("-dirty")
+        .unwrap_or_default();
+    Some(format!("{revision}{dirty_suffix}"))
 }
 
 fn git_worktree_clean(repo_root: &Path) -> Option<bool> {
@@ -124,34 +122,6 @@ fn git_worktree_clean(repo_root: &Path) -> Option<bool> {
     }
 
     Some(output.stdout.is_empty())
-}
-
-fn git_current_tree_hash(repo_root: &Path) -> Option<String> {
-    let out_dir = PathBuf::from(env::var("OUT_DIR").ok()?);
-    let temp_index = out_dir.join("vertexlauncher-build-snapshot.index");
-    if temp_index.exists() {
-        fs::remove_file(&temp_index).ok()?;
-    }
-
-    let add_status = Command::new("git")
-        .args(["add", "-A", "."])
-        .env("GIT_INDEX_FILE", &temp_index)
-        .current_dir(repo_root)
-        .status()
-        .ok()?;
-    if !add_status.success() {
-        let _ = fs::remove_file(&temp_index);
-        return None;
-    }
-
-    let tree_hash = git_output_with_env(
-        repo_root,
-        &["write-tree"],
-        &[("GIT_INDEX_FILE", temp_index.as_os_str())],
-    );
-
-    let _ = fs::remove_file(&temp_index);
-    tree_hash
 }
 
 fn git_snapshot_paths(repo_root: &Path) -> Vec<PathBuf> {
@@ -191,19 +161,8 @@ fn git_path_list(repo_root: &Path, args: &[&str]) -> Option<Vec<PathBuf>> {
 }
 
 fn git_output(repo_root: &Path, args: &[&str]) -> Option<String> {
-    git_output_with_env(repo_root, args, &[])
-}
-
-fn git_output_with_env(
-    repo_root: &Path,
-    args: &[&str],
-    envs: &[(&str, &std::ffi::OsStr)],
-) -> Option<String> {
     let mut command = Command::new("git");
     command.args(args).current_dir(repo_root);
-    for (key, value) in envs {
-        command.env(key, value);
-    }
 
     let output = command.output().ok()?;
     if !output.status.success() {
@@ -211,6 +170,42 @@ fn git_output_with_env(
     }
 
     Some(String::from_utf8(output.stdout).ok()?.trim().to_owned())
+}
+
+fn git_head_revision(repo_root: &Path) -> Option<String> {
+    let git_dir = locate_git_dir(repo_root)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let full_hash = if let Some(reference) = head.strip_prefix("ref: ") {
+        resolve_git_reference(&git_dir, reference.trim())?
+    } else {
+        head.to_owned()
+    };
+    Some(shorten_hash(&full_hash).to_owned())
+}
+
+fn resolve_git_reference(git_dir: &Path, reference: &str) -> Option<String> {
+    let ref_path = git_dir.join(reference);
+    if let Ok(contents) = fs::read_to_string(&ref_path) {
+        let hash = contents.trim();
+        if !hash.is_empty() {
+            return Some(hash.to_owned());
+        }
+    }
+
+    let packed_refs = fs::read_to_string(git_dir.join("packed-refs")).ok()?;
+    for line in packed_refs.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let (hash, packed_reference) = line.split_once(' ')?;
+        if packed_reference == reference {
+            return Some(hash.to_owned());
+        }
+    }
+
+    None
 }
 
 fn shorten_hash(hash: &str) -> &str {
