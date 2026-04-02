@@ -7,7 +7,7 @@ use content_resolver::{
     InstalledContentResolver, ResolveInstalledContentRequest,
 };
 use directories::UserDirs;
-use egui::Ui;
+use egui::{Ui, scroll_area::ScrollSource};
 use flate2::read::GzDecoder;
 use installation::{
     DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, LaunchRequest,
@@ -57,6 +57,7 @@ mod installed_content_cache;
 mod installed_entry_render_result;
 mod instance_screen_output;
 mod instance_screen_state;
+mod move_instance;
 mod platform;
 mod runtime;
 mod runtime_prepare_operation;
@@ -70,8 +71,11 @@ use installed_entry_render_result::InstalledEntryRenderResult;
 pub use instance_screen_output::InstanceScreenOutput;
 use instance_screen_state::{
     InstalledContentEntryUiCache, InstanceLogEntry, InstanceScreenState, InstanceScreenTab,
-    InstanceScreenshotEntry, InstanceScreenshotViewerState, ServerExportOutcome,
-    VtmpackExportOutcome,
+    InstanceScreenshotEntry, InstanceScreenshotViewerState, MoveInstanceResult,
+    ServerExportOutcome, VtmpackExportOutcome,
+};
+use move_instance::{
+    poll_move_instance_progress, poll_move_instance_results, request_move_instance,
 };
 use platform::{
     effective_linux_graphics_settings_for_state, linux_instance_driver_settings_for_save,
@@ -199,6 +203,23 @@ pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&s
             handled = true;
             return;
         }
+        if state.show_move_instance_progress_modal {
+            // Non-dismissable while in flight
+            if !state.move_instance_in_flight {
+                state.show_move_instance_progress_modal = false;
+            }
+            data.insert_temp(state_id, state);
+            handled = true;
+            return;
+        }
+        if state.show_move_instance_modal {
+            if !state.move_instance_in_flight {
+                state.show_move_instance_modal = false;
+            }
+            data.insert_temp(state_id, state);
+            handled = true;
+            return;
+        }
         if state.show_settings_modal {
             state.show_settings_modal = false;
             data.insert_temp(state_id, state);
@@ -271,6 +292,27 @@ pub fn render(
     poll_vtmpack_export_results(&mut state);
     poll_server_export_progress(&mut state);
     poll_server_export_results(&mut state);
+    poll_move_instance_progress(&mut state);
+    if let Some(result) = poll_move_instance_results(&mut state) {
+        match result {
+            MoveInstanceResult::Complete { ref dest_path } => {
+                if let Some(instance) = instances.find_mut(instance_id) {
+                    instance.instance_root_override = Some(dest_path.clone());
+                    output.instances_changed = true;
+                }
+                state.move_instance_completion_message =
+                    Some(format!("Instance moved to {}.", dest_path.display()));
+                state.move_instance_completion_failed = false;
+                state.status_message = Some(format!("Instance moved to {}.", dest_path.display()));
+            }
+            MoveInstanceResult::Failed { ref reason } => {
+                state.move_instance_completion_message =
+                    Some(format!("Instance move failed: {reason}"));
+                state.move_instance_completion_failed = true;
+                state.status_message = Some(format!("Instance move failed: {reason}"));
+            }
+        }
+    }
     poll_instance_screenshot_scan_results(&mut state);
     poll_instance_log_scan_results(&mut state);
     poll_instance_log_load_results(&mut state);
@@ -286,6 +328,7 @@ pub fn render(
         || state.log_load_in_flight
         || state.export_vtmpack_in_flight
         || state.export_server_in_flight
+        || state.move_instance_in_flight
     {
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
@@ -350,6 +393,15 @@ pub fn render(
         instances,
         config,
     );
+    render_move_instance_modal(
+        ui.ctx(),
+        text_ui,
+        instance_id,
+        &mut state,
+        instances,
+        config,
+    );
+    render_move_instance_progress_modal(ui.ctx(), text_ui, instance_id, &mut state);
     render_export_vtmpack_modal(
         ui.ctx(),
         text_ui,
@@ -2041,39 +2093,20 @@ fn render_instance_settings_modal(
     }
 
     let mut instances_changed = false;
-    let mut open = state.show_settings_modal;
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_width = (viewport_rect.width() * 0.92).max(1.0);
-    let modal_height = (viewport_rect.height() * 0.92).max(1.0);
-    let modal_pos_x = (viewport_rect.center().x - modal_width * 0.5)
-        .clamp(viewport_rect.left(), viewport_rect.right() - modal_width);
-    let modal_pos_y = (viewport_rect.center().y - modal_height * 0.5)
-        .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height);
-    let modal_pos = egui::pos2(modal_pos_x, modal_pos_y);
-    let modal_size = egui::vec2(modal_width, modal_height);
     let mut close_requested = false;
-    modal::show_scrim(
+    let response = modal::show_window(
         ctx,
-        ("instance_settings_modal_scrim", instance_id),
-        viewport_rect,
-    );
-
-    egui::Window::new("Instance Settings")
-        .id(egui::Id::new(("instance_settings_modal", instance_id)))
-        .order(egui::Order::Foreground)
-        .open(&mut open)
-        .fixed_pos(modal_pos)
-        .fixed_size(modal_size)
-        .collapsible(false)
-        .title_bar(false)
-        .resizable(false)
-        .movable(false)
-        .hscroll(false)
-        .vscroll(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+        "Instance Settings",
+        modal::ModalOptions::new(
+            egui::Id::new(("instance_settings_modal", instance_id)),
+            modal::ModalLayout::centered(
+                modal::AxisSizing::new(0.92, 1.0, f32::INFINITY),
+                modal::AxisSizing::new(0.92, 1.0, f32::INFINITY),
+            ),
+        )
+        .with_layer(modal::ModalLayer::Base)
+        .with_dismiss_behavior(modal::DismissBehavior::EscapeAndScrim),
+        |ui| {
             let muted_style = style::muted(ui);
             let section_style = style::heading(ui, 22.0, 26.0);
             let body_style = style::body(ui);
@@ -2087,13 +2120,16 @@ fn render_instance_settings_modal(
                 stroke: ui.visuals().selection.stroke,
                 ..ButtonOptions::default()
             };
-            let refresh_style =
-                style::neutral_button_with_min_size(ui, egui::vec2(190.0, 30.0));
+            let refresh_style = style::neutral_button_with_min_size(ui, egui::vec2(190.0, 30.0));
             let reinstall_button_style =
                 style::neutral_button_with_min_size(ui, egui::vec2(220.0, 34.0));
-
             egui::ScrollArea::vertical()
                 .id_salt(("instance_settings_modal_scroll", instance_id))
+                .scroll_source(ScrollSource {
+                    scroll_bar: true,
+                    drag: false,
+                    mouse_wheel: true,
+                })
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     let _ = text_ui.label(
@@ -2838,6 +2874,30 @@ fn render_instance_settings_modal(
                     {
                         state.show_export_server_modal = true;
                     }
+                    ui.add_space(6.0);
+                    if text_ui
+                        .button(
+                            ui,
+                            ("instance_move_instance", instance_id),
+                            "Move Instance...",
+                            &refresh_style,
+                        )
+                        .clicked()
+                    {
+                        if let Some(instance) = instances.find(instance_id) {
+                            let installations_root =
+                                config.minecraft_installations_root_path().to_path_buf();
+                            let current_root =
+                                instances::instance_root_path(&installations_root, instance);
+                            state.move_instance_dest_input =
+                                current_root.display().to_string();
+                        } else {
+                            state.move_instance_dest_input = String::new();
+                        }
+                        state.move_instance_dest_valid = false;
+                        state.move_instance_dest_error = None;
+                        state.show_move_instance_modal = true;
+                    }
                     ui.add_space(8.0);
 
                     ui.horizontal(|ui| {
@@ -2854,12 +2914,12 @@ fn render_instance_settings_modal(
                         }
                     });
                 });
-        });
+        },
+    );
 
-    if close_requested {
-        open = false;
+    if response.close_requested || close_requested {
+        state.show_settings_modal = false;
     }
-    state.show_settings_modal = open;
     instances_changed
 }
 
@@ -3047,30 +3107,52 @@ fn render_export_vtmpack_modal(
                 ui.add_space(8.0);
 
                 if let Some(instance_root) = instance_root.as_deref() {
-                    let entries = list_exportable_root_entries(instance_root);
-                    ui.set_width(ui.available_width());
-                    egui::ScrollArea::vertical()
-                        .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
-                        .max_height(360.0)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
-                            for entry in entries {
-                                let checked = state
-                                    .export_vtmpack_options
-                                    .included_root_entries
-                                    .entry(entry.clone())
-                                    .or_insert_with(|| {
-                                        default_vtmpack_root_entry_selected(&entry)
-                                    });
-                                let label = if instance_root.join(entry.as_str()).is_dir() {
-                                    format!("{entry}/")
-                                } else {
-                                    entry.clone()
-                                };
-                                ui.checkbox(checked, label);
-                            }
-                        });
+                    if !instance_root.is_dir() {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_export_vtmpack_missing_root", instance_id),
+                            &format!(
+                                "Instance root directory not found: {}",
+                                instance_root.display()
+                            ),
+                            &body_style,
+                        );
+                    } else {
+                        let entries = list_exportable_root_entries(instance_root);
+                        ui.set_width(ui.available_width());
+                        if entries.is_empty() {
+                            let _ = text_ui.label(
+                                ui,
+                                ("instance_export_vtmpack_empty_root", instance_id),
+                                "No files or folders found in the instance root.",
+                                &body_style,
+                            );
+                        } else {
+                            egui::ScrollArea::vertical()
+                                .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
+                                .max_height(360.0)
+                                .auto_shrink([false, true])
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    for entry in entries {
+                                        let checked = state
+                                            .export_vtmpack_options
+                                            .included_root_entries
+                                            .entry(entry.clone())
+                                            .or_insert_with(|| {
+                                                default_vtmpack_root_entry_selected(&entry)
+                                            });
+                                        let label =
+                                            if instance_root.join(entry.as_str()).is_dir() {
+                                                format!("{entry}/")
+                                            } else {
+                                                entry.clone()
+                                            };
+                                        ui.checkbox(checked, label);
+                                    }
+                                });
+                        }
+                    }
                 } else {
                     let _ = text_ui.label(
                         ui,
@@ -4351,6 +4433,508 @@ fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_
 
 fn support_catalog_ready(state: &InstanceScreenState) -> bool {
     state.version_catalog_include_snapshots.is_some() && state.version_catalog_error.is_none()
+}
+
+fn validate_move_dest(path_str: &str) -> Result<PathBuf, String> {
+    let path_str = path_str.trim();
+    if path_str.is_empty() {
+        return Err("Please enter or browse to a destination folder.".to_owned());
+    }
+    let path = PathBuf::from(path_str);
+    if path.is_dir() {
+        // Existing folder is only valid if it's empty.
+        match std::fs::read_dir(&path) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Err("The destination folder must be empty.".to_owned());
+                }
+            }
+            Err(err) => {
+                return Err(format!("Cannot read destination folder: {err}"));
+            }
+        }
+        return Ok(path);
+    }
+    if path.exists() {
+        return Err("The destination path already exists and is not a folder.".to_owned());
+    }
+    // Non-existent path: parent directory must exist.
+    match path.parent() {
+        Some(parent) if parent.as_os_str().is_empty() || parent.is_dir() => {}
+        Some(parent) => {
+            return Err(format!(
+                "Parent folder does not exist: {}",
+                parent.display()
+            ));
+        }
+        None => {
+            return Err("The destination path is invalid.".to_owned());
+        }
+    }
+    Ok(path)
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.1} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+fn compact_path_label(path: &str, max_chars: usize) -> String {
+    let char_count = path.chars().count();
+    if char_count <= max_chars || max_chars < 9 {
+        return path.to_owned();
+    }
+
+    let keep_each_side = (max_chars.saturating_sub(3)) / 2;
+    let prefix: String = path.chars().take(keep_each_side).collect();
+    let suffix: String = path
+        .chars()
+        .rev()
+        .take(keep_each_side)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    format!("{prefix}...{suffix}")
+}
+
+fn render_move_instance_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &mut InstanceScreenState,
+    instances: &InstanceStore,
+    config: &Config,
+) {
+    if !state.show_move_instance_modal {
+        return;
+    }
+    let showing_move_progress =
+        state.move_instance_in_flight || state.move_instance_completion_message.is_some();
+    let modal_layout = if showing_move_progress {
+        modal::ModalLayout::centered(
+            modal::AxisSizing::new(0.52, 0.0, f32::INFINITY),
+            modal::AxisSizing::new(0.34, 0.0, f32::INFINITY),
+        )
+        .with_viewport_margin_fraction(egui::vec2(0.04, 0.06))
+    } else {
+        modal::ModalLayout::centered(
+            modal::AxisSizing::new(0.48, 0.0, f32::INFINITY),
+            modal::AxisSizing::new(0.24, 0.0, f32::INFINITY),
+        )
+        .with_viewport_margin_fraction(egui::vec2(0.04, 0.08))
+    };
+    let mut close_requested = false;
+
+    let mut move_requested = false;
+    let response = modal::show_window(
+        ctx,
+        "Move Instance",
+        modal::ModalOptions::new(
+            egui::Id::new(("instance_move_modal", instance_id)),
+            modal_layout,
+        )
+        .with_layer(modal::ModalLayer::Elevated)
+        .with_dismiss_behavior(if state.move_instance_in_flight {
+            modal::DismissBehavior::None
+        } else {
+            modal::DismissBehavior::EscapeAndScrim
+        }),
+        |ui| {
+            let body_style = style::muted(ui);
+            let title_style = style::heading(ui, 26.0, 30.0);
+            let error_style = LabelOptions {
+                color: egui::Color32::from_rgb(220, 80, 80),
+                font_size: 13.0,
+                line_height: 18.0,
+                ..LabelOptions::default()
+            };
+            let action_button_style = ButtonOptions::default();
+
+            let _ = text_ui.label(
+                ui,
+                ("instance_move_title", instance_id),
+                if state.move_instance_in_flight {
+                    "Moving Instance"
+                } else if state.move_instance_completion_message.is_some() {
+                    if state.move_instance_completion_failed {
+                        "Move Failed"
+                    } else {
+                        "Move Complete"
+                    }
+                } else {
+                    "Move Instance"
+                },
+                &title_style,
+            );
+            ui.add_space(6.0);
+            let _ = text_ui.label(
+                ui,
+                ("instance_move_body", instance_id),
+                if state.move_instance_in_flight {
+                    "Vertex is moving this instance now."
+                } else if state.move_instance_completion_message.is_some() {
+                    "Review the result, then close this dialog."
+                } else {
+                    "Choose a destination folder. It can be an empty existing folder or a new path that will be created."
+                },
+                &body_style,
+            );
+            ui.add_space(12.0);
+
+            if !state.move_instance_in_flight && state.move_instance_completion_message.is_none() {
+                let input_changed = ui
+                    .horizontal(|ui| {
+                        let response = ui.add(
+                            egui::TextEdit::singleline(&mut state.move_instance_dest_input)
+                                .id(egui::Id::new(("move_instance_dest", instance_id)))
+                                .desired_width(f32::INFINITY),
+                        );
+                        let browse_clicked = text_ui
+                            .button(
+                                ui,
+                                ("move_instance_browse", instance_id),
+                                "Browse...",
+                                &action_button_style,
+                            )
+                            .clicked();
+                        if browse_clicked {
+                            if let Some(picked) = rfd::FileDialog::new()
+                                .set_title("Choose Destination Folder")
+                                .pick_folder()
+                            {
+                                state.move_instance_dest_input = picked.display().to_string();
+                                return true;
+                            }
+                        }
+                        response.changed()
+                    })
+                    .inner;
+
+                if input_changed {
+                    match validate_move_dest(&state.move_instance_dest_input) {
+                        Ok(_) => {
+                            state.move_instance_dest_valid = true;
+                            state.move_instance_dest_error = None;
+                        }
+                        Err(msg) => {
+                            state.move_instance_dest_valid = false;
+                            state.move_instance_dest_error = Some(msg);
+                        }
+                    }
+                }
+
+                if let Some(ref err_msg) = state.move_instance_dest_error.clone() {
+                    ui.add_space(4.0);
+                    let _ = text_ui.label(
+                        ui,
+                        ("move_instance_error", instance_id),
+                        err_msg.as_str(),
+                        &error_style,
+                    );
+                }
+            } else {
+                let available_width = ui.available_width();
+                // At 13pt, a typical path character is ~7px wide. Subtract prefix headroom.
+                let path_char_budget = ((available_width / 7.0) as usize).max(16);
+                let weak_text_color = ui.visuals().weak_text_color();
+
+                let (
+                    bytes_done,
+                    total_bytes,
+                    total_files,
+                    files_done,
+                    active_file_count,
+                    active_file,
+                ) = if let Some(ref progress) = state.move_instance_latest_progress {
+                    (
+                        progress.bytes_done,
+                        progress.total_bytes,
+                        progress.total_files,
+                        progress.files_done,
+                        progress.active_file_count,
+                        progress.active_files.first().cloned(),
+                    )
+                } else {
+                    (0, 0, 0, 0, 0, None)
+                };
+                let progress_fraction = if total_bytes > 0 {
+                    (bytes_done as f64 / total_bytes as f64).clamp(0.0, 1.0) as f32
+                } else {
+                    0.0
+                };
+                let status_style = LabelOptions {
+                    font_size: 16.0,
+                    line_height: 20.0,
+                    weight: 600,
+                    color: if state.move_instance_completion_failed {
+                        ui.visuals().error_fg_color
+                    } else {
+                        ui.visuals().text_color()
+                    },
+                    wrap: false,
+                    ..LabelOptions::default()
+                };
+                let detail_style = LabelOptions {
+                    font_size: 13.0,
+                    line_height: 17.0,
+                    color: weak_text_color,
+                    wrap: true,
+                    ..LabelOptions::default()
+                };
+                let status_text = if state.move_instance_in_flight {
+                    "Moving files..."
+                } else if state.move_instance_completion_failed {
+                    "Move failed"
+                } else {
+                    "Move complete"
+                };
+                let bytes_text = if total_bytes > 0 {
+                    if state.move_instance_in_flight {
+                        format!("{} / {}", format_bytes(bytes_done), format_bytes(total_bytes))
+                    } else {
+                        format!("{} transferred", format_bytes(total_bytes))
+                    }
+                } else if state.move_instance_in_flight {
+                    "preparing...".to_owned()
+                } else {
+                    String::new()
+                };
+                let files_text = if total_files > 0 {
+                    if state.move_instance_in_flight {
+                        format!("{files_done} / {total_files} files")
+                    } else {
+                        format!("{total_files} files moved")
+                    }
+                } else if state.move_instance_in_flight {
+                    "scanning files...".to_owned()
+                } else {
+                    String::new()
+                };
+                let active_text = if state.move_instance_in_flight {
+                    if let Some(ref file_path) = active_file {
+                        let prefix = "Current file: ";
+                        let path_chars = path_char_budget.saturating_sub(prefix.len());
+                        format!("{prefix}{}", compact_path_label(file_path, path_chars))
+                    } else if active_file_count > 0 {
+                        format!("{active_file_count} threads active")
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    String::new()
+                };
+                let destination_text = state.move_instance_dest_path.as_ref().map(|dest_path| {
+                    let prefix = "Destination: ";
+                    let path_str = dest_path.display().to_string();
+                    let path_chars = path_char_budget.saturating_sub(prefix.len());
+                    format!("{prefix}{}", compact_path_label(&path_str, path_chars))
+                });
+
+                // Header: status left, percentage right (when byte data is available)
+                ui.horizontal(|ui| {
+                    if state.move_instance_in_flight {
+                        ui.spinner();
+                        ui.add_space(2.0);
+                    }
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_move_progress_status_inline", instance_id),
+                        status_text,
+                        &status_style,
+                    );
+                    if total_bytes > 0 && state.move_instance_in_flight {
+                        let pct = (progress_fraction * 100.0) as u32;
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(format!("{pct}%"))
+                                        .size(15.0)
+                                        .strong()
+                                        .color(weak_text_color),
+                                );
+                            },
+                        );
+                    }
+                });
+                ui.add_space(6.0);
+                ui.add(
+                    egui::ProgressBar::new(progress_fraction)
+                        .desired_width(ui.available_width()),
+                );
+                ui.add_space(8.0);
+
+                // Stats: two-column when wide enough (bytes left, file count right), else stacked
+                let show_two_col =
+                    available_width >= 300.0 && !bytes_text.is_empty() && !files_text.is_empty();
+                if show_two_col {
+                    ui.horizontal(|ui| {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_move_progress_bytes_inline", instance_id),
+                            bytes_text.as_str(),
+                            &detail_style,
+                        );
+                        ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(files_text.as_str())
+                                        .size(13.0)
+                                        .color(weak_text_color),
+                                );
+                            },
+                        );
+                    });
+                } else {
+                    if !bytes_text.is_empty() {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_move_progress_bytes_inline", instance_id),
+                            bytes_text.as_str(),
+                            &detail_style,
+                        );
+                    }
+                    if !files_text.is_empty() {
+                        let _ = text_ui.label(
+                            ui,
+                            ("instance_move_progress_files_inline", instance_id),
+                            files_text.as_str(),
+                            &detail_style,
+                        );
+                    }
+                }
+                if !active_text.is_empty() {
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_move_progress_active_inline", instance_id),
+                        active_text.as_str(),
+                        &detail_style,
+                    );
+                }
+                if let Some(destination_text) = destination_text.as_deref() {
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_move_progress_dest_inline", instance_id),
+                        destination_text,
+                        &detail_style,
+                    );
+                }
+                if let Some(message) = state.move_instance_completion_message.as_deref() {
+                    ui.add_space(6.0);
+                    let _ = text_ui.label(
+                        ui,
+                        ("instance_move_progress_message_inline", instance_id),
+                        message,
+                        &LabelOptions {
+                            color: if state.move_instance_completion_failed {
+                                ui.visuals().error_fg_color
+                            } else {
+                                ui.visuals().text_color()
+                            },
+                            wrap: true,
+                            ..LabelOptions::default()
+                        },
+                    );
+                }
+            }
+
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                if !state.move_instance_in_flight
+                    && state.move_instance_completion_message.is_none()
+                {
+                    let move_enabled = state.move_instance_dest_valid;
+                    ui.add_enabled_ui(move_enabled, |ui| {
+                        if text_ui
+                            .button(
+                                ui,
+                                ("move_instance_confirm", instance_id),
+                                "Move",
+                                &ButtonOptions::default(),
+                            )
+                            .clicked()
+                        {
+                            move_requested = true;
+                        }
+                    });
+                    ui.add_space(6.0);
+                    if text_ui
+                        .button(
+                            ui,
+                            ("move_instance_cancel", instance_id),
+                            "Cancel",
+                            &action_button_style,
+                        )
+                        .clicked()
+                    {
+                        close_requested = true;
+                    }
+                } else {
+                    let done_enabled = !state.move_instance_in_flight
+                        && state.move_instance_completion_message.is_some();
+                    let done_label = if state.move_instance_completion_failed {
+                        "Close"
+                    } else {
+                        "Done"
+                    };
+                    let done_clicked = ui
+                        .add_enabled_ui(done_enabled, |ui| {
+                            text_ui.button(
+                                ui,
+                                ("move_instance_done_inline", instance_id),
+                                done_label,
+                                &action_button_style,
+                            )
+                        })
+                        .inner
+                        .clicked();
+                    if done_clicked {
+                        close_requested = true;
+                    }
+                }
+            });
+        },
+    );
+
+    if move_requested {
+        if let Some(instance) = instances.find(instance_id) {
+            let installations_root = config.minecraft_installations_root_path().to_path_buf();
+            let source_root = instances::instance_root_path(&installations_root, instance);
+            let dest_root = PathBuf::from(state.move_instance_dest_input.trim());
+            state.move_instance_dest_path = Some(dest_root.clone());
+            request_move_instance(state, source_root, dest_root);
+            state.show_move_instance_modal = true;
+            state.show_move_instance_progress_modal = false;
+        }
+    }
+
+    if response.close_requested || close_requested {
+        if !state.move_instance_in_flight {
+            state.move_instance_completion_message = None;
+            state.move_instance_completion_failed = false;
+            state.move_instance_latest_progress = None;
+            state.move_instance_dest_path = None;
+        }
+        state.show_move_instance_modal = false;
+    }
+}
+
+fn render_move_instance_progress_modal(
+    ctx: &egui::Context,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &mut InstanceScreenState,
+) {
+    let _ = (ctx, text_ui, instance_id, state);
 }
 
 fn memory_slider_max_mib() -> (u128, bool) {

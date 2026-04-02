@@ -18,6 +18,7 @@ config.workspace = true
 instances.workspace = true
 installation.workspace = true
 managed_content.workspace = true
+modal_host.workspace = true
 modprovider.workspace = true
 modrinth.workspace = true
 curseforge.workspace = true

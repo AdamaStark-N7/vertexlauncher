@@ -7,7 +7,8 @@ use std::{
 };
 
 use managed_content::{
-    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource, load_content_manifest,
+    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource,
+    content_manifest_path,
 };
 
 use crate::constants::VTMPACK_MANIFEST_VERSION;
@@ -58,7 +59,16 @@ where
     F: FnMut(VtmpackExportProgress),
 {
     progress(progress_update("Reading managed content manifest...", 0, 1));
-    let managed_manifest = load_content_manifest(instance_root);
+    // Read the raw manifest without filesystem validation so that managed content
+    // entries are preserved in downloadable_content even if their files are currently
+    // missing on disk (e.g. not yet synced, or deleted by the user).
+    let managed_manifest = {
+        let path = content_manifest_path(instance_root);
+        fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| toml::from_str::<ContentInstallManifest>(&raw).ok())
+            .unwrap_or_default()
+    };
     let sanitized_managed_manifest =
         sanitize_managed_manifest_for_export(&managed_manifest, options);
 
@@ -347,7 +357,16 @@ pub fn sync_vtmpack_export_options(instance_root: &Path, options: &mut VtmpackEx
 }
 
 pub fn list_exportable_root_entries(instance_root: &Path) -> Vec<String> {
-    let mut entries = fs::read_dir(instance_root)
+    let read_dir_result = fs::read_dir(instance_root);
+    if let Err(ref err) = read_dir_result {
+        tracing::warn!(
+            target: "vertexlauncher/vtmpack",
+            path = %instance_root.display(),
+            error = %err,
+            "failed to list instance root entries for vtmpack export"
+        );
+    }
+    let mut entries = read_dir_result
         .ok()
         .into_iter()
         .flat_map(|entries| entries.flatten())

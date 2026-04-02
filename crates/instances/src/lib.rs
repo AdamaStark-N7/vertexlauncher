@@ -118,6 +118,7 @@ pub struct InstanceRecord {
     pub last_launched_at_ms: Option<u64>,
     pub favorite_world_ids: Vec<String>,
     pub favorite_server_ids: Vec<String>,
+    pub instance_root_override: Option<PathBuf>,
 }
 
 impl Default for InstanceRecord {
@@ -142,6 +143,7 @@ impl Default for InstanceRecord {
             last_launched_at_ms: None,
             favorite_world_ids: Vec::new(),
             favorite_server_ids: Vec::new(),
+            instance_root_override: None,
         }
     }
 }
@@ -324,6 +326,7 @@ pub fn create_instance(
         last_launched_at_ms: None,
         favorite_world_ids: Vec::new(),
         favorite_server_ids: Vec::new(),
+        instance_root_override: None,
     };
 
     store.instances.push(instance.clone());
@@ -617,7 +620,24 @@ pub fn remove_instance_record(
 /// Resolves the absolute filesystem path to the given instance root directory.
 #[must_use]
 pub fn instance_root_path(installations_root: &Path, instance: &InstanceRecord) -> PathBuf {
-    installations_root.join(&instance.minecraft_root)
+    if let Some(ref override_path) = instance.instance_root_override {
+        override_path.clone()
+    } else {
+        installations_root.join(&instance.minecraft_root)
+    }
+}
+
+/// Sets or clears the instance root override for an existing instance.
+pub fn set_instance_root_override(
+    store: &mut InstanceStore,
+    id: &str,
+    override_path: Option<PathBuf>,
+) -> Result<(), InstanceError> {
+    let instance = store
+        .find_mut(id)
+        .ok_or_else(|| InstanceError::MissingInstance(id.to_owned()))?;
+    instance.instance_root_override = override_path;
+    Ok(())
 }
 
 /// Returns whether this instance has an explicit Linux graphics override.
@@ -695,6 +715,8 @@ fn normalize_instance(instance: &mut InstanceRecord) {
     }
 
     instance.thumbnail_path = normalize_optional_path(instance.thumbnail_path.as_deref());
+    instance.instance_root_override =
+        normalize_optional_path(instance.instance_root_override.as_deref());
     instance.description = normalize_optional_string(instance.description.as_deref());
     instance.modloader = required(
         std::mem::take(&mut instance.modloader),

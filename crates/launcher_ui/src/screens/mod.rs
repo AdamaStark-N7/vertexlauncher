@@ -7,7 +7,7 @@ use egui::Ui;
 use instances::InstanceStore;
 use textui::TextUi;
 
-use crate::ui::{context_menu, theme::Theme};
+use crate::ui::{context_menu, modal, theme::Theme};
 
 mod console;
 mod content_browser;
@@ -218,6 +218,9 @@ pub fn handle_escape(
     screen: AppScreen,
     selected_instance_id: Option<&str>,
 ) -> bool {
+    if modal::close_top(ctx) {
+        return true;
+    }
     let output = match screen {
         AppScreen::Home => home::handle_escape(ctx),
         AppScreen::Library => library::handle_escape(ctx),
@@ -263,6 +266,7 @@ pub fn render(
     discover_state: &mut DiscoverState,
     text_ui: &mut TextUi,
 ) -> ScreenOutput {
+    modal::begin_frame(ui.ctx());
     let content_browser_open_id = ui.make_persistent_id("content_browser_open_state");
     let content_browser_was_open = ui
         .ctx()
@@ -439,5 +443,6 @@ pub fn render(
         config.minecraft_installations_root_path(),
     );
     context_menu::show(ui.ctx());
+    modal::end_frame(ui.ctx());
     output
 }

@@ -2418,18 +2418,29 @@ fn render_world_row(
             ContextMenuRequest::new(
                 context_id,
                 anchor,
-                vec![ContextMenuItem::new_with_icon(
-                    "copy_world_launch_command",
-                    "Copy command line",
-                    assets::TERMINAL_SVG,
-                )],
+                vec![
+                    ContextMenuItem::new_with_icon(
+                        "copy_world_launch_command",
+                        "Copy command line",
+                        assets::TERMINAL_SVG,
+                    ),
+                    ContextMenuItem::new_with_icon(
+                        "copy_world_steam_launch_options",
+                        "Copy Steam launch options",
+                        assets::STEAM_SVG,
+                    ),
+                ],
             ),
         );
     }
-    if context_menu::take_invocation(ui.ctx(), context_id).as_deref()
-        == Some("copy_world_launch_command")
-    {
-        copy_world_launch_command(ui.ctx(), world, active_username, active_launch_auth);
+    match context_menu::take_invocation(ui.ctx(), context_id).as_deref() {
+        Some("copy_world_launch_command") => {
+            copy_world_launch_command(ui.ctx(), world, active_username, active_launch_auth);
+        }
+        Some("copy_world_steam_launch_options") => {
+            copy_world_steam_launch_options(ui.ctx(), world, active_username, active_launch_auth);
+        }
+        _ => {}
     }
 }
 
@@ -2581,18 +2592,29 @@ fn render_server_row(
             ContextMenuRequest::new(
                 context_id,
                 anchor,
-                vec![ContextMenuItem::new_with_icon(
-                    "copy_server_launch_command",
-                    "Copy command line",
-                    assets::TERMINAL_SVG,
-                )],
+                vec![
+                    ContextMenuItem::new_with_icon(
+                        "copy_server_launch_command",
+                        "Copy command line",
+                        assets::TERMINAL_SVG,
+                    ),
+                    ContextMenuItem::new_with_icon(
+                        "copy_server_steam_launch_options",
+                        "Copy Steam launch options",
+                        assets::STEAM_SVG,
+                    ),
+                ],
             ),
         );
     }
-    if context_menu::take_invocation(ui.ctx(), context_id).as_deref()
-        == Some("copy_server_launch_command")
-    {
-        copy_server_launch_command(ui.ctx(), server, active_username, active_launch_auth);
+    match context_menu::take_invocation(ui.ctx(), context_id).as_deref() {
+        Some("copy_server_launch_command") => {
+            copy_server_launch_command(ui.ctx(), server, active_username, active_launch_auth);
+        }
+        Some("copy_server_steam_launch_options") => {
+            copy_server_steam_launch_options(ui.ctx(), server, active_username, active_launch_auth);
+        }
+        _ => {}
     }
 }
 
@@ -2720,6 +2742,33 @@ fn copy_world_launch_command(
     );
 }
 
+fn copy_world_steam_launch_options(
+    ctx: &egui::Context,
+    world: &WorldEntry,
+    active_username: Option<&str>,
+    active_launch_auth: Option<&LaunchAuthContext>,
+) {
+    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+        notification::warn!(
+            "home/quick_launch",
+            "Sign in before copying Steam launch options."
+        );
+        return;
+    };
+    let options = build_quick_launch_steam_options(
+        QuickLaunchCommandMode::World,
+        world.instance_id.as_str(),
+        user.as_str(),
+        Some(world.world_id.as_str()),
+        None,
+    );
+    ctx.copy_text(options);
+    notification::info!(
+        "home/quick_launch",
+        "Copied Steam launch options to clipboard."
+    );
+}
+
 fn copy_server_launch_command(
     ctx: &egui::Context,
     server: &ServerEntry,
@@ -2744,6 +2793,33 @@ fn copy_server_launch_command(
     notification::info!(
         "home/quick_launch",
         "Copied server command line to clipboard."
+    );
+}
+
+fn copy_server_steam_launch_options(
+    ctx: &egui::Context,
+    server: &ServerEntry,
+    active_username: Option<&str>,
+    active_launch_auth: Option<&LaunchAuthContext>,
+) {
+    let Some(user) = selected_quick_launch_user(active_username, active_launch_auth) else {
+        notification::warn!(
+            "home/quick_launch",
+            "Sign in before copying Steam launch options."
+        );
+        return;
+    };
+    let options = build_quick_launch_steam_options(
+        QuickLaunchCommandMode::Server,
+        server.instance_id.as_str(),
+        user.as_str(),
+        None,
+        Some(server.address.as_str()),
+    );
+    ctx.copy_text(options);
+    notification::info!(
+        "home/quick_launch",
+        "Copied Steam launch options to clipboard."
     );
 }
 

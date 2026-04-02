@@ -1,6 +1,27 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, mpsc};
+
+#[derive(Clone, Debug)]
+pub(super) struct MoveInstanceProgress {
+    pub(super) total_bytes: u64,
+    pub(super) bytes_done: u64,
+    pub(super) total_files: usize,
+    pub(super) files_done: usize,
+    pub(super) active_file_count: usize,
+    pub(super) active_files: Vec<String>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) enum MoveInstanceResult {
+    Complete {
+        dest_path: PathBuf,
+    },
+    #[allow(dead_code)]
+    Failed {
+        reason: String,
+    },
+}
 use std::time::Instant;
 
 use crate::ui::components::lazy_image_bytes::LazyImageBytes;
@@ -224,6 +245,23 @@ pub(super) struct InstanceScreenState {
     pub(super) export_server_latest_progress: Option<VtmpackExportProgress>,
     pub(super) export_server_results_tx: Option<mpsc::Sender<ServerExportOutcome>>,
     pub(super) export_server_results_rx: Option<Arc<Mutex<mpsc::Receiver<ServerExportOutcome>>>>,
+    pub(super) show_move_instance_modal: bool,
+    pub(super) show_move_instance_progress_modal: bool,
+    pub(super) move_instance_dest_input: String,
+    pub(super) move_instance_dest_valid: bool,
+    pub(super) move_instance_dest_error: Option<String>,
+    pub(super) move_instance_in_flight: bool,
+    pub(super) move_instance_latest_progress: Option<MoveInstanceProgress>,
+    pub(super) move_instance_dest_path: Option<PathBuf>,
+    pub(super) move_instance_completion_message: Option<String>,
+    pub(super) move_instance_completion_failed: bool,
+    pub(super) move_instance_last_layout_log_at: Option<Instant>,
+    pub(super) move_instance_pending_result: Option<MoveInstanceResult>,
+    pub(super) move_instance_progress_visible_until: Option<Instant>,
+    pub(super) move_instance_progress_tx: Option<mpsc::Sender<MoveInstanceProgress>>,
+    pub(super) move_instance_progress_rx: Option<Arc<Mutex<mpsc::Receiver<MoveInstanceProgress>>>>,
+    pub(super) move_instance_results_tx: Option<mpsc::Sender<MoveInstanceResult>>,
+    pub(super) move_instance_results_rx: Option<Arc<Mutex<mpsc::Receiver<MoveInstanceResult>>>>,
     pub(super) launch_username: Option<String>,
     pub(super) launch_user_key: Option<String>,
 }
@@ -354,6 +392,23 @@ impl InstanceScreenState {
             export_server_latest_progress: None,
             export_server_results_tx: None,
             export_server_results_rx: None,
+            show_move_instance_modal: false,
+            show_move_instance_progress_modal: false,
+            move_instance_dest_input: String::new(),
+            move_instance_dest_valid: false,
+            move_instance_dest_error: None,
+            move_instance_in_flight: false,
+            move_instance_latest_progress: None,
+            move_instance_dest_path: None,
+            move_instance_completion_message: None,
+            move_instance_completion_failed: false,
+            move_instance_last_layout_log_at: None,
+            move_instance_pending_result: None,
+            move_instance_progress_visible_until: None,
+            move_instance_progress_tx: None,
+            move_instance_progress_rx: None,
+            move_instance_results_tx: None,
+            move_instance_results_rx: None,
             launch_username: None,
             launch_user_key: None,
         }
