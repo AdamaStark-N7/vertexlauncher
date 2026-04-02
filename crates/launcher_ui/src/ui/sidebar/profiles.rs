@@ -14,6 +14,22 @@ use crate::{
 
 use super::{ProfileShortcut, SidebarOutput};
 
+const SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
+const SIDEBAR_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
+
+#[derive(Clone)]
+struct SidebarThumbnailEntry {
+    bytes: Option<Arc<[u8]>>,
+    approx_bytes: usize,
+    last_touched_frame: u64,
+}
+
+#[derive(Default)]
+struct SidebarThumbnailCache {
+    entries: HashMap<String, SidebarThumbnailEntry>,
+    frame_index: u64,
+}
+
 /// Renders the instance shortcut list and emits click or context-menu actions.
 pub fn render(
     ui: &mut Ui,
@@ -25,6 +41,7 @@ pub fn render(
         return;
     }
 
+    begin_thumbnail_cache_frame();
     poll_thumbnail_results();
     let row_height = max_icon_width.max(1.0);
     ui.scope(|ui| {
@@ -46,7 +63,13 @@ pub fn render(
                             .and_then(|path| {
                                 let key = thumbnail_cache_key(profile.id.as_str(), path);
                                 match thumbnail_cache().lock() {
-                                    Ok(cache) => cache.get(key.as_str()).cloned().flatten(),
+                                    Ok(mut cache) => {
+                                        let frame_index = cache.frame_index;
+                                        cache.entries.get_mut(key.as_str()).and_then(|entry| {
+                                            entry.last_touched_frame = frame_index;
+                                            entry.bytes.clone()
+                                        })
+                                    }
                                     Err(_) => None,
                                 }
                             });
@@ -131,9 +154,9 @@ fn render_profile_icon(
     )
 }
 
-fn thumbnail_cache() -> &'static Mutex<HashMap<String, Option<Arc<[u8]>>>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, Option<Arc<[u8]>>>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+fn thumbnail_cache() -> &'static Mutex<SidebarThumbnailCache> {
+    static CACHE: OnceLock<Mutex<SidebarThumbnailCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(SidebarThumbnailCache::default()))
 }
 
 fn thumbnail_in_flight() -> &'static Mutex<HashSet<String>> {
@@ -162,7 +185,7 @@ fn thumbnail_cache_key(instance_id: &str, path: &std::path::Path) -> String {
 fn request_thumbnail(instance_id: &str, path: std::path::PathBuf) {
     let key = thumbnail_cache_key(instance_id, path.as_path());
     if let Ok(cache) = thumbnail_cache().lock()
-        && cache.contains_key(key.as_str())
+        && cache.entries.contains_key(key.as_str())
     {
         return;
     }
@@ -228,9 +251,59 @@ fn poll_thumbnail_results() {
     if let Ok(mut cache) = thumbnail_cache().lock()
         && let Ok(mut in_flight) = thumbnail_in_flight().lock()
     {
+        let frame_index = cache.frame_index;
         for (key, bytes) in updates {
             in_flight.remove(key.as_str());
-            cache.insert(key, bytes);
+            cache.entries.insert(
+                key,
+                SidebarThumbnailEntry {
+                    approx_bytes: bytes.as_ref().map_or(0, |bytes| bytes.len()),
+                    bytes,
+                    last_touched_frame: frame_index,
+                },
+            );
+        }
+        trim_thumbnail_cache(&mut cache);
+    }
+}
+
+fn begin_thumbnail_cache_frame() {
+    if let Ok(mut cache) = thumbnail_cache().lock() {
+        cache.frame_index = cache.frame_index.saturating_add(1);
+        trim_thumbnail_cache(&mut cache);
+    }
+}
+
+fn trim_thumbnail_cache(cache: &mut SidebarThumbnailCache) {
+    let stale_before = cache
+        .frame_index
+        .saturating_sub(SIDEBAR_THUMBNAIL_CACHE_STALE_FRAMES);
+    cache
+        .entries
+        .retain(|_, entry| entry.last_touched_frame >= stale_before);
+
+    let mut total_bytes = cache
+        .entries
+        .values()
+        .map(|entry| entry.approx_bytes)
+        .sum::<usize>();
+    if total_bytes <= SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES {
+        return;
+    }
+
+    let mut eviction_order = cache
+        .entries
+        .iter()
+        .map(|(key, entry)| (key.clone(), entry.last_touched_frame, entry.approx_bytes))
+        .collect::<Vec<_>>();
+    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
+
+    for (key, _, approx_bytes) in eviction_order {
+        if total_bytes <= SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES {
+            break;
+        }
+        if cache.entries.remove(key.as_str()).is_some() {
+            total_bytes = total_bytes.saturating_sub(approx_bytes);
         }
     }
 }

@@ -158,6 +158,20 @@ fn instance_screen_state_id(instance_id: &str) -> egui::Id {
     egui::Id::new(("instance_screen_state", instance_id))
 }
 
+pub fn purge_inactive_state(ctx: &egui::Context, selected_instance_id: Option<&str>) {
+    let Some(instance_id) = selected_instance_id else {
+        return;
+    };
+    let state_id = instance_screen_state_id(instance_id);
+    ctx.data_mut(|data| {
+        let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
+            return;
+        };
+        state.purge_heavy_state();
+        data.insert_temp(state_id, state);
+    });
+}
+
 pub(super) fn handle_escape(ctx: &egui::Context, selected_instance_id: Option<&str>) -> bool {
     let Some(instance_id) = selected_instance_id else {
         return false;
@@ -290,6 +304,7 @@ pub fn render(
         .ctx()
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
+    state.screenshot_images.begin_frame();
 
     poll_background_tasks(&mut state, config, instances, instance_id);
     poll_vtmpack_export_progress(&mut state);

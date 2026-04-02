@@ -22,7 +22,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use textui::{InputOptions, LabelOptions, TextUi, normalize_inline_whitespace};
-use ui_foundation::{responsive_columns, themed_text_input};
+use ui_foundation::{UiMetrics, responsive_columns, themed_text_input};
 
 use crate::app::tokio_runtime;
 use crate::assets;
@@ -50,6 +50,31 @@ const CONTENT_UPDATE_LOG_TARGET: &str = "vertexlauncher/content_update";
 const VERTEX_PREFETCH_DIR_NAME: &str = "vertex_prefetch";
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const DETAIL_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
+const CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES: usize = 12;
+
+#[derive(Clone, Copy, Debug)]
+struct ContentBrowserUiMetrics {
+    action_button_width: f32,
+    action_button_height: f32,
+    download_progress_width: f32,
+    result_thumbnail_size: f32,
+}
+
+impl ContentBrowserUiMetrics {
+    fn from_ui(ui: &Ui) -> Self {
+        let metrics = UiMetrics::from_ui(ui, 860.0);
+        Self {
+            action_button_width: metrics.scaled_width(0.02, TILE_ACTION_BUTTON_WIDTH, 34.0),
+            action_button_height: metrics.scaled_height(0.036, TILE_ACTION_BUTTON_HEIGHT, 34.0),
+            download_progress_width: metrics.scaled_width(
+                0.08,
+                TILE_DOWNLOAD_PROGRESS_WIDTH,
+                124.0,
+            ),
+            result_thumbnail_size: metrics.scaled_width(0.075, 84.0, 108.0),
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum ContentBrowserPage {
@@ -475,6 +500,66 @@ impl Default for ContentBrowserState {
     }
 }
 
+impl ContentBrowserState {
+    pub fn purge_inactive_state(&mut self) {
+        self.current_view = ContentBrowserPage::Browse;
+        self.detail_entry = None;
+        self.detail_tab = ContentDetailTab::Overview;
+        self.detail_versions.clear();
+        self.detail_versions_cache.clear();
+        self.detail_versions_project_key = None;
+        self.detail_versions_error = None;
+        self.detail_versions_in_flight = false;
+        self.detail_versions_tx = None;
+        self.detail_versions_rx = None;
+        self.results = BrowserSearchSnapshot::default();
+        self.active_search_request = None;
+        self.search_cache.clear();
+        self.search_completed_tasks = 0;
+        self.search_total_tasks = 0;
+        self.search_in_flight = false;
+        self.search_tx = None;
+        self.search_rx = None;
+        self.download_queue.clear();
+        self.download_in_flight = false;
+        self.active_download = None;
+        self.download_tx = None;
+        self.download_rx = None;
+        self.identify_in_flight = false;
+        self.identify_tx = None;
+        self.identify_rx = None;
+        self.status_message = None;
+        self.search_notification_active = false;
+        self.download_notification_active = false;
+    }
+}
+
+fn trim_content_browser_search_cache(state: &mut ContentBrowserState) {
+    if state.search_cache.len() <= CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES {
+        return;
+    }
+    let active_request = state.active_search_request.clone();
+    state.search_cache.retain(|request, _| {
+        active_request
+            .as_ref()
+            .is_some_and(|active| active == request)
+            || request.page >= state.current_page.saturating_sub(2)
+    });
+    if state.search_cache.len() <= CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES {
+        return;
+    }
+    let mut requests = state.search_cache.keys().cloned().collect::<Vec<_>>();
+    requests.sort_by_key(|request| request.page);
+    for request in requests {
+        if state.search_cache.len() <= CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES {
+            break;
+        }
+        if active_request.as_ref() != Some(&request) {
+            state.search_cache.remove(&request);
+        }
+    }
+}
+
 pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,
@@ -719,34 +804,35 @@ fn render_controls(
     frame.show(ui, |ui| {
         ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_MD);
         let button_style = style::neutral_button(ui);
+        let response = themed_text_input(
+            text_ui,
+            ui,
+            ("content_browser_query", instance_id),
+            &mut state.query_input,
+            InputOptions {
+                desired_width: Some(ui.available_width().max(160.0)),
+                placeholder_text: Some("Search project names, summaries, and tags".to_owned()),
+                ..InputOptions::default()
+            },
+        );
+        let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
+        let submit_pressed = enter_pressed && (response.has_focus() || response.lost_focus());
+        if submit_pressed {
+            if ui.input(|input| input.modifiers.shift) {
+                if add_search_tag(&mut state.search_tags, state.query_input.as_str()) {
+                    state.query_input.clear();
+                    if !state.search_in_flight {
+                        request_search_for_current_filters(state, true);
+                    }
+                }
+            } else if !state.search_in_flight {
+                request_search_for_current_filters(state, true);
+            }
+        }
+
+        ui.add_space(style::SPACE_MD);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
-            let response = themed_text_input(
-                text_ui,
-                ui,
-                ("content_browser_query", instance_id),
-                &mut state.query_input,
-                InputOptions {
-                    desired_width: Some((ui.available_width() - 460.0).max(160.0)),
-                    placeholder_text: Some("Search project names, summaries, and tags".to_owned()),
-                    ..InputOptions::default()
-                },
-            );
-            let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let submit_pressed = enter_pressed && (response.has_focus() || response.lost_focus());
-            if submit_pressed {
-                if ui.input(|input| input.modifiers.shift) {
-                    if add_search_tag(&mut state.search_tags, state.query_input.as_str()) {
-                        state.query_input.clear();
-                        if !state.search_in_flight {
-                            request_search_for_current_filters(state, true);
-                        }
-                    }
-                } else if !state.search_in_flight {
-                    request_search_for_current_filters(state, true);
-                }
-            }
-
             egui::ComboBox::from_id_salt(("content_browser_loader", instance_id))
                 .selected_text(format!("Loader: {}", state.loader.label()))
                 .show_ui(ui, |ui| {
@@ -1137,13 +1223,15 @@ fn render_result_tile(
     download_enabled: bool,
     download_in_flight: bool,
 ) -> ResultTileOutcome {
+    let metrics = ContentBrowserUiMetrics::from_ui(ui);
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.inactive.bg_fill)
         .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
         .corner_radius(egui::CornerRadius::same(10))
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
-            let thumbnail_size = egui::vec2(96.0, 96.0);
+            let thumbnail_size =
+                egui::vec2(metrics.result_thumbnail_size, metrics.result_thumbnail_size);
             let mut open_clicked = false;
             let mut download_clicked = false;
             let mut download_button_rect = egui::Rect::NOTHING;
@@ -1211,8 +1299,8 @@ fn render_result_tile(
                                 assets::ADJUSTMENTS_SVG,
                                 "Open mod details",
                                 ui.visuals().widgets.inactive.weak_bg_fill,
-                                TILE_ACTION_BUTTON_WIDTH,
-                                TILE_ACTION_BUTTON_HEIGHT,
+                                metrics.action_button_width,
+                                metrics.action_button_height,
                                 true,
                             );
                             info_button_rect = info_button.rect;
@@ -1222,11 +1310,12 @@ fn render_result_tile(
                             ui.add_space(TILE_ACTION_BUTTON_GAP_XS);
 
                             if download_in_flight {
-                                let progress_width = TILE_DOWNLOAD_PROGRESS_WIDTH
+                                let progress_width = metrics
+                                    .download_progress_width
                                     .min(ui.available_width().max(64.0))
-                                    .max(TILE_ACTION_BUTTON_WIDTH * 2.5);
+                                    .max(metrics.action_button_width * 2.5);
                                 let progress = ui.add_sized(
-                                    egui::vec2(progress_width, TILE_ACTION_BUTTON_HEIGHT),
+                                    egui::vec2(progress_width, metrics.action_button_height),
                                     egui::ProgressBar::new(0.0)
                                         .animate(true)
                                         .text("Downloading"),
@@ -1254,8 +1343,8 @@ fn render_result_tile(
                                         "Already installed in this instance"
                                     },
                                     ui.visuals().selection.bg_fill,
-                                    TILE_ACTION_BUTTON_WIDTH,
-                                    TILE_ACTION_BUTTON_HEIGHT,
+                                    metrics.action_button_width,
+                                    metrics.action_button_height,
                                     download_enabled,
                                 );
                                 download_button_rect = download_button.rect;
@@ -2640,6 +2729,7 @@ fn request_search(state: &mut ContentBrowserState, request: BrowserSearchRequest
         state.search_completed_tasks = total_tasks;
         state.search_total_tasks = total_tasks;
         state.results = cached;
+        trim_content_browser_search_cache(state);
         return;
     }
 
@@ -3590,6 +3680,7 @@ fn poll_search(state: &mut ContentBrowserState) {
                         state.search_notification_active = false;
                     }
                     state.search_cache.insert(request, snapshot);
+                    trim_content_browser_search_cache(state);
                     notification::progress!(
                         notification::Severity::Info,
                         "content-browser/search",

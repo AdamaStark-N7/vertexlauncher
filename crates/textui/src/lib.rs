@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeSet, HashMap, HashSet},
     hash::{Hash, Hasher},
+    mem,
     sync::mpsc,
 };
 
@@ -44,6 +45,10 @@ pub use text_helpers::{
 pub use tooltip_options::TooltipOptions;
 
 const DEFAULT_OPEN_TYPE_FEATURE_TAGS: &str = "liga, calt";
+const TEXTURE_CACHE_MAX_BYTES: usize = 64 * 1024 * 1024;
+const ASYNC_RASTER_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
+const INPUT_STATE_STALE_FRAMES: u64 = 900;
+const TEXTURE_STALE_FRAMES: u64 = 600;
 
 // Width-bin size in device pixels.  Labels whose available width differs by
 // less than this will share the same cached texture, preventing mass cache
@@ -72,6 +77,45 @@ fn snap_rect_to_pixel_grid(rect: Rect, pixels_per_point: f32) -> Rect {
         Pos2::new(snap(rect.min.x), snap(rect.min.y)),
         Pos2::new(snap(rect.max.x), snap(rect.max.y)),
     )
+}
+
+fn color_image_byte_size(image: &ColorImage) -> usize {
+    color_image_byte_size_from_size(image.size)
+}
+
+fn color_image_byte_size_from_size(size: [usize; 2]) -> usize {
+    size[0]
+        .saturating_mul(size[1])
+        .saturating_mul(mem::size_of::<Color32>())
+}
+
+fn trim_cache_by_budget<K, V>(
+    cache: &mut HashMap<K, V>,
+    max_bytes: usize,
+    bytes_of: impl Fn(&V) -> usize,
+    last_used_frame_of: impl Fn(&V) -> u64,
+) where
+    K: Clone + Eq + Hash,
+{
+    let mut total_bytes = cache.values().map(&bytes_of).sum::<usize>();
+    if total_bytes <= max_bytes {
+        return;
+    }
+
+    let mut eviction_order = cache
+        .iter()
+        .map(|(key, value)| (key.clone(), last_used_frame_of(value), bytes_of(value)))
+        .collect::<Vec<_>>();
+    eviction_order.sort_by_key(|(_, last_used_frame, _)| *last_used_frame);
+
+    for (key, _, bytes) in eviction_order {
+        if total_bytes <= max_bytes {
+            break;
+        }
+        if cache.remove(&key).is_some() {
+            total_bytes = total_bytes.saturating_sub(bytes);
+        }
+    }
 }
 
 /// A rasterized text texture with helpers for all paint scenarios.
@@ -180,6 +224,7 @@ struct TextureEntry {
     texture: TextureHandle,
     size_points: Vec2,
     last_used_frame: u64,
+    approx_bytes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -218,7 +263,14 @@ struct AsyncRasterState {
     tx: Option<mpsc::Sender<AsyncRasterWorkerMessage>>,
     rx: Option<mpsc::Receiver<AsyncRasterResponse>>,
     pending: HashSet<u64>,
-    cache: HashMap<u64, RasterizedText>,
+    cache: HashMap<u64, AsyncRasterCacheEntry>,
+}
+
+#[derive(Clone, Debug)]
+struct AsyncRasterCacheEntry {
+    raster: RasterizedText,
+    last_used_frame: u64,
+    approx_bytes: usize,
 }
 
 enum AsyncRasterWorkerMessage {
@@ -233,6 +285,7 @@ struct InputState {
     attrs_fingerprint: u64,
     multiline: bool,
     scroll_metrics: EditorScrollMetrics,
+    last_used_frame: u64,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -286,6 +339,7 @@ pub struct TextUi {
     async_raster: AsyncRasterState,
     current_frame: u64,
     max_texture_side_px: usize,
+    frame_events: Vec<egui::Event>,
     /// Cache for parsed markdown blocks: Id → (fingerprint, blocks).
     /// Prevents re-parsing unchanged markdown every frame.
     markdown_cache: HashMap<Id, (u64, Vec<MarkdownBlock>)>,
@@ -343,6 +397,7 @@ impl TextUi {
             },
             current_frame: 0,
             max_texture_side_px: usize::MAX,
+            frame_events: Vec::new(),
             markdown_cache: HashMap::new(),
         }
     }
@@ -351,12 +406,19 @@ impl TextUi {
     pub fn begin_frame(&mut self, ctx: &Context) {
         self.current_frame = ctx.cumulative_frame_nr();
         let max_texture_side_px = ctx.input(|i| i.max_texture_side).max(1);
+        self.frame_events = ctx.input(|i| i.events.clone());
         if self.max_texture_side_px != max_texture_side_px {
             self.max_texture_side_px = max_texture_side_px;
             self.invalidate_text_caches(false);
         }
-        self.textures
-            .retain(|_, entry| self.current_frame.saturating_sub(entry.last_used_frame) <= 600);
+        self.textures.retain(|_, entry| {
+            self.current_frame.saturating_sub(entry.last_used_frame) <= TEXTURE_STALE_FRAMES
+        });
+        self.input_states.retain(|_, state| {
+            self.current_frame.saturating_sub(state.last_used_frame) <= INPUT_STATE_STALE_FRAMES
+        });
+        self.enforce_texture_cache_budget();
+        self.enforce_async_raster_cache_budget();
         self.poll_async_raster_results();
     }
 
@@ -1598,6 +1660,7 @@ impl TextUi {
             image,
             content_rect.size(),
         );
+        state.last_used_frame = self.current_frame;
         self.input_states.insert(id, state);
 
         let frame_fill = if has_focus {
@@ -1687,6 +1750,7 @@ impl TextUi {
             attrs_fingerprint: 0,
             multiline,
             scroll_metrics: EditorScrollMetrics::default(),
+            last_used_frame: 0,
         }
     }
 
@@ -1933,8 +1997,7 @@ impl TextUi {
         }
 
         if process_keyboard {
-            let events = ui.ctx().input(|i| i.events.clone());
-            for event in events {
+            for event in &self.frame_events {
                 match event {
                     egui::Event::Copy | egui::Event::Cut => {
                         if let Some(selection) = editor.copy_selection() {
@@ -1946,12 +2009,12 @@ impl TextUi {
                         pressed,
                         modifiers,
                         ..
-                    } if pressed => {
+                    } if *pressed => {
                         changed |= handle_read_only_editor_key_event(
                             &mut self.font_system,
                             editor,
-                            key,
-                            modifiers,
+                            *key,
+                            *modifiers,
                         );
                     }
                     _ => {}
@@ -2264,10 +2327,10 @@ impl TextUi {
         }
 
         if process_keyboard {
-            let events = ui.ctx().input(|i| i.events.clone());
-            for event in events {
+            for event in &self.frame_events {
                 match event {
-                    egui::Event::Text(mut text) => {
+                    egui::Event::Text(text) => {
+                        let mut text = text.clone();
                         if !multiline {
                             text = text.replace(['\n', '\r'], "");
                         }
@@ -2287,7 +2350,8 @@ impl TextUi {
                             changed |= editor.delete_selection();
                         }
                     }
-                    egui::Event::Paste(mut pasted) => {
+                    egui::Event::Paste(pasted) => {
+                        let mut pasted = pasted.clone();
                         if !multiline {
                             pasted = pasted.replace(['\n', '\r'], " ");
                         }
@@ -2301,12 +2365,12 @@ impl TextUi {
                         pressed,
                         modifiers,
                         ..
-                    } if pressed => {
+                    } if *pressed => {
                         changed |= handle_editor_key_event(
                             &mut self.font_system,
                             editor,
-                            key,
-                            modifiers,
+                            *key,
+                            *modifiers,
                             multiline,
                         );
                     }
@@ -2573,9 +2637,15 @@ impl TextUi {
             match rx.try_recv() {
                 Ok(response) => {
                     self.async_raster.pending.remove(&response.key_hash);
-                    self.async_raster
-                        .cache
-                        .insert(response.key_hash, response.raster);
+                    let approx_bytes = color_image_byte_size(&response.raster.image);
+                    self.async_raster.cache.insert(
+                        response.key_hash,
+                        AsyncRasterCacheEntry {
+                            raster: response.raster,
+                            last_used_frame: self.current_frame,
+                            approx_bytes,
+                        },
+                    );
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -2589,6 +2659,7 @@ impl TextUi {
             self.async_raster.rx = None;
             self.async_raster.pending.clear();
         }
+        self.enforce_async_raster_cache_budget();
     }
 
     fn invalidate_text_caches(&mut self, clear_input_states: bool) {
@@ -2599,6 +2670,24 @@ impl TextUi {
         if clear_input_states {
             self.input_states.clear();
         }
+    }
+
+    fn enforce_texture_cache_budget(&mut self) {
+        trim_cache_by_budget(
+            &mut self.textures,
+            TEXTURE_CACHE_MAX_BYTES,
+            |entry| entry.approx_bytes,
+            |entry| entry.last_used_frame,
+        );
+    }
+
+    fn enforce_async_raster_cache_budget(&mut self) {
+        trim_cache_by_budget(
+            &mut self.async_raster.cache,
+            ASYNC_RASTER_CACHE_MAX_BYTES,
+            |entry| entry.approx_bytes,
+            |entry| entry.last_used_frame,
+        );
     }
 
     fn hash_typography<H: Hasher>(&self, state: &mut H) {
@@ -2618,8 +2707,9 @@ impl TextUi {
         width_points_opt: Option<f32>,
         scale: f32,
     ) -> Option<RasterizedText> {
-        if let Some(raster) = self.async_raster.cache.get(&key_hash) {
-            return Some(raster.clone());
+        if let Some(entry) = self.async_raster.cache.get_mut(&key_hash) {
+            entry.last_used_frame = self.current_frame;
+            return Some(entry.raster.clone());
         }
         let Some(tx) = self.async_raster.tx.as_ref().cloned() else {
             return Some(self.rasterize_plain_text(
@@ -2663,8 +2753,9 @@ impl TextUi {
         width_points_opt: Option<f32>,
         scale: f32,
     ) -> Option<RasterizedText> {
-        if let Some(raster) = self.async_raster.cache.get(&key_hash) {
-            return Some(raster.clone());
+        if let Some(entry) = self.async_raster.cache.get_mut(&key_hash) {
+            entry.last_used_frame = self.current_frame;
+            return Some(entry.raster.clone());
         }
         let Some(tx) = self.async_raster.tx.as_ref().cloned() else {
             return Some(self.rasterize_rich_text(
@@ -2726,6 +2817,7 @@ impl TextUi {
             ),
             size_points,
             last_used_frame: self.current_frame,
+            approx_bytes: color_image_byte_size(&image),
         });
 
         if entry.fingerprint != fingerprint || entry.texture.size() != image.size {
@@ -2737,6 +2829,7 @@ impl TextUi {
 
         entry.size_points = size_points;
         entry.last_used_frame = self.current_frame;
+        entry.approx_bytes = color_image_byte_size_from_size(entry.texture.size());
         entry.texture.clone()
     }
 

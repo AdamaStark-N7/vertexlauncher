@@ -19,7 +19,8 @@ use textui::{
     truncate_single_line_text_with_ellipsis_preserving_whitespace as truncate_for_width,
 };
 use ui_foundation::{
-    DialogPreset, danger_button, dialog_options, fill_tab_row, secondary_button, show_dialog,
+    DialogPreset, UiMetrics, danger_button, dialog_options, fill_tab_row, responsive_columns,
+    secondary_button, show_dialog,
 };
 
 use crate::{
@@ -42,22 +43,44 @@ const HOME_SCAN_INTERVAL: Duration = Duration::from_secs(3);
 const SERVER_PING_REFRESH_INTERVAL: Duration = Duration::from_secs(20);
 const SERVER_PING_CONNECT_TIMEOUT: Duration = Duration::from_millis(350);
 const SERVER_PINGS_PER_SCAN: usize = 3;
-const INSTANCE_ROW_HEIGHT: f32 = 34.0;
-const ACTIVITY_ROW_HEIGHT: f32 = 54.0;
 const ENTRY_ICON_SIZE: f32 = 14.0;
 const SERVER_PING_ICON_SIZE: f32 = 24.0;
 const FAVORITE_STAR_BUTTON_SIZE: f32 = 20.0;
 const FAVORITE_STAR_ICON_SIZE: f32 = 14.0;
 const SCREENSHOT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const SCREENSHOT_PAGE_SIZE: usize = 30;
-const HOME_TAB_HEIGHT: f32 = 38.0;
 const SCREENSHOT_TILE_GAP: f32 = 10.0;
 const SCREENSHOT_PRELOAD_VIEWPORTS: f32 = 0.75;
 const SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
 const SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
 const SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.12;
 const SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY: f32 = 0.0015;
-const SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
+const HOME_THUMBNAIL_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
+const HOME_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
+
+#[derive(Clone, Copy, Debug)]
+struct HomeUiMetrics {
+    tab_height: f32,
+    instance_row_height: f32,
+    activity_row_height: f32,
+    screenshot_overlay_button_size: f32,
+    screenshot_min_column_width: f32,
+    action_button_width: f32,
+}
+
+impl HomeUiMetrics {
+    fn from_ui(ui: &Ui) -> Self {
+        let metrics = UiMetrics::from_ui(ui, 820.0);
+        Self {
+            tab_height: metrics.scaled_height(0.045, 34.0, 40.0),
+            instance_row_height: metrics.scaled_height(0.04, 34.0, 42.0),
+            activity_row_height: metrics.scaled_height(0.062, 50.0, 62.0),
+            screenshot_overlay_button_size: metrics.scaled_width(0.022, 24.0, 30.0),
+            screenshot_min_column_width: metrics.scaled_width(0.24, 180.0, 320.0),
+            action_button_width: metrics.scaled_width(0.075, 92.0, 120.0),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct HomeOutput {
@@ -126,9 +149,10 @@ struct HomeState {
     screenshot_loaded_count: usize,
     latest_requested_screenshot_scan_id: u64,
     screenshot_images: LazyImageBytes,
+    thumbnail_cache_frame_index: u64,
     instance_thumbnail_results_tx: Option<mpsc::Sender<(String, Option<Arc<[u8]>>)>>,
     instance_thumbnail_results_rx: Option<Arc<Mutex<mpsc::Receiver<(String, Option<Arc<[u8]>>)>>>>,
-    instance_thumbnail_cache: HashMap<String, Option<Arc<[u8]>>>,
+    instance_thumbnail_cache: HashMap<String, ThumbnailCacheEntry>,
     instance_thumbnail_in_flight: HashSet<String>,
     screenshot_viewer: Option<ScreenshotViewerState>,
     pending_delete_screenshot_key: Option<String>,
@@ -136,6 +160,13 @@ struct HomeState {
     delete_screenshot_results_tx: Option<mpsc::Sender<(String, String, Result<(), String>)>>,
     delete_screenshot_results_rx:
         Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<(), String>)>>>>,
+}
+
+#[derive(Debug, Clone)]
+struct ThumbnailCacheEntry {
+    bytes: Option<Arc<[u8]>>,
+    approx_bytes: usize,
+    last_touched_frame: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -361,6 +392,10 @@ impl HomeEntryRef<'_> {
 
 fn home_state_id() -> egui::Id {
     egui::Id::new("home_screen_state")
+}
+
+pub fn purge_inactive_state(ctx: &egui::Context) {
+    ctx.data_mut(|data| data.insert_temp(home_state_id(), HomeState::default()));
 }
 
 fn home_activity_results() -> &'static Mutex<HomeActivityResultChannel> {
@@ -768,15 +803,19 @@ pub fn render(
     streamer_mode: bool,
 ) -> HomeOutput {
     let mut output = HomeOutput::default();
+    let metrics = HomeUiMetrics::from_ui(ui);
     let state_id = home_state_id();
     let mut state = ui
         .ctx()
         .data_mut(|data| data.get_temp::<HomeState>(state_id))
         .unwrap_or_default();
     ui.ctx().request_repaint_after(Duration::from_millis(250));
+    state.screenshot_images.begin_frame();
+    state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
+    trim_home_thumbnail_cache(&mut state);
     let screenshot_images_updated = state.screenshot_images.poll();
 
-    render_home_tab_row(ui, text_ui, &mut state.active_tab);
+    render_home_tab_row(ui, text_ui, &mut state.active_tab, metrics);
     ui.add_space(14.0);
 
     match state.active_tab {
@@ -809,6 +848,7 @@ pub fn render(
                 active_launch_auth,
                 &mut state,
                 &mut output,
+                metrics,
             );
             ui.add_space(12.0);
             render_activity_feed(
@@ -821,6 +861,7 @@ pub fn render(
                 streamer_mode,
                 &mut output,
                 &mut requested_rescan,
+                metrics,
             );
 
             if requested_rescan {
@@ -870,7 +911,7 @@ pub fn render(
                 state.pending_delete_screenshot_key = None;
             }
             let mut retained_image_keys = HashSet::new();
-            render_screenshot_gallery(ui, text_ui, &mut state, &mut retained_image_keys);
+            render_screenshot_gallery(ui, text_ui, &mut state, &mut retained_image_keys, metrics);
             retain_home_viewer_image(&mut state, &mut retained_image_keys);
             state.screenshot_images.retain_loaded(&retained_image_keys);
         }
@@ -883,14 +924,19 @@ pub fn render(
         ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
 
-    render_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state);
-    render_delete_screenshot_modal(ui.ctx(), text_ui, &mut state, instances, config);
+    render_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state, metrics);
+    render_delete_screenshot_modal(ui.ctx(), text_ui, &mut state, instances, config, metrics);
     output.presence_section = state.active_tab.presence_section();
     ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
     output
 }
 
-fn render_home_tab_row(ui: &mut Ui, text_ui: &mut TextUi, active_tab: &mut HomeTab) {
+fn render_home_tab_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    active_tab: &mut HomeTab,
+    metrics: HomeUiMetrics,
+) {
     fill_tab_row(
         text_ui,
         ui,
@@ -903,7 +949,7 @@ fn render_home_tab_row(ui: &mut Ui, text_ui: &mut TextUi, active_tab: &mut HomeT
             ),
             (HomeTab::Screenshots, HomeTab::Screenshots.label()),
         ],
-        HOME_TAB_HEIGHT,
+        metrics.tab_height,
         style::SPACE_MD,
     );
 }
@@ -913,6 +959,7 @@ fn render_screenshot_gallery(
     text_ui: &mut TextUi,
     state: &mut HomeState,
     retained_image_keys: &mut HashSet<String>,
+    metrics: HomeUiMetrics,
 ) {
     let title_style = style::heading(ui, 18.0, 24.0);
     let body_style = style::muted(ui);
@@ -943,17 +990,12 @@ fn render_screenshot_gallery(
     }
 
     let available_width = ui.available_width().max(1.0);
-    let column_count: usize = if available_width >= 980.0 {
-        3
-    } else if available_width >= 620.0 {
-        2
-    } else {
-        1
-    };
-    let column_width = ((available_width
-        - SCREENSHOT_TILE_GAP * (column_count.saturating_sub(1) as f32))
-        / column_count as f32)
-        .max(180.0);
+    let (column_count, column_width) = responsive_columns(
+        available_width,
+        metrics.screenshot_min_column_width,
+        SCREENSHOT_TILE_GAP,
+        3,
+    );
     let assignments = screenshot_mosaic_assignments(&state.screenshots, column_count, column_width);
 
     let mut open_screenshot_key = None;
@@ -976,6 +1018,7 @@ fn render_screenshot_gallery(
                             tile_height,
                             preload_rect,
                             retained_image_keys,
+                            metrics,
                         );
                         if action.open_viewer {
                             open_screenshot_key = Some(screenshot.key());
@@ -1046,6 +1089,7 @@ fn render_screenshot_tile(
     tile_height: f32,
     preload_rect: egui::Rect,
     retained_image_keys: &mut HashSet<String>,
+    metrics: HomeUiMetrics,
 ) -> ScreenshotTileAction {
     let width = ui.available_width().max(1.0);
     let tile_size = egui::vec2(width, tile_height);
@@ -1090,6 +1134,7 @@ fn render_screenshot_tile(
             screenshot,
             image_bytes.as_deref(),
             image_status == LazyImageBytesStatus::Loading,
+            metrics,
         );
         match overlay_result.action {
             Some(ScreenshotOverlayAction::Copy) => {
@@ -1222,6 +1267,7 @@ fn render_screenshot_viewer_modal(
     ctx: &egui::Context,
     text_ui: &mut TextUi,
     state: &mut HomeState,
+    metrics: HomeUiMetrics,
 ) {
     let Some(screenshot_key) = state
         .screenshot_viewer
@@ -1295,7 +1341,10 @@ fn render_screenshot_viewer_modal(
                             ui,
                             "home_screenshot_viewer_close",
                             "Close",
-                            &secondary_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                            &secondary_button(
+                                ui,
+                                egui::vec2(metrics.action_button_width, style::CONTROL_HEIGHT),
+                            ),
                         )
                         .clicked()
                     {
@@ -1306,7 +1355,10 @@ fn render_screenshot_viewer_modal(
                             ui,
                             "home_screenshot_viewer_delete",
                             "Delete",
-                            &danger_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                            &danger_button(
+                                ui,
+                                egui::vec2(metrics.action_button_width, style::CONTROL_HEIGHT),
+                            ),
                         )
                         .clicked()
                     {
@@ -1318,7 +1370,13 @@ fn render_screenshot_viewer_modal(
                                 ui,
                                 "home_screenshot_viewer_copy",
                                 "Copy",
-                                &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                                &secondary_button(
+                                    ui,
+                                    egui::vec2(
+                                        (metrics.action_button_width - 10.0).max(80.0),
+                                        style::CONTROL_HEIGHT,
+                                    ),
+                                ),
                             )
                         })
                         .inner
@@ -1336,7 +1394,13 @@ fn render_screenshot_viewer_modal(
                             ui,
                             "home_screenshot_viewer_reset",
                             "Reset",
-                            &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                            &secondary_button(
+                                ui,
+                                egui::vec2(
+                                    (metrics.action_button_width - 10.0).max(80.0),
+                                    style::CONTROL_HEIGHT,
+                                ),
+                            ),
                         )
                         .clicked()
                     {
@@ -1348,7 +1412,15 @@ fn render_screenshot_viewer_modal(
                             ui,
                             "home_screenshot_viewer_zoom_in",
                             "+",
-                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                            &secondary_button(
+                                ui,
+                                egui::vec2(
+                                    metrics
+                                        .screenshot_overlay_button_size
+                                        .max(style::CONTROL_HEIGHT),
+                                    style::CONTROL_HEIGHT,
+                                ),
+                            ),
                         )
                         .clicked()
                     {
@@ -1360,7 +1432,15 @@ fn render_screenshot_viewer_modal(
                             ui,
                             "home_screenshot_viewer_zoom_out",
                             "-",
-                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                            &secondary_button(
+                                ui,
+                                egui::vec2(
+                                    metrics
+                                        .screenshot_overlay_button_size
+                                        .max(style::CONTROL_HEIGHT),
+                                    style::CONTROL_HEIGHT,
+                                ),
+                            ),
                         )
                         .clicked()
                     {
@@ -1506,6 +1586,7 @@ fn render_delete_screenshot_modal(
     state: &mut HomeState,
     _instances: &InstanceStore,
     _config: &Config,
+    metrics: HomeUiMetrics,
 ) {
     let Some(screenshot_key) = state.pending_delete_screenshot_key.clone() else {
         return;
@@ -1579,7 +1660,10 @@ fn render_delete_screenshot_modal(
                             ui,
                             "home_delete_screenshot_confirm",
                             "Delete",
-                            &danger_button(ui, egui::vec2(120.0, 34.0)),
+                            &danger_button(
+                                ui,
+                                egui::vec2(metrics.action_button_width, style::CONTROL_HEIGHT),
+                            ),
                         )
                     })
                     .inner
@@ -1593,7 +1677,10 @@ fn render_delete_screenshot_modal(
                             ui,
                             "home_delete_screenshot_cancel",
                             "Cancel",
-                            &secondary_button(ui, egui::vec2(120.0, 34.0)),
+                            &secondary_button(
+                                ui,
+                                egui::vec2(metrics.action_button_width, style::CONTROL_HEIGHT),
+                            ),
                         )
                     })
                     .inner
@@ -1631,6 +1718,7 @@ fn render_screenshot_overlay_action(
     screenshot: &ScreenshotEntry,
     copy_bytes: Option<&[u8]>,
     copy_loading: bool,
+    metrics: HomeUiMetrics,
 ) -> ScreenshotOverlayResult {
     let screenshot_key = screenshot.key();
     let mut result = ScreenshotOverlayResult::default();
@@ -1649,6 +1737,7 @@ fn render_screenshot_overlay_action(
         },
         8.0,
         copy_bytes.is_some(),
+        metrics,
     );
     result.contains_pointer |= copy_result.contains_pointer;
     if copy_result.clicked {
@@ -1668,8 +1757,9 @@ fn render_screenshot_overlay_action(
         assets::TRASH_X_SVG,
         ui.visuals().error_fg_color,
         "Delete screenshot",
-        8.0 + SCREENSHOT_COPY_BUTTON_SIZE + 6.0,
+        8.0 + metrics.screenshot_overlay_button_size + 6.0,
         true,
+        metrics,
     );
     result.contains_pointer |= delete_result.contains_pointer;
     if delete_result.clicked {
@@ -1689,10 +1779,14 @@ fn render_screenshot_overlay_button(
     tooltip: &str,
     x_offset: f32,
     enabled: bool,
+    metrics: HomeUiMetrics,
 ) -> ScreenshotOverlayButtonResult {
     let button_rect = egui::Rect::from_min_size(
         tile_rect.min + egui::vec2(x_offset, 8.0),
-        egui::vec2(SCREENSHOT_COPY_BUTTON_SIZE, SCREENSHOT_COPY_BUTTON_SIZE),
+        egui::vec2(
+            metrics.screenshot_overlay_button_size,
+            metrics.screenshot_overlay_button_size,
+        ),
     );
     let themed_svg = apply_color_to_svg(icon_svg, icon_color);
     let icon_color_key = format!(
@@ -1728,7 +1822,9 @@ fn render_screenshot_overlay_button(
         ui.visuals().widgets.inactive.bg_stroke,
         egui::StrokeKind::Inside,
     );
-    let icon_rect = egui::Rect::from_center_size(button_rect.center(), egui::vec2(14.0, 14.0));
+    let icon_size = (metrics.screenshot_overlay_button_size * 0.5).clamp(12.0, 16.0);
+    let icon_rect =
+        egui::Rect::from_center_size(button_rect.center(), egui::vec2(icon_size, icon_size));
     egui::Image::from_bytes(uri, themed_svg)
         .fit_to_exact_size(icon_rect.size())
         .tint(if enabled {
@@ -1834,6 +1930,7 @@ fn render_instance_usage(
     active_launch_auth: Option<&LaunchAuthContext>,
     state: &mut HomeState,
     output: &mut HomeOutput,
+    metrics: HomeUiMetrics,
 ) {
     let mut title_style = LabelOptions::default();
     title_style.font_size = 18.0;
@@ -1877,8 +1974,11 @@ fn render_instance_usage(
                     .filter(|path| !path.as_os_str().is_empty())
                     .and_then(|path| {
                         let key = instance_thumbnail_cache_key(instance.id.as_str(), path);
-                        match state.instance_thumbnail_cache.get(&key).cloned() {
-                            Some(bytes) => bytes,
+                        match state.instance_thumbnail_cache.get_mut(&key) {
+                            Some(entry) => {
+                                entry.last_touched_frame = state.thumbnail_cache_frame_index;
+                                entry.bytes.clone()
+                            }
                             None => {
                                 request_instance_thumbnail(
                                     state,
@@ -1892,7 +1992,7 @@ fn render_instance_usage(
                 let row_response = render_clickable_entry_row(
                     ui,
                     ("home_instance_row", index),
-                    INSTANCE_ROW_HEIGHT,
+                    metrics.instance_row_height,
                     |ui| {
                         render_entry_thumbnail(
                             ui,
@@ -2094,7 +2194,55 @@ fn poll_instance_thumbnail_results(state: &mut HomeState) {
     }
     for (key, bytes) in updates {
         state.instance_thumbnail_in_flight.remove(key.as_str());
-        state.instance_thumbnail_cache.insert(key, bytes);
+        state.instance_thumbnail_cache.insert(
+            key,
+            ThumbnailCacheEntry {
+                approx_bytes: bytes.as_ref().map_or(0, |bytes| bytes.len()),
+                bytes,
+                last_touched_frame: state.thumbnail_cache_frame_index,
+            },
+        );
+    }
+    trim_home_thumbnail_cache(state);
+}
+
+fn trim_home_thumbnail_cache(state: &mut HomeState) {
+    let stale_before = state
+        .thumbnail_cache_frame_index
+        .saturating_sub(HOME_THUMBNAIL_CACHE_STALE_FRAMES);
+    state.instance_thumbnail_cache.retain(|key, entry| {
+        state.instance_thumbnail_in_flight.contains(key.as_str())
+            || entry.last_touched_frame >= stale_before
+    });
+
+    let mut total_bytes = state
+        .instance_thumbnail_cache
+        .values()
+        .map(|entry| entry.approx_bytes)
+        .sum::<usize>();
+    if total_bytes <= HOME_THUMBNAIL_CACHE_MAX_BYTES {
+        return;
+    }
+
+    let mut eviction_order = state
+        .instance_thumbnail_cache
+        .iter()
+        .filter(|(key, _)| !state.instance_thumbnail_in_flight.contains(key.as_str()))
+        .map(|(key, entry)| (key.clone(), entry.last_touched_frame, entry.approx_bytes))
+        .collect::<Vec<_>>();
+    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
+
+    for (key, _, approx_bytes) in eviction_order {
+        if total_bytes <= HOME_THUMBNAIL_CACHE_MAX_BYTES {
+            break;
+        }
+        if state
+            .instance_thumbnail_cache
+            .remove(key.as_str())
+            .is_some()
+        {
+            total_bytes = total_bytes.saturating_sub(approx_bytes);
+        }
     }
 }
 
@@ -2108,6 +2256,7 @@ fn render_activity_feed(
     streamer_mode: bool,
     output: &mut HomeOutput,
     requested_rescan: &mut bool,
+    metrics: HomeUiMetrics,
 ) {
     let mut title_style = LabelOptions::default();
     title_style.font_size = 18.0;
@@ -2202,6 +2351,7 @@ fn render_activity_feed(
                             requested_rescan,
                             active_username,
                             active_launch_auth,
+                            metrics,
                         ),
                         HomeEntryRef::Server(server) => render_server_row(
                             ui,
@@ -2218,6 +2368,7 @@ fn render_activity_feed(
                             requested_rescan,
                             active_username,
                             active_launch_auth,
+                            metrics,
                         ),
                     }
                     ui.add_space(2.0);
@@ -2266,6 +2417,7 @@ fn render_activity_feed(
                             requested_rescan,
                             active_username,
                             active_launch_auth,
+                            metrics,
                         );
                     }
                     HomeEntryRef::Server(server) => {
@@ -2284,6 +2436,7 @@ fn render_activity_feed(
                             requested_rescan,
                             active_username,
                             active_launch_auth,
+                            metrics,
                         );
                     }
                 }
@@ -2303,10 +2456,11 @@ fn render_world_row(
     requested_rescan: &mut bool,
     active_username: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
+    metrics: HomeUiMetrics,
 ) {
     let mut star_clicked = false;
     let row_response =
-        render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
+        render_clickable_entry_row(ui, (id_source, "row"), metrics.activity_row_height, |ui| {
             if render_favorite_star_button(ui, (id_source, "world_star"), world.favorite)
                 .on_hover_text("Toggle world favorite")
                 .clicked()
@@ -2473,11 +2627,12 @@ fn render_server_row(
     requested_rescan: &mut bool,
     active_username: Option<&str>,
     active_launch_auth: Option<&LaunchAuthContext>,
+    metrics: HomeUiMetrics,
 ) {
     let server_meta_full = server_meta_line(server, ping, now_ms, streamer_mode);
     let mut star_clicked = false;
     let row_response =
-        render_clickable_entry_row(ui, (id_source, "row"), ACTIVITY_ROW_HEIGHT, |ui| {
+        render_clickable_entry_row(ui, (id_source, "row"), metrics.activity_row_height, |ui| {
             if render_favorite_star_button(ui, (id_source, "server_star"), server.favorite)
                 .on_hover_text("Toggle server favorite")
                 .clicked()

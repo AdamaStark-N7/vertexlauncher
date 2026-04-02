@@ -1,5 +1,6 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock, mpsc},
     time::Duration,
 };
@@ -9,7 +10,7 @@ use egui::Ui;
 use installation::{MinecraftVersionEntry, fetch_version_catalog};
 use modrinth::Client as ModrinthClient;
 use textui::{InputOptions, LabelOptions, TextUi};
-use ui_foundation::{responsive_columns, themed_text_input};
+use ui_foundation::{UiMetrics, responsive_columns, themed_text_input};
 
 use crate::{
     app::tokio_runtime,
@@ -19,11 +20,56 @@ use crate::{
 };
 
 const DISCOVER_PROVIDER_LIMIT: u32 = 36;
-const DISCOVER_CARD_MIN_WIDTH: f32 = 260.0;
 const DISCOVER_CARD_GAP: f32 = 12.0;
-const DISCOVER_CARD_IMAGE_HEIGHT: f32 = 124.0;
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const DETAIL_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
+const DISCOVER_SEARCH_CACHE_MAX_ENTRIES: usize = 10;
+
+#[derive(Clone, Copy, Debug)]
+struct DiscoverUiMetrics {
+    card_min_width: f32,
+    card_image_height: f32,
+    estimated_card_base_height: f32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DiscoverMasonryItem {
+    entry_index: usize,
+    offset_y: f32,
+    height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct DiscoverMasonryColumn {
+    items: Vec<DiscoverMasonryItem>,
+    total_height: f32,
+}
+
+#[derive(Clone, Debug)]
+struct DiscoverMasonryLayout {
+    columns: Vec<DiscoverMasonryColumn>,
+    content_width: f32,
+    column_width: f32,
+}
+
+#[derive(Clone, Debug)]
+struct CachedDiscoverMasonryLayout {
+    width_bucket: u32,
+    entries_fingerprint: u64,
+    height_cache_revision: u64,
+    layout: DiscoverMasonryLayout,
+}
+
+impl DiscoverUiMetrics {
+    fn from_ui(ui: &Ui) -> Self {
+        let metrics = UiMetrics::from_ui(ui, 860.0);
+        Self {
+            card_min_width: metrics.scaled_width(0.18, 220.0, 300.0),
+            card_image_height: metrics.scaled_height(0.15, 112.0, 160.0),
+            estimated_card_base_height: metrics.scaled_height(0.24, 188.0, 236.0),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DiscoverState {
@@ -40,7 +86,10 @@ pub struct DiscoverState {
     status_message: Option<String>,
     warnings: Vec<String>,
     entries: Vec<DiscoverEntry>,
+    tile_height_cache: HashMap<(String, u32), f32>,
+    tile_height_cache_revision: u64,
     has_more_results: bool,
+    masonry_layout_cache: Option<CachedDiscoverMasonryLayout>,
     cached_snapshots: HashMap<DiscoverSearchRequest, DiscoverSearchSnapshot>,
     available_game_versions: Vec<MinecraftVersionEntry>,
     version_catalog_error: Option<String>,
@@ -81,7 +130,10 @@ impl Default for DiscoverState {
             status_message: None,
             warnings: Vec::new(),
             entries: Vec::new(),
+            tile_height_cache: HashMap::new(),
+            tile_height_cache_revision: 0,
             has_more_results: true,
+            masonry_layout_cache: None,
             cached_snapshots: HashMap::new(),
             available_game_versions: Vec::new(),
             version_catalog_error: None,
@@ -140,6 +192,34 @@ impl DiscoverState {
                 self.install_error = Some(error);
             }
         }
+    }
+
+    pub fn purge_inactive_state(&mut self) {
+        self.search_in_flight = false;
+        self.initial_search_requested = false;
+        self.status_message = None;
+        self.warnings.clear();
+        self.entries.clear();
+        self.tile_height_cache.clear();
+        self.tile_height_cache_revision = self.tile_height_cache_revision.saturating_add(1);
+        self.masonry_layout_cache = None;
+        self.cached_snapshots.clear();
+        self.has_more_results = true;
+        self.search_results_tx = None;
+        self.search_results_rx = None;
+        self.detail_entry = None;
+        self.detail_selected_source = None;
+        self.detail_versions.clear();
+        self.detail_versions_error = None;
+        self.detail_versions_in_flight = false;
+        self.detail_version_request_serial = 0;
+        self.detail_version_results_tx = None;
+        self.detail_version_results_rx = None;
+        self.install_in_flight = false;
+        self.install_message = None;
+        self.install_completed_steps = 0;
+        self.install_total_steps = 0;
+        self.install_error = None;
     }
 }
 
@@ -603,7 +683,15 @@ fn render_discover_browse_content(
                 );
                 return;
             }
-            if let Some(entry) = render_masonry_tiles(ui, text_ui, state.entries.as_slice()) {
+            if let Some(entry) = render_masonry_tiles(
+                ui,
+                text_ui,
+                state.entries.as_slice(),
+                &mut state.tile_height_cache,
+                &mut state.tile_height_cache_revision,
+                &mut state.masonry_layout_cache,
+                viewport,
+            ) {
                 open_detail_page(state, &entry);
                 output.requested_screen = Some(AppScreen::DiscoverDetail);
             }
@@ -970,53 +1058,87 @@ fn render_masonry_tiles(
     ui: &mut Ui,
     text_ui: &mut TextUi,
     entries: &[DiscoverEntry],
+    tile_height_cache: &mut HashMap<(String, u32), f32>,
+    tile_height_cache_revision: &mut u64,
+    masonry_layout_cache: &mut Option<CachedDiscoverMasonryLayout>,
+    viewport: egui::Rect,
 ) -> Option<DiscoverEntry> {
-    let content_width = ui.available_width().max(DISCOVER_CARD_MIN_WIDTH);
-    let mut column_count = 1usize;
-    for candidate in 1..=4usize {
-        let required_width = (DISCOVER_CARD_MIN_WIDTH * candidate as f32)
-            + (DISCOVER_CARD_GAP * candidate.saturating_sub(1) as f32);
-        if required_width <= content_width {
-            column_count = candidate;
-        }
-    }
-    let column_width = (content_width
-        - (DISCOVER_CARD_GAP * column_count.saturating_sub(1) as f32))
-        / column_count as f32;
-    let mut columns = vec![Vec::<usize>::new(); column_count];
-    let mut heights = vec![0.0f32; column_count];
-
-    for (index, entry) in entries.iter().enumerate() {
-        let summary_lines = (entry.summary.len() as f32 / 46.0).ceil().clamp(2.0, 6.0);
-        let estimated_height = 210.0 + (summary_lines * 18.0);
-        let target_column = heights
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| left.total_cmp(right))
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        columns[target_column].push(index);
-        heights[target_column] += estimated_height + DISCOVER_CARD_GAP;
-    }
-
+    let metrics = DiscoverUiMetrics::from_ui(ui);
+    let layout = build_discover_masonry_layout(
+        ui,
+        entries,
+        tile_height_cache,
+        *tile_height_cache_revision,
+        masonry_layout_cache,
+        metrics,
+    );
+    let overscan = metrics.card_image_height.max(220.0);
+    let visible_top = viewport.top() - overscan;
+    let visible_bottom = viewport.bottom() + overscan;
     let mut opened_entry = None;
     ui.allocate_ui_with_layout(
-        egui::vec2(content_width, 0.0),
+        egui::vec2(layout.content_width, 0.0),
         egui::Layout::left_to_right(egui::Align::Min),
         |ui| {
             ui.spacing_mut().item_spacing.x = DISCOVER_CARD_GAP;
-            for column_entries in &columns {
+            for column in &layout.columns {
                 ui.allocate_ui_with_layout(
-                    egui::vec2(column_width, 0.0),
+                    egui::vec2(layout.column_width, 0.0),
                     egui::Layout::top_down(egui::Align::Min),
                     |ui| {
-                        ui.set_width(column_width);
-                        for (row_index, entry_index) in column_entries.iter().enumerate() {
-                            if render_discover_tile(ui, text_ui, &entries[*entry_index]) {
-                                opened_entry = Some(entries[*entry_index].clone());
+                        ui.set_width(layout.column_width);
+                        let mut visible_started = false;
+                        let mut skipped_height = 0.0;
+                        let mut rendered_bottom = 0.0;
+
+                        for item in &column.items {
+                            let item_bottom = item.offset_y + item.height;
+                            if item_bottom < visible_top {
+                                skipped_height = item_bottom + DISCOVER_CARD_GAP;
+                                continue;
                             }
-                            if row_index + 1 < column_entries.len() {
-                                ui.add_space(DISCOVER_CARD_GAP);
+                            if item.offset_y > visible_bottom {
+                                break;
+                            }
+                            if !visible_started {
+                                if skipped_height > 0.0 {
+                                    ui.add_space(skipped_height);
+                                }
+                                visible_started = true;
+                            }
+                            let tile_result = render_discover_tile(
+                                ui,
+                                text_ui,
+                                &entries[item.entry_index],
+                                metrics,
+                            );
+                            let height_cache_key = discover_tile_height_cache_key(
+                                entries[item.entry_index].dedupe_key.as_str(),
+                                layout.column_width,
+                            );
+                            let previous = tile_height_cache
+                                .insert(height_cache_key, tile_result.measured_height);
+                            if previous.is_none_or(|height| {
+                                (height - tile_result.measured_height).abs() > 0.5
+                            }) {
+                                *tile_height_cache_revision =
+                                    tile_height_cache_revision.saturating_add(1);
+                            }
+                            if tile_result.clicked {
+                                opened_entry = Some(entries[item.entry_index].clone());
+                            }
+                            rendered_bottom = item_bottom + DISCOVER_CARD_GAP;
+                            ui.add_space(DISCOVER_CARD_GAP);
+                        }
+
+                        if !visible_started {
+                            if column.total_height > 0.0 {
+                                ui.add_space(column.total_height);
+                            }
+                        } else {
+                            let trailing_height = (column.total_height - rendered_bottom).max(0.0);
+                            if trailing_height > 0.0 {
+                                ui.add_space(trailing_height);
                             }
                         }
                     },
@@ -1027,7 +1149,104 @@ fn render_masonry_tiles(
     opened_entry
 }
 
-fn render_discover_tile(ui: &mut Ui, text_ui: &mut TextUi, entry: &DiscoverEntry) -> bool {
+fn build_discover_masonry_layout(
+    ui: &Ui,
+    entries: &[DiscoverEntry],
+    tile_height_cache: &HashMap<(String, u32), f32>,
+    tile_height_cache_revision: u64,
+    masonry_layout_cache: &mut Option<CachedDiscoverMasonryLayout>,
+    metrics: DiscoverUiMetrics,
+) -> DiscoverMasonryLayout {
+    let content_width = ui.available_width().max(metrics.card_min_width);
+    let (column_count, column_width) =
+        responsive_columns(content_width, metrics.card_min_width, DISCOVER_CARD_GAP, 4);
+    let width_bucket = (column_width / 16.0).round().max(1.0) as u32;
+    let entries_fingerprint = discover_entries_fingerprint(entries, width_bucket);
+    if let Some(cached) = masonry_layout_cache.as_ref()
+        && cached.width_bucket == width_bucket
+        && cached.entries_fingerprint == entries_fingerprint
+        && cached.height_cache_revision == tile_height_cache_revision
+    {
+        return cached.layout.clone();
+    }
+    let mut columns = (0..column_count)
+        .map(|_| DiscoverMasonryColumn {
+            items: Vec::new(),
+            total_height: 0.0,
+        })
+        .collect::<Vec<_>>();
+
+    for (index, entry) in entries.iter().enumerate() {
+        let estimated_height = tile_height_cache
+            .get(&discover_tile_height_cache_key(
+                entry.dedupe_key.as_str(),
+                column_width,
+            ))
+            .copied()
+            .unwrap_or_else(|| discover_tile_estimated_height(entry, column_width, metrics));
+        let target_column = columns
+            .iter()
+            .enumerate()
+            .min_by(|(_, left), (_, right)| left.total_height.total_cmp(&right.total_height))
+            .map(|(index, _)| index)
+            .unwrap_or(0);
+        let offset_y = columns[target_column].total_height;
+        columns[target_column].items.push(DiscoverMasonryItem {
+            entry_index: index,
+            offset_y,
+            height: estimated_height,
+        });
+        columns[target_column].total_height += estimated_height + DISCOVER_CARD_GAP;
+    }
+
+    let layout = DiscoverMasonryLayout {
+        columns,
+        content_width,
+        column_width,
+    };
+    *masonry_layout_cache = Some(CachedDiscoverMasonryLayout {
+        width_bucket,
+        entries_fingerprint,
+        height_cache_revision: tile_height_cache_revision,
+        layout: layout.clone(),
+    });
+    layout
+}
+
+fn discover_tile_estimated_height(
+    entry: &DiscoverEntry,
+    column_width: f32,
+    metrics: DiscoverUiMetrics,
+) -> f32 {
+    let summary_lines = (entry.summary.len() as f32 / (column_width / 5.8).max(32.0))
+        .ceil()
+        .clamp(2.0, 6.0);
+    metrics.estimated_card_base_height + (summary_lines * 18.0)
+}
+
+fn discover_tile_height_cache_key(dedupe_key: &str, column_width: f32) -> (String, u32) {
+    (
+        dedupe_key.to_owned(),
+        (column_width / 16.0).round().max(1.0) as u32,
+    )
+}
+
+fn discover_entries_fingerprint(entries: &[DiscoverEntry], width_bucket: u32) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    width_bucket.hash(&mut hasher);
+    entries.len().hash(&mut hasher);
+    for entry in entries {
+        entry.dedupe_key.hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+fn render_discover_tile(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    entry: &DiscoverEntry,
+    metrics: DiscoverUiMetrics,
+) -> DiscoverTileRenderResult {
     let heading_style = LabelOptions {
         font_size: 20.0,
         line_height: 24.0,
@@ -1052,7 +1271,7 @@ fn render_discover_tile(ui: &mut Ui, text_ui: &mut TextUi, entry: &DiscoverEntry
                 remote_tiled_image::show(
                     ui,
                     icon_url,
-                    egui::vec2(ui.available_width(), DISCOVER_CARD_IMAGE_HEIGHT),
+                    egui::vec2(ui.available_width(), metrics.card_image_height),
                     ("discover_tile_image", entry.dedupe_key.as_str()),
                     assets::DISCOVER_SVG,
                 );
@@ -1062,10 +1281,7 @@ fn render_discover_tile(ui: &mut Ui, text_ui: &mut TextUi, entry: &DiscoverEntry
                         format!("bytes://discover/placeholder/{}", entry.dedupe_key),
                         assets::DISCOVER_SVG.to_vec(),
                     )
-                    .fit_to_exact_size(egui::vec2(
-                        ui.available_width(),
-                        DISCOVER_CARD_IMAGE_HEIGHT,
-                    )),
+                    .fit_to_exact_size(egui::vec2(ui.available_width(), metrics.card_image_height)),
                 );
             }
 
@@ -1151,7 +1367,16 @@ fn render_discover_tile(ui: &mut Ui, text_ui: &mut TextUi, entry: &DiscoverEntry
         ui.make_persistent_id(("discover_tile_click", entry.dedupe_key.as_str())),
         egui::Sense::click(),
     );
-    interaction.clicked() && !response.inner
+    DiscoverTileRenderResult {
+        clicked: interaction.clicked() && !response.inner,
+        measured_height: response.response.rect.height(),
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DiscoverTileRenderResult {
+    clicked: bool,
+    measured_height: f32,
 }
 
 fn ensure_search_channel(state: &mut DiscoverState) {
@@ -1210,6 +1435,29 @@ fn request_search(state: &mut DiscoverState, show_cached_status: bool, mode: Sea
     });
 }
 
+fn trim_discover_search_cache(state: &mut DiscoverState) {
+    if state.cached_snapshots.len() <= DISCOVER_SEARCH_CACHE_MAX_ENTRIES {
+        return;
+    }
+    let active_request = current_request(state, SearchMode::Replace);
+    state.cached_snapshots.retain(|request, _| {
+        request == &active_request || request.page > state.page.saturating_sub(2)
+    });
+    if state.cached_snapshots.len() <= DISCOVER_SEARCH_CACHE_MAX_ENTRIES {
+        return;
+    }
+    let mut requests = state.cached_snapshots.keys().cloned().collect::<Vec<_>>();
+    requests.sort_by_key(|request| request.page);
+    for request in requests {
+        if state.cached_snapshots.len() <= DISCOVER_SEARCH_CACHE_MAX_ENTRIES {
+            break;
+        }
+        if request != active_request {
+            state.cached_snapshots.remove(&request);
+        }
+    }
+}
+
 fn poll_search_results(state: &mut DiscoverState) {
     let Some(rx) = state.search_results_rx.as_ref().cloned() else {
         return;
@@ -1244,6 +1492,7 @@ fn poll_search_results(state: &mut DiscoverState) {
                         };
                         apply_search_snapshot(state, &result.request, snapshot.clone(), mode);
                         state.cached_snapshots.insert(result.request, snapshot);
+                        trim_discover_search_cache(state);
                         state.status_message =
                             Some(format!("Showing {} modpacks.", state.entries.len()));
                     }
@@ -1838,6 +2087,19 @@ fn apply_search_snapshot(
     }
     state.warnings = snapshot.warnings;
     state.has_more_results = snapshot.has_more;
+    state.masonry_layout_cache = None;
+    retain_discover_tile_heights(state);
+}
+
+fn retain_discover_tile_heights(state: &mut DiscoverState) {
+    state.tile_height_cache.retain(|(dedupe_key, _), _| {
+        state
+            .entries
+            .iter()
+            .any(|entry| entry.dedupe_key.as_str() == dedupe_key.as_str())
+    });
+    state.tile_height_cache_revision = state.tile_height_cache_revision.saturating_add(1);
+    state.masonry_layout_cache = None;
 }
 
 fn open_detail_page(state: &mut DiscoverState, entry: &DiscoverEntry) {

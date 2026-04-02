@@ -23,8 +23,14 @@ mod skins;
 pub use content_browser::ContentBrowserState;
 pub use discover::{DiscoverInstallRequest, DiscoverInstallSource, DiscoverState};
 pub use home::HomePresenceSection;
+pub use home::purge_inactive_state as purge_inactive_home_state;
 pub use instance::InstancePresenceSection;
-pub use library::{render_global_overlays, request_delete_instance};
+pub use instance::purge_inactive_state as purge_inactive_instance_state;
+pub use library::{
+    purge_inactive_state as purge_inactive_library_state, render_global_overlays,
+    request_delete_instance,
+};
+pub use skins::purge_inactive_state as purge_inactive_skins_state;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppScreen {

@@ -1,3 +1,45 @@
+use egui::Ui;
+
+#[derive(Clone, Copy, Debug)]
+pub struct UiMetrics {
+    pub viewport_width: f32,
+    pub viewport_height: f32,
+    pub compact: bool,
+}
+
+impl UiMetrics {
+    pub fn from_ui(ui: &Ui, compact_threshold: f32) -> Self {
+        let viewport = ui.ctx().input(|i| i.content_rect());
+        Self {
+            viewport_width: viewport.width().max(1.0),
+            viewport_height: viewport.height().max(1.0),
+            compact: is_compact_width(viewport.width(), compact_threshold),
+        }
+    }
+
+    pub fn popup_width(self, min: f32, max: f32, margin: f32) -> f32 {
+        popup_width(self.viewport_width, min, max, margin)
+    }
+
+    pub fn scaled_width(self, fraction: f32, min: f32, max: f32) -> f32 {
+        (self.viewport_width * fraction).clamp(min, max)
+    }
+
+    pub fn scaled_height(self, fraction: f32, min: f32, max: f32) -> f32 {
+        (self.viewport_height * fraction).clamp(min, max)
+    }
+
+    pub fn columns(
+        self,
+        available_width: f32,
+        min_column_width: f32,
+        gap: f32,
+        max_columns: usize,
+    ) -> (usize, f32) {
+        responsive_columns(available_width, min_column_width, gap, max_columns)
+    }
+}
+
 pub fn is_compact_width(width: f32, threshold: f32) -> bool {
     width < threshold
 }

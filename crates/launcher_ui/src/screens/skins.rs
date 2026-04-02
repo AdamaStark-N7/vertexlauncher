@@ -33,6 +33,11 @@ const SKIN_PREVIEW_NEAR: f32 = 1.5;
 const SKIN_PREVIEW_ANISOTROPY_CLAMP: u16 = 16;
 const MOTION_BLUR_MIN_ANGULAR_SPAN: f32 = 0.015;
 
+pub fn purge_inactive_state(ctx: &egui::Context) {
+    let state_id = egui::Id::new("skins_screen_state");
+    ctx.data_mut(|data| data.insert_temp(state_id, SkinManagerState::default()));
+}
+
 pub fn render(
     ui: &mut Ui,
     text_ui: &mut TextUi,

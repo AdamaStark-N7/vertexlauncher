@@ -19,7 +19,9 @@ use instances::{
     record_instance_launch_usage, remove_instance_record,
 };
 use textui::{LabelOptions, TextUi};
-use ui_foundation::{DialogPreset, danger_button, dialog_options, secondary_button, show_dialog};
+use ui_foundation::{
+    DialogPreset, UiMetrics, danger_button, dialog_options, secondary_button, show_dialog,
+};
 
 use crate::app::tokio_runtime;
 use crate::{assets, console, desktop, install_activity, notification, ui::style};
@@ -30,13 +32,54 @@ use super::{
 };
 use crate::ui::instance_context_menu::{self, InstanceContextAction};
 
-const TILE_WIDTH: f32 = 300.0;
-const TILE_HEIGHT: f32 = 430.0;
-const TILE_THUMBNAIL_HEIGHT: f32 = 150.0;
-const TILE_NAME_SCROLL_HEIGHT: f32 = 58.0;
-const TILE_DESCRIPTION_SCROLL_HEIGHT: f32 = 96.0;
 const TILE_DELETE_BUTTON_HEIGHT: f32 = style::CONTROL_HEIGHT;
 const LIBRARY_RUNTIME_LAUNCH_TASK_KIND: &str = "library runtime launch";
+const LIBRARY_GRID_COMPACT_THRESHOLD: f32 = 760.0;
+const LIBRARY_THUMBNAIL_CACHE_MAX_BYTES: usize = 32 * 1024 * 1024;
+const LIBRARY_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
+
+#[derive(Clone, Copy, Debug)]
+struct LibraryTileMetrics {
+    tile_width: f32,
+    tile_height: f32,
+    thumbnail_height: f32,
+    centered_thumbnail_width: f32,
+    name_scroll_height: f32,
+    description_scroll_height: f32,
+}
+
+impl LibraryTileMetrics {
+    fn from_ui(ui: &Ui) -> (UiMetrics, usize, Self) {
+        let metrics = UiMetrics::from_ui(ui, LIBRARY_GRID_COMPACT_THRESHOLD);
+        let available_width = ui.available_width().max(1.0);
+        let gap = style::SPACE_XL;
+        let min_tile_width = if metrics.compact { 220.0 } else { 260.0 };
+        let max_columns = if metrics.compact { 2 } else { 4 };
+        let (columns, tile_width) =
+            metrics.columns(available_width, min_tile_width, gap, max_columns);
+        let thumbnail_height = (tile_width * 0.5).clamp(120.0, 170.0);
+        let tile_height = (thumbnail_height
+            + (tile_width * 0.56)
+            + style::CONTROL_HEIGHT_LG
+            + TILE_DELETE_BUTTON_HEIGHT
+            + style::SPACE_XL * 3.0)
+            .clamp(340.0, 470.0);
+        let name_scroll_height = (tile_height * 0.14).clamp(44.0, 72.0);
+        let description_scroll_height = (tile_height * 0.22).clamp(68.0, 120.0);
+        (
+            metrics,
+            columns,
+            Self {
+                tile_width,
+                tile_height,
+                thumbnail_height,
+                centered_thumbnail_width: (tile_width * 0.74).min(220.0),
+                name_scroll_height,
+                description_scroll_height,
+            },
+        )
+    }
+}
 
 #[derive(Debug, Default, Clone)]
 /// Actions emitted by the library screen for the app shell to process.
@@ -47,6 +90,12 @@ pub struct LibraryOutput {
 
 fn library_runtime_state_id() -> egui::Id {
     egui::Id::new("library_runtime_state")
+}
+
+pub fn purge_inactive_state(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        data.insert_temp(library_runtime_state_id(), LibraryRuntimeState::default())
+    });
 }
 
 /// Requests that the library delete-confirmation flow open for the given instance.
@@ -104,6 +153,8 @@ pub fn render(
         .ctx()
         .data_mut(|data| data.get_temp::<LibraryRuntimeState>(state_id))
         .unwrap_or_default();
+    state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
+    trim_library_thumbnail_cache(&mut state);
     let pending_launch_intent = peek_launch_intent(ui.ctx());
     poll_runtime_actions(&mut state, config, instances);
     poll_delete_instance_results(&mut state, instances);
@@ -131,218 +182,232 @@ pub fn render(
     }
 
     let tiles_height = ui.available_height().max(1.0);
+    let launch_identity = LibraryLaunchIdentity {
+        account: active_launch_auth
+            .map(|auth| auth.account_key.clone())
+            .or_else(|| {
+                active_username
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            }),
+        display_name: active_launch_auth
+            .map(|auth| auth.player_name.clone())
+            .or_else(|| {
+                active_username
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            }),
+        player_uuid: active_launch_auth.map(|auth| auth.player_uuid.clone()),
+        access_token: active_launch_auth.and_then(|auth| auth.access_token.clone()),
+        xuid: active_launch_auth.and_then(|auth| auth.xuid.clone()),
+        user_type: active_launch_auth.map(|auth| auth.user_type.clone()),
+    };
     egui::ScrollArea::both()
         .id_salt("library_instance_tiles_scroll")
         .auto_shrink([false, false])
         .max_height(tiles_height)
         .show(ui, |ui| {
+            let (_, column_count, tile_metrics) = LibraryTileMetrics::from_ui(ui);
             ui.add_space(style::SPACE_MD);
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_XL, style::SPACE_XL);
-                for instance in &instances.instances {
-                    let instance_root = instance_root_path(installations_root, instance);
-                    let instance_running = is_instance_running(instance_root.as_path());
-                    let launch_account = active_launch_auth
-                        .map(|auth| auth.account_key.clone())
-                        .or_else(|| {
-                            active_username
-                                .map(str::trim)
-                                .filter(|value| !value.is_empty())
-                                .map(str::to_owned)
-                        });
-                    let launch_display_name = active_launch_auth
-                        .map(|auth| auth.player_name.clone())
-                        .or_else(|| {
-                            active_username
-                                .map(str::trim)
-                                .filter(|value| !value.is_empty())
-                                .map(str::to_owned)
-                        });
-                    let launch_player_uuid =
-                        active_launch_auth.map(|auth| auth.player_uuid.clone());
-                    let launch_access_token =
-                        active_launch_auth.and_then(|auth| auth.access_token.clone());
-                    let launch_xuid = active_launch_auth.and_then(|auth| auth.xuid.clone());
-                    let launch_user_type = active_launch_auth.map(|auth| auth.user_type.clone());
-                    let runtime_running_for_active_account =
-                        launch_account.as_deref().is_some_and(|account| {
-                            is_instance_running_for_account(instance_root.as_path(), account)
-                        });
-                    let running_account_key = if runtime_running_for_active_account {
-                        launch_player_uuid
-                            .clone()
-                            .or_else(|| launch_account.clone())
-                            .map(|value| value.to_ascii_lowercase())
-                    } else {
-                        None
-                    };
-                    let running_avatar = running_account_key
-                        .as_deref()
-                        .and_then(|key| account_avatars_by_key.get(key))
-                        .map(Vec::as_slice);
-                    let instance_root_key = normalize_path_key(instance_root.as_path());
-                    let account_running_root = launch_account
-                        .as_deref()
-                        .and_then(running_instance_for_account);
-                    let launch_disabled_for_account = !runtime_running_for_active_account
-                        && account_running_root
-                            .as_deref()
-                            .is_some_and(|running_root| running_root != instance_root_key.as_str());
-                    let launch_disabled_for_missing_ownership =
-                        !runtime_running_for_active_account && !active_account_owns_minecraft;
-                    let launch_disabled =
-                        launch_disabled_for_account || launch_disabled_for_missing_ownership;
-                    let launch_in_flight = state.pending_launches.contains(instance.id.as_str());
-                    let install_in_flight =
-                        install_activity::is_instance_installing(instance.id.as_str());
-                    let delete_disabled = instance_running || launch_in_flight || install_in_flight;
-
-                    let action = render_instance_tile(
-                        ui,
-                        &mut state,
-                        text_ui,
-                        instance,
-                        runtime_running_for_active_account,
-                        launch_disabled,
-                        launch_in_flight,
-                        install_in_flight,
-                        launch_disabled_for_account,
-                        launch_disabled_for_missing_ownership,
-                        running_avatar,
-                        delete_disabled,
-                        selected_instance_id == Some(instance.id.as_str()),
-                    );
-                    if matches!(
-                        action,
-                        RuntimeAction::LaunchRequested | RuntimeAction::StopRequested
-                    ) {
-                        output.selected_instance_id = Some(instance.id.clone());
-                    }
-                    match action {
-                        RuntimeAction::None => {}
-                        RuntimeAction::StopRequested => {
-                            let stopped = launch_account.as_deref().is_some_and(|account| {
-                                stop_running_instance_for_account(instance_root.as_path(), account)
+            for row in instances.instances.chunks(column_count.max(1)) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_XL, style::SPACE_XL);
+                    for instance in row {
+                        let instance_root = instance_root_path(installations_root, instance);
+                        let instance_running = is_instance_running(instance_root.as_path());
+                        let runtime_running_for_active_account =
+                            launch_identity.account.as_deref().is_some_and(|account| {
+                                is_instance_running_for_account(instance_root.as_path(), account)
                             });
-                            state.status_by_instance.insert(
-                                instance.id.clone(),
-                                if stopped {
-                                    "Stopped instance runtime.".to_owned()
-                                } else {
-                                    "Instance runtime was not running for this account.".to_owned()
-                                },
-                            );
-                        }
-                        RuntimeAction::LaunchRequested => {
-                            let requested = request_runtime_launch(
-                                &mut state,
-                                instance,
-                                instance_root.clone(),
-                                config,
-                                launch_display_name.clone(),
-                                launch_player_uuid.clone(),
-                                launch_access_token.clone(),
-                                launch_xuid.clone(),
-                                launch_user_type.clone(),
-                                launch_account.clone(),
-                                None,
-                                None,
-                            );
-                            if !requested {
-                                state.status_by_instance.insert(
-                                    instance.id.clone(),
-                                    "Launch is already in progress.".to_owned(),
-                                );
-                            }
-                        }
-                        RuntimeAction::DeleteRequested => {
-                            state.delete_target_instance_id = Some(instance.id.clone());
-                            state.delete_error = None;
-                        }
-                        RuntimeAction::OpenFolderRequested => {
-                            if let Err(err) = desktop::open_in_file_manager(instance_root.as_path())
-                            {
-                                state.status_by_instance.insert(
-                                    instance.id.clone(),
-                                    format!("Failed to open folder: {err}"),
-                                );
-                            }
-                        }
-                        RuntimeAction::CopyCommandRequested => {
-                            copy_instance_launch_command(
-                                ui.ctx(),
-                                instance.id.as_str(),
-                                active_username,
-                                active_launch_auth,
-                            );
-                        }
-                        RuntimeAction::CopySteamOptionsRequested => {
-                            copy_instance_steam_launch_options(
-                                ui.ctx(),
-                                instance.id.as_str(),
-                                active_username,
-                                active_launch_auth,
-                            );
-                        }
-                        RuntimeAction::OpenInstanceRequested => {
-                            output.selected_instance_id = Some(instance.id.clone());
-                            output.requested_screen = Some(AppScreen::Instance);
-                        }
-                    }
-
-                    if let Some(intent) = pending_launch_intent
-                        .as_ref()
-                        .filter(|intent| intent.instance_id == instance.id)
-                        .filter(|intent| {
-                            state.last_handled_launch_intent_nonce != Some(intent.nonce)
-                        })
-                    {
-                        state.last_handled_launch_intent_nonce = Some(intent.nonce);
-                        output.selected_instance_id = Some(instance.id.clone());
-                        if install_in_flight {
-                            state.status_by_instance.insert(
-                                instance.id.clone(),
-                                "Wait for installation to finish before launching.".to_owned(),
-                            );
-                        } else if launch_disabled {
-                            state.status_by_instance.insert(
-                                instance.id.clone(),
-                                if launch_disabled_for_account {
-                                    "Selected account is already running another instance."
-                                        .to_owned()
-                                } else if launch_disabled_for_missing_ownership {
-                                    "Sign in with an account that owns Minecraft to launch."
-                                        .to_owned()
-                                } else {
-                                    "Launch is currently unavailable.".to_owned()
-                                },
-                            );
+                        let running_account_key = if runtime_running_for_active_account {
+                            launch_identity
+                                .player_uuid
+                                .clone()
+                                .or_else(|| launch_identity.account.clone())
+                                .map(|value| value.to_ascii_lowercase())
                         } else {
-                            let requested = request_runtime_launch(
-                                &mut state,
-                                instance,
-                                instance_root.clone(),
-                                config,
-                                launch_display_name.clone(),
-                                launch_player_uuid.clone(),
-                                launch_access_token.clone(),
-                                launch_xuid.clone(),
-                                launch_user_type.clone(),
-                                launch_account.clone(),
-                                intent.quick_play_singleplayer.clone(),
-                                intent.quick_play_multiplayer.clone(),
-                            );
-                            if !requested {
+                            None
+                        };
+                        let running_avatar = running_account_key
+                            .as_deref()
+                            .and_then(|key| account_avatars_by_key.get(key))
+                            .map(Vec::as_slice);
+                        let instance_root_key = normalize_path_key(instance_root.as_path());
+                        let account_running_root = launch_identity
+                            .account
+                            .as_deref()
+                            .and_then(running_instance_for_account);
+                        let launch_disabled_for_account = !runtime_running_for_active_account
+                            && account_running_root.as_deref().is_some_and(|running_root| {
+                                running_root != instance_root_key.as_str()
+                            });
+                        let launch_disabled_for_missing_ownership =
+                            !runtime_running_for_active_account && !active_account_owns_minecraft;
+                        let launch_disabled =
+                            launch_disabled_for_account || launch_disabled_for_missing_ownership;
+                        let launch_in_flight =
+                            state.pending_launches.contains(instance.id.as_str());
+                        let install_in_flight =
+                            install_activity::is_instance_installing(instance.id.as_str());
+                        let delete_disabled =
+                            instance_running || launch_in_flight || install_in_flight;
+
+                        let action = render_instance_tile(
+                            ui,
+                            &mut state,
+                            text_ui,
+                            instance,
+                            runtime_running_for_active_account,
+                            launch_disabled,
+                            launch_in_flight,
+                            install_in_flight,
+                            launch_disabled_for_account,
+                            launch_disabled_for_missing_ownership,
+                            running_avatar,
+                            delete_disabled,
+                            selected_instance_id == Some(instance.id.as_str()),
+                            tile_metrics,
+                        );
+                        if matches!(
+                            action,
+                            RuntimeAction::LaunchRequested | RuntimeAction::StopRequested
+                        ) {
+                            output.selected_instance_id = Some(instance.id.clone());
+                        }
+                        match action {
+                            RuntimeAction::None => {}
+                            RuntimeAction::StopRequested => {
+                                let stopped =
+                                    launch_identity.account.as_deref().is_some_and(|account| {
+                                        stop_running_instance_for_account(
+                                            instance_root.as_path(),
+                                            account,
+                                        )
+                                    });
                                 state.status_by_instance.insert(
                                     instance.id.clone(),
-                                    "Launch is already in progress.".to_owned(),
+                                    if stopped {
+                                        "Stopped instance runtime.".to_owned()
+                                    } else {
+                                        "Instance runtime was not running for this account."
+                                            .to_owned()
+                                    },
                                 );
+                            }
+                            RuntimeAction::LaunchRequested => {
+                                let requested = request_runtime_launch(
+                                    &mut state,
+                                    instance,
+                                    instance_root.clone(),
+                                    config,
+                                    launch_identity.display_name.clone(),
+                                    launch_identity.player_uuid.clone(),
+                                    launch_identity.access_token.clone(),
+                                    launch_identity.xuid.clone(),
+                                    launch_identity.user_type.clone(),
+                                    launch_identity.account.clone(),
+                                    None,
+                                    None,
+                                );
+                                if !requested {
+                                    state.status_by_instance.insert(
+                                        instance.id.clone(),
+                                        "Launch is already in progress.".to_owned(),
+                                    );
+                                }
+                            }
+                            RuntimeAction::DeleteRequested => {
+                                state.delete_target_instance_id = Some(instance.id.clone());
+                                state.delete_error = None;
+                            }
+                            RuntimeAction::OpenFolderRequested => {
+                                if let Err(err) =
+                                    desktop::open_in_file_manager(instance_root.as_path())
+                                {
+                                    state.status_by_instance.insert(
+                                        instance.id.clone(),
+                                        format!("Failed to open folder: {err}"),
+                                    );
+                                }
+                            }
+                            RuntimeAction::CopyCommandRequested => {
+                                copy_instance_launch_command(
+                                    ui.ctx(),
+                                    instance.id.as_str(),
+                                    active_username,
+                                    active_launch_auth,
+                                );
+                            }
+                            RuntimeAction::CopySteamOptionsRequested => {
+                                copy_instance_steam_launch_options(
+                                    ui.ctx(),
+                                    instance.id.as_str(),
+                                    active_username,
+                                    active_launch_auth,
+                                );
+                            }
+                            RuntimeAction::OpenInstanceRequested => {
+                                output.selected_instance_id = Some(instance.id.clone());
+                                output.requested_screen = Some(AppScreen::Instance);
+                            }
+                        }
+
+                        if let Some(intent) = pending_launch_intent
+                            .as_ref()
+                            .filter(|intent| intent.instance_id == instance.id)
+                            .filter(|intent| {
+                                state.last_handled_launch_intent_nonce != Some(intent.nonce)
+                            })
+                        {
+                            state.last_handled_launch_intent_nonce = Some(intent.nonce);
+                            output.selected_instance_id = Some(instance.id.clone());
+                            if install_in_flight {
+                                state.status_by_instance.insert(
+                                    instance.id.clone(),
+                                    "Wait for installation to finish before launching.".to_owned(),
+                                );
+                            } else if launch_disabled {
+                                state.status_by_instance.insert(
+                                    instance.id.clone(),
+                                    if launch_disabled_for_account {
+                                        "Selected account is already running another instance."
+                                            .to_owned()
+                                    } else if launch_disabled_for_missing_ownership {
+                                        "Sign in with an account that owns Minecraft to launch."
+                                            .to_owned()
+                                    } else {
+                                        "Launch is currently unavailable.".to_owned()
+                                    },
+                                );
+                            } else {
+                                let requested = request_runtime_launch(
+                                    &mut state,
+                                    instance,
+                                    instance_root.clone(),
+                                    config,
+                                    launch_identity.display_name.clone(),
+                                    launch_identity.player_uuid.clone(),
+                                    launch_identity.access_token.clone(),
+                                    launch_identity.xuid.clone(),
+                                    launch_identity.user_type.clone(),
+                                    launch_identity.account.clone(),
+                                    intent.quick_play_singleplayer.clone(),
+                                    intent.quick_play_multiplayer.clone(),
+                                );
+                                if !requested {
+                                    state.status_by_instance.insert(
+                                        instance.id.clone(),
+                                        "Launch is already in progress.".to_owned(),
+                                    );
+                                }
                             }
                         }
                     }
-                }
-            });
-            ui.add_space(style::SPACE_MD);
+                });
+                ui.add_space(style::SPACE_MD);
+            }
         });
     ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
     output
@@ -362,6 +427,7 @@ fn render_instance_tile(
     running_avatar_png: Option<&[u8]>,
     delete_disabled: bool,
     _selected: bool,
+    tile_metrics: LibraryTileMetrics,
 ) -> RuntimeAction {
     let tile_fill = ui.visuals().widgets.noninteractive.bg_fill;
     let tile_stroke = ui.visuals().widgets.noninteractive.bg_stroke;
@@ -376,13 +442,13 @@ fn render_instance_tile(
 
     let frame_response = frame
         .show(ui, |ui| {
-            ui.set_min_width(TILE_WIDTH);
-            ui.set_max_width(TILE_WIDTH);
-            ui.set_min_height(TILE_HEIGHT);
+            ui.set_min_width(tile_metrics.tile_width);
+            ui.set_max_width(tile_metrics.tile_width);
+            ui.set_min_height(tile_metrics.tile_height);
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
             ui.vertical(|ui| {
                 let tile_start_y = ui.cursor().min.y;
-                render_instance_thumbnail(ui, state, instance);
+                render_instance_thumbnail(ui, state, instance, tile_metrics);
 
                 let mut name_style = style::heading(ui, 22.0, 28.0);
                 name_style.wrap = true;
@@ -392,7 +458,7 @@ fn render_instance_tile(
                     text_ui,
                     instance.name.as_str(),
                     &name_style,
-                    TILE_NAME_SCROLL_HEIGHT,
+                    tile_metrics.name_scroll_height,
                 );
                 let detail_style = style::body(ui);
 
@@ -434,12 +500,12 @@ fn render_instance_tile(
                     text_ui,
                     description,
                     &description_style,
-                    TILE_DESCRIPTION_SCROLL_HEIGHT,
+                    tile_metrics.description_scroll_height,
                 );
 
                 let play_button_height = style::CONTROL_HEIGHT_LG;
                 let consumed_height = ui.cursor().min.y - tile_start_y;
-                let remaining_height = (TILE_HEIGHT
+                let remaining_height = (tile_metrics.tile_height
                     - consumed_height
                     - play_button_height
                     - style::SPACE_SM
@@ -979,10 +1045,18 @@ struct LibraryRuntimeState {
     delete_in_flight: bool,
     delete_results_tx: Option<mpsc::Sender<Result<InstanceRecord, String>>>,
     delete_results_rx: Option<Arc<Mutex<mpsc::Receiver<Result<InstanceRecord, String>>>>>,
+    thumbnail_cache_frame_index: u64,
     thumbnail_results_tx: Option<mpsc::Sender<(String, Option<Arc<[u8]>>)>>,
     thumbnail_results_rx: Option<Arc<Mutex<mpsc::Receiver<(String, Option<Arc<[u8]>>)>>>>,
-    thumbnail_cache: HashMap<String, Option<Arc<[u8]>>>,
+    thumbnail_cache: HashMap<String, ThumbnailCacheEntry>,
     thumbnail_in_flight: HashSet<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ThumbnailCacheEntry {
+    bytes: Option<Arc<[u8]>>,
+    approx_bytes: usize,
+    last_touched_frame: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -991,6 +1065,16 @@ struct PendingLaunchContext {
     instance_root_display: String,
     tab_user_key: Option<String>,
     tab_username: String,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LibraryLaunchIdentity {
+    account: Option<String>,
+    display_name: Option<String>,
+    player_uuid: Option<String>,
+    access_token: Option<String>,
+    xuid: Option<String>,
+    user_type: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1694,7 +1778,50 @@ fn poll_thumbnail_results(state: &mut LibraryRuntimeState) {
 
     for (key, bytes) in updates {
         state.thumbnail_in_flight.remove(key.as_str());
-        state.thumbnail_cache.insert(key, bytes);
+        state.thumbnail_cache.insert(
+            key,
+            ThumbnailCacheEntry {
+                approx_bytes: bytes.as_ref().map_or(0, |bytes| bytes.len()),
+                bytes,
+                last_touched_frame: state.thumbnail_cache_frame_index,
+            },
+        );
+    }
+    trim_library_thumbnail_cache(state);
+}
+
+fn trim_library_thumbnail_cache(state: &mut LibraryRuntimeState) {
+    let stale_before = state
+        .thumbnail_cache_frame_index
+        .saturating_sub(LIBRARY_THUMBNAIL_CACHE_STALE_FRAMES);
+    state.thumbnail_cache.retain(|key, entry| {
+        state.thumbnail_in_flight.contains(key.as_str()) || entry.last_touched_frame >= stale_before
+    });
+
+    let mut total_bytes = state
+        .thumbnail_cache
+        .values()
+        .map(|entry| entry.approx_bytes)
+        .sum::<usize>();
+    if total_bytes <= LIBRARY_THUMBNAIL_CACHE_MAX_BYTES {
+        return;
+    }
+
+    let mut eviction_order = state
+        .thumbnail_cache
+        .iter()
+        .filter(|(key, _)| !state.thumbnail_in_flight.contains(key.as_str()))
+        .map(|(key, entry)| (key.clone(), entry.last_touched_frame, entry.approx_bytes))
+        .collect::<Vec<_>>();
+    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
+
+    for (key, _, approx_bytes) in eviction_order {
+        if total_bytes <= LIBRARY_THUMBNAIL_CACHE_MAX_BYTES {
+            break;
+        }
+        if state.thumbnail_cache.remove(key.as_str()).is_some() {
+            total_bytes = total_bytes.saturating_sub(approx_bytes);
+        }
     }
 }
 
@@ -1702,10 +1829,14 @@ fn render_instance_thumbnail(
     ui: &mut Ui,
     state: &mut LibraryRuntimeState,
     instance: &InstanceRecord,
+    tile_metrics: LibraryTileMetrics,
 ) {
     let thumbnail_width = ui.available_width().max(120.0);
-    let thumbnail_size = egui::vec2(thumbnail_width, TILE_THUMBNAIL_HEIGHT);
-    let centered_thumbnail_size = egui::vec2(thumbnail_width.min(220.0), TILE_THUMBNAIL_HEIGHT);
+    let thumbnail_size = egui::vec2(thumbnail_width, tile_metrics.thumbnail_height);
+    let centered_thumbnail_size = egui::vec2(
+        thumbnail_width.min(tile_metrics.centered_thumbnail_width),
+        tile_metrics.thumbnail_height,
+    );
 
     let frame = egui::Frame::new()
         .fill(ui.visuals().widgets.inactive.bg_fill)
@@ -1720,25 +1851,29 @@ fn render_instance_thumbnail(
             .filter(|path| !path.as_os_str().is_empty())
         {
             let key = thumbnail_cache_key(instance.id.as_str(), path);
-            match state.thumbnail_cache.get(&key).cloned() {
-                Some(Some(bytes)) => {
-                    let uri = thumbnail_uri(instance.id.as_str(), path);
-                    let (rect, _) = ui.allocate_exact_size(thumbnail_size, egui::Sense::hover());
-                    let image_rect =
-                        egui::Rect::from_center_size(rect.center(), centered_thumbnail_size);
-                    ui.put(
-                        image_rect,
-                        egui::Image::from_bytes(uri, bytes)
-                            .fit_to_exact_size(centered_thumbnail_size),
-                    );
-                    return;
+            match state.thumbnail_cache.get_mut(&key) {
+                Some(entry) => {
+                    entry.last_touched_frame = state.thumbnail_cache_frame_index;
+                    if let Some(bytes) = entry.bytes.clone() {
+                        let uri = thumbnail_uri(instance.id.as_str(), path);
+                        let (rect, _) =
+                            ui.allocate_exact_size(thumbnail_size, egui::Sense::hover());
+                        let image_rect =
+                            egui::Rect::from_center_size(rect.center(), centered_thumbnail_size);
+                        ui.put(
+                            image_rect,
+                            egui::Image::from_bytes(uri, bytes)
+                                .fit_to_exact_size(centered_thumbnail_size),
+                        );
+                        return;
+                    }
                 }
-                Some(None) => {}
                 None => request_instance_thumbnail(state, instance.id.as_str(), path),
             }
         }
 
-        let placeholder_size = egui::vec2(42.0, 42.0);
+        let placeholder_dim = (tile_metrics.thumbnail_height * 0.28).clamp(32.0, 48.0);
+        let placeholder_size = egui::vec2(placeholder_dim, placeholder_dim);
         let placeholder = egui::Image::from_bytes(
             format!(
                 "bytes://library/instance-thumbnail-default/{}.svg",

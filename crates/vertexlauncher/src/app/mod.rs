@@ -57,6 +57,14 @@ mod webview_sign_in;
 
 pub use single_instance::{SingleInstanceError, acquire_single_instance};
 
+const DISCOVER_STATE_PURGE_DELAY: Duration = Duration::from_secs(4);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct ScreenPurgeTimer {
+    inactive_since: Option<Instant>,
+    purged: bool,
+}
+
 #[derive(Debug)]
 pub enum RunError {
     RuntimeBootstrap(launcher_runtime::RuntimeBootstrapError),
@@ -77,6 +85,40 @@ fn report_detached_task_failure(task_kind: &str, error: &launcher_runtime::TaskE
     );
 }
 
+fn is_discover_screen(screen: screens::AppScreen) -> bool {
+    matches!(
+        screen,
+        screens::AppScreen::Discover | screens::AppScreen::DiscoverDetail
+    )
+}
+
+fn update_screen_purge_timer(
+    ctx: &egui::Context,
+    timer: &mut ScreenPurgeTimer,
+    is_active: bool,
+    purge_delay: Duration,
+    purge: impl FnOnce(),
+) {
+    if is_active {
+        timer.inactive_since = None;
+        timer.purged = false;
+        return;
+    }
+
+    let inactive_since = timer.inactive_since.get_or_insert_with(Instant::now);
+    if timer.purged {
+        return;
+    }
+
+    let elapsed = inactive_since.elapsed();
+    if elapsed >= purge_delay {
+        purge();
+        timer.purged = true;
+    } else {
+        ctx.request_repaint_after(purge_delay - elapsed);
+    }
+}
+
 struct VertexApp {
     fonts: FontController,
     config: Config,
@@ -92,6 +134,12 @@ struct VertexApp {
     instance_store: InstanceStore,
     content_browser_state: screens::ContentBrowserState,
     discover_state: screens::DiscoverState,
+    home_purge_timer: ScreenPurgeTimer,
+    library_purge_timer: ScreenPurgeTimer,
+    instance_purge_timer: ScreenPurgeTimer,
+    discover_purge_timer: ScreenPurgeTimer,
+    content_browser_purge_timer: ScreenPurgeTimer,
+    skins_purge_timer: ScreenPurgeTimer,
     show_create_instance_modal: bool,
     create_instance_state: create_instance_modal::CreateInstanceState,
     show_import_instance_modal: bool,
@@ -242,6 +290,12 @@ impl VertexApp {
             instance_store,
             content_browser_state: screens::ContentBrowserState::default(),
             discover_state: screens::DiscoverState::default(),
+            home_purge_timer: ScreenPurgeTimer::default(),
+            library_purge_timer: ScreenPurgeTimer::default(),
+            instance_purge_timer: ScreenPurgeTimer::default(),
+            discover_purge_timer: ScreenPurgeTimer::default(),
+            content_browser_purge_timer: ScreenPurgeTimer::default(),
+            skins_purge_timer: ScreenPurgeTimer::default(),
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
             show_import_instance_modal: false,
@@ -678,6 +732,8 @@ impl VertexApp {
             self.active_screen = requested_screen;
         }
 
+        self.update_discover_lifecycle(ctx);
+
         if self.show_config_format_modal {
             match config_format_modal::render(
                 ctx,
@@ -815,6 +871,88 @@ impl VertexApp {
         );
 
         ui::top_bar::handle_window_resize(ctx);
+    }
+
+    fn update_discover_lifecycle(&mut self, ctx: &egui::Context) {
+        update_screen_purge_timer(
+            ctx,
+            &mut self.home_purge_timer,
+            self.active_screen == screens::AppScreen::Home,
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                screens::purge_inactive_home_state(ctx);
+                tracing::info!(
+                    target: "vertexlauncher/home",
+                    "Purged inactive home state after timeout."
+                );
+            },
+        );
+        update_screen_purge_timer(
+            ctx,
+            &mut self.library_purge_timer,
+            self.active_screen == screens::AppScreen::Library,
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                screens::purge_inactive_library_state(ctx);
+                tracing::info!(
+                    target: "vertexlauncher/library",
+                    "Purged inactive library state after timeout."
+                );
+            },
+        );
+        update_screen_purge_timer(
+            ctx,
+            &mut self.instance_purge_timer,
+            self.active_screen == screens::AppScreen::Instance,
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                screens::purge_inactive_instance_state(ctx, self.selected_instance_id.as_deref());
+                tracing::info!(
+                    target: "vertexlauncher/instance",
+                    selected_instance_id = self.selected_instance_id.as_deref().unwrap_or(""),
+                    "Purged inactive instance state after timeout."
+                );
+            },
+        );
+        update_screen_purge_timer(
+            ctx,
+            &mut self.discover_purge_timer,
+            is_discover_screen(self.active_screen),
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                self.discover_state.purge_inactive_state();
+                tracing::info!(
+                    target: "vertexlauncher/discover",
+                    "Purged inactive discover state after timeout."
+                );
+            },
+        );
+        update_screen_purge_timer(
+            ctx,
+            &mut self.content_browser_purge_timer,
+            self.active_screen == screens::AppScreen::ContentBrowser,
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                self.content_browser_state.purge_inactive_state();
+                tracing::info!(
+                    target: "vertexlauncher/content_browser",
+                    "Purged inactive content browser state after timeout."
+                );
+            },
+        );
+        update_screen_purge_timer(
+            ctx,
+            &mut self.skins_purge_timer,
+            self.active_screen == screens::AppScreen::Skins,
+            DISCOVER_STATE_PURGE_DELAY,
+            || {
+                screens::purge_inactive_skins_state(ctx);
+                tracing::info!(
+                    target: "vertexlauncher/skins",
+                    "Purged inactive skins state after timeout."
+                );
+            },
+        );
     }
 
     fn create_config_with_choice(&mut self, choice: ConfigFormat) {

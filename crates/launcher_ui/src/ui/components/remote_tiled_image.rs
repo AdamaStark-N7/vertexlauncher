@@ -10,11 +10,19 @@ use image::ImageFormat;
 use crate::app::tokio_runtime;
 
 const TILE_MAX_DIM: u32 = 4096;
+const REMOTE_IMAGE_MAX_BYTES: usize = 96 * 1024 * 1024;
+const REMOTE_IMAGE_STALE_FRAMES: u64 = 900;
 
 enum RemoteImageState {
     Loading,
-    Ready(TiledImage),
+    Ready(Arc<TiledImage>),
     Failed,
+}
+
+struct RemoteImageEntry {
+    state: RemoteImageState,
+    approx_bytes: usize,
+    last_touched_frame: u64,
 }
 
 struct TiledImage {
@@ -34,9 +42,10 @@ struct TileImage {
 
 #[derive(Default)]
 struct RemoteImageCache {
-    states: HashMap<String, RemoteImageState>,
-    tx: Option<mpsc::Sender<(String, Result<TiledImage, String>)>>,
-    rx: Option<Arc<Mutex<mpsc::Receiver<(String, Result<TiledImage, String>)>>>>,
+    states: HashMap<String, RemoteImageEntry>,
+    frame_index: u64,
+    tx: Option<mpsc::Sender<(String, Result<Arc<TiledImage>, String>)>>,
+    rx: Option<Arc<Mutex<mpsc::Receiver<(String, Result<Arc<TiledImage>, String>)>>>>,
 }
 
 fn cache() -> &'static Mutex<RemoteImageCache> {
@@ -48,7 +57,7 @@ fn ensure_channel(cache: &mut RemoteImageCache) {
     if cache.tx.is_some() && cache.rx.is_some() {
         return;
     }
-    let (tx, rx) = mpsc::channel::<(String, Result<TiledImage, String>)>();
+    let (tx, rx) = mpsc::channel::<(String, Result<Arc<TiledImage>, String>)>();
     cache.tx = Some(tx);
     cache.rx = Some(Arc::new(Mutex::new(rx)));
 }
@@ -91,7 +100,14 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
     for (url, result) in updates {
         match result {
             Ok(image) => {
-                cache.states.insert(url, RemoteImageState::Ready(image));
+                cache.states.insert(
+                    url,
+                    RemoteImageEntry {
+                        approx_bytes: tiled_image_bytes(image.as_ref()),
+                        last_touched_frame: cache.frame_index,
+                        state: RemoteImageState::Ready(image),
+                    },
+                );
             }
             Err(err) => {
                 tracing::warn!(
@@ -100,10 +116,20 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
                     error = %err,
                     "Remote image load failed."
                 );
-                cache.states.insert(url, RemoteImageState::Failed);
+                cache.states.insert(
+                    url,
+                    RemoteImageEntry {
+                        approx_bytes: 0,
+                        last_touched_frame: cache.frame_index,
+                        state: RemoteImageState::Failed,
+                    },
+                );
             }
         }
         did_update = true;
+    }
+    if did_update {
+        trim_remote_cache(cache);
     }
     did_update
 }
@@ -121,48 +147,58 @@ pub fn show(
         return;
     }
 
-    let mut render_ready: Option<TiledImage> = None;
+    let mut render_ready: Option<Arc<TiledImage>> = None;
     {
         let Ok(mut cache) = cache().lock() else {
             show_placeholder(ui, desired_size, id_source, placeholder_svg);
             return;
         };
+        cache.frame_index = cache.frame_index.saturating_add(1);
+        let frame_index = cache.frame_index;
+        trim_remote_cache(&mut cache);
         let mut request_follow_up_repaint = poll_updates(&mut cache);
 
-        match cache.states.get(normalized_url) {
-            Some(RemoteImageState::Ready(image)) => {
-                render_ready = Some(image.clone_for_render());
-            }
-            Some(RemoteImageState::Loading) => {
-                request_follow_up_repaint = true;
-            }
-            Some(RemoteImageState::Failed) => {
-                show_placeholder(ui, desired_size, id_source, placeholder_svg);
-                return;
-            }
-            None => {
-                ensure_channel(&mut cache);
-                let Some(tx) = cache.tx.as_ref().cloned() else {
+        if let Some(entry) = cache.states.get_mut(normalized_url) {
+            entry.last_touched_frame = frame_index;
+            match &entry.state {
+                RemoteImageState::Ready(image) => {
+                    render_ready = Some(Arc::clone(image));
+                }
+                RemoteImageState::Loading => {
+                    request_follow_up_repaint = true;
+                }
+                RemoteImageState::Failed => {
                     show_placeholder(ui, desired_size, id_source, placeholder_svg);
                     return;
-                };
-                cache
-                    .states
-                    .insert(normalized_url.to_owned(), RemoteImageState::Loading);
-                request_follow_up_repaint = true;
-                let url_owned = normalized_url.to_owned();
-                tokio_runtime::spawn_blocking_detached(move || {
-                    let result = fetch_and_tile_remote_image(url_owned.as_str());
-                    if let Err(err) = tx.send((url_owned.clone(), result)) {
-                        tracing::error!(
-                            target: "vertexlauncher/remote_image",
-                            url = %url_owned,
-                            error = %err,
-                            "Failed to deliver remote tiled image result."
-                        );
-                    }
-                });
+                }
             }
+        } else {
+            ensure_channel(&mut cache);
+            let Some(tx) = cache.tx.as_ref().cloned() else {
+                show_placeholder(ui, desired_size, id_source, placeholder_svg);
+                return;
+            };
+            cache.states.insert(
+                normalized_url.to_owned(),
+                RemoteImageEntry {
+                    state: RemoteImageState::Loading,
+                    approx_bytes: 0,
+                    last_touched_frame: frame_index,
+                },
+            );
+            request_follow_up_repaint = true;
+            let url_owned = normalized_url.to_owned();
+            tokio_runtime::spawn_blocking_detached(move || {
+                let result = fetch_and_tile_remote_image(url_owned.as_str());
+                if let Err(err) = tx.send((url_owned.clone(), result)) {
+                    tracing::error!(
+                        target: "vertexlauncher/remote_image",
+                        url = %url_owned,
+                        error = %err,
+                        "Failed to deliver remote tiled image result."
+                    );
+                }
+            });
         }
 
         if request_follow_up_repaint {
@@ -174,27 +210,6 @@ pub fn show(
         show_tiled(ui, &image, desired_size);
     } else {
         show_placeholder(ui, desired_size, id_source, placeholder_svg);
-    }
-}
-
-impl TiledImage {
-    fn clone_for_render(&self) -> Self {
-        Self {
-            width: self.width,
-            height: self.height,
-            tiles: self
-                .tiles
-                .iter()
-                .map(|tile| TileImage {
-                    x: tile.x,
-                    y: tile.y,
-                    width: tile.width,
-                    height: tile.height,
-                    uri: tile.uri.clone(),
-                    bytes: Arc::clone(&tile.bytes),
-                })
-                .collect(),
-        }
     }
 }
 
@@ -233,7 +248,7 @@ fn show_placeholder(
     );
 }
 
-fn fetch_and_tile_remote_image(url: &str) -> Result<TiledImage, String> {
+fn fetch_and_tile_remote_image(url: &str) -> Result<Arc<TiledImage>, String> {
     let response = ureq::get(url)
         .call()
         .map_err(|err| format!("failed to fetch remote icon {url}: {err}"))?;
@@ -281,9 +296,54 @@ fn fetch_and_tile_remote_image(url: &str) -> Result<TiledImage, String> {
         }
     }
 
-    Ok(TiledImage {
+    Ok(Arc::new(TiledImage {
         width,
         height,
         tiles,
-    })
+    }))
+}
+
+fn trim_remote_cache(cache: &mut RemoteImageCache) {
+    let stale_before = cache.frame_index.saturating_sub(REMOTE_IMAGE_STALE_FRAMES);
+    cache.states.retain(|_, entry| {
+        matches!(entry.state, RemoteImageState::Loading) || entry.last_touched_frame >= stale_before
+    });
+
+    let mut total_bytes = cache
+        .states
+        .values()
+        .map(|entry| entry.approx_bytes)
+        .sum::<usize>();
+    if total_bytes <= REMOTE_IMAGE_MAX_BYTES {
+        return;
+    }
+
+    let mut eviction_order = cache
+        .states
+        .iter()
+        .filter_map(|(key, entry)| match entry.state {
+            RemoteImageState::Ready(_) | RemoteImageState::Failed => {
+                Some((key.clone(), entry.last_touched_frame, entry.approx_bytes))
+            }
+            RemoteImageState::Loading => None,
+        })
+        .collect::<Vec<_>>();
+    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
+
+    for (key, _, approx_bytes) in eviction_order {
+        if total_bytes <= REMOTE_IMAGE_MAX_BYTES {
+            break;
+        }
+        if cache.states.remove(key.as_str()).is_some() {
+            total_bytes = total_bytes.saturating_sub(approx_bytes);
+        }
+    }
+}
+
+fn tiled_image_bytes(image: &TiledImage) -> usize {
+    image
+        .tiles
+        .iter()
+        .map(|tile| tile.bytes.len() + tile.uri.len())
+        .sum()
 }
