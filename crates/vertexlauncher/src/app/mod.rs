@@ -862,6 +862,18 @@ impl VertexApp {
             );
         }
 
+        if previous_active_screen == screens::AppScreen::Home
+            && self.active_screen != screens::AppScreen::Home
+        {
+            screens::purge_home_screenshot_state(ctx);
+        }
+        if previous_active_screen == screens::AppScreen::Instance
+            && (self.active_screen != screens::AppScreen::Instance
+                || self.selected_instance_id != previous_selected_instance_id)
+        {
+            screens::purge_instance_screenshot_state(ctx, previous_selected_instance_id.as_deref());
+        }
+
         self.discord_presence.update(
             &self.config,
             &self.instance_store,

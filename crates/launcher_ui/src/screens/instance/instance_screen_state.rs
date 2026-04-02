@@ -25,6 +25,7 @@ pub(super) enum MoveInstanceResult {
 use std::time::Instant;
 
 use crate::ui::components::lazy_image_bytes::LazyImageBytes;
+use crate::ui::components::virtual_masonry::CachedVirtualMasonryLayout;
 use config::Config;
 use content_resolver::{InstalledContentHashCache, InstalledContentKind, ResolvedInstalledContent};
 use installation::{
@@ -181,6 +182,8 @@ pub(super) struct InstanceScreenState {
     pub(super) screenshot_scan_results_rx:
         Option<Arc<Mutex<mpsc::Receiver<(u64, Vec<InstanceScreenshotEntry>)>>>>,
     pub(super) screenshot_images: LazyImageBytes,
+    pub(super) screenshot_layout_revision: u64,
+    pub(super) screenshot_masonry_layout_cache: Option<CachedVirtualMasonryLayout>,
     pub(super) screenshot_viewer: Option<InstanceScreenshotViewerState>,
     pub(super) pending_delete_screenshot_key: Option<String>,
     pub(super) delete_screenshot_in_flight: bool,
@@ -350,6 +353,8 @@ impl InstanceScreenState {
             screenshot_scan_results_tx: None,
             screenshot_scan_results_rx: None,
             screenshot_images: LazyImageBytes::default(),
+            screenshot_layout_revision: 0,
+            screenshot_masonry_layout_cache: None,
             screenshot_viewer: None,
             pending_delete_screenshot_key: None,
             delete_screenshot_in_flight: false,
@@ -419,6 +424,26 @@ impl InstanceScreenState {
         self.installed_content_entry_ui_cache.clear();
     }
 
+    pub(super) fn mark_screenshot_layout_dirty(&mut self) {
+        self.screenshot_layout_revision = self.screenshot_layout_revision.saturating_add(1);
+        self.screenshot_masonry_layout_cache = None;
+    }
+
+    pub(super) fn purge_screenshot_state(&mut self) {
+        self.screenshots.clear();
+        self.last_screenshot_scan_at = None;
+        self.screenshot_scan_in_flight = false;
+        self.screenshot_scan_results_tx = None;
+        self.screenshot_scan_results_rx = None;
+        self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_viewer = None;
+        self.pending_delete_screenshot_key = None;
+        self.delete_screenshot_in_flight = false;
+        self.delete_screenshot_results_tx = None;
+        self.delete_screenshot_results_rx = None;
+        self.mark_screenshot_layout_dirty();
+    }
+
     pub(super) fn purge_heavy_state(&mut self) {
         self.status_message = None;
         self.selected_content_tab = InstalledContentKind::Mods;
@@ -472,6 +497,8 @@ impl InstanceScreenState {
         self.screenshot_scan_results_tx = None;
         self.screenshot_scan_results_rx = None;
         self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_layout_revision = 0;
+        self.screenshot_masonry_layout_cache = None;
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;

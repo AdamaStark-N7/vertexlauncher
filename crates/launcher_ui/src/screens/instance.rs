@@ -50,6 +50,7 @@ use crate::ui::{
         icon_button,
         lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
         remote_tiled_image, settings_widgets,
+        virtual_masonry::{build_virtual_masonry_layout, render_virtualized_masonry},
     },
     modal, style,
 };
@@ -101,12 +102,12 @@ const INSTANCE_TABS_HEIGHT: f32 = 38.0;
 const INSTANCE_SCREENSHOT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const INSTANCE_LOG_SCAN_INTERVAL: Duration = Duration::from_secs(3);
 const INSTANCE_SCREENSHOT_TILE_GAP: f32 = 10.0;
-const INSTANCE_SCREENSHOT_PRELOAD_VIEWPORTS: f32 = 0.75;
 const INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
 const INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
 const INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.12;
 const INSTANCE_SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY: f32 = 0.0015;
-const MAX_INSTANCE_SCREENSHOTS: usize = 120;
+const INSTANCE_SCREENSHOT_OVERSCAN: f32 = 420.0;
+const INSTANCE_SCREENSHOT_MIN_COLUMN_WIDTH: f32 = 180.0;
 const MAX_INSTANCE_LOG_LINES: usize = 12_000;
 const INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
 
@@ -168,6 +169,20 @@ pub fn purge_inactive_state(ctx: &egui::Context, selected_instance_id: Option<&s
             return;
         };
         state.purge_heavy_state();
+        data.insert_temp(state_id, state);
+    });
+}
+
+pub fn purge_screenshot_state(ctx: &egui::Context, selected_instance_id: Option<&str>) {
+    let Some(instance_id) = selected_instance_id else {
+        return;
+    };
+    let state_id = instance_screen_state_id(instance_id);
+    ctx.data_mut(|data| {
+        let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
+            return;
+        };
+        state.purge_screenshot_state();
         data.insert_temp(state_id, state);
     });
 }
@@ -304,6 +319,7 @@ pub fn render(
         .ctx()
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
+    let previous_tab = state.active_tab;
     state.screenshot_images.begin_frame();
 
     poll_background_tasks(&mut state, config, instances, instance_id);
@@ -439,6 +455,11 @@ pub fn render(
     );
     ui.add_space(10.0);
     render_instance_tab_row(ui, text_ui, &mut state.active_tab);
+    if previous_tab == InstanceScreenTab::ScreenshotGallery
+        && state.active_tab != InstanceScreenTab::ScreenshotGallery
+    {
+        state.purge_screenshot_state();
+    }
     ui.add_space(12.0);
 
     match state.active_tab {
@@ -584,50 +605,49 @@ fn render_instance_screenshot_gallery(
         return;
     }
 
-    let available_width = ui.available_width().max(1.0);
-    let column_count: usize = if available_width >= 980.0 {
-        3
-    } else if available_width >= 620.0 {
-        2
-    } else {
-        1
-    };
-    let column_width = ((available_width
-        - INSTANCE_SCREENSHOT_TILE_GAP * (column_count.saturating_sub(1) as f32))
-        / column_count as f32)
-        .max(180.0);
-    let assignments =
-        build_instance_screenshot_mosaic(&state.screenshots, column_count, column_width);
+    let layout = build_virtual_masonry_layout(
+        ui,
+        INSTANCE_SCREENSHOT_MIN_COLUMN_WIDTH,
+        INSTANCE_SCREENSHOT_TILE_GAP,
+        3,
+        state.screenshots.len(),
+        state.screenshot_layout_revision,
+        &mut state.screenshot_masonry_layout_cache,
+        |index, column_width| {
+            instance_screenshot_tile_height(&state.screenshots[index], column_width)
+        },
+    );
 
     let mut open_key = None;
     let mut delete_key = None;
+    let screenshots = &state.screenshots;
+    let screenshot_images = &mut state.screenshot_images;
     egui::ScrollArea::vertical()
         .id_salt("instance_screenshot_gallery_scroll")
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.columns(column_count, |columns| {
-                for (column_ui, items) in columns.iter_mut().zip(assignments.iter()) {
-                    column_ui.spacing_mut().item_spacing.y = INSTANCE_SCREENSHOT_TILE_GAP;
-                    let preload_rect = instance_screenshot_preload_rect(column_ui);
-                    for &(index, tile_height) in items {
-                        let screenshot = state.screenshots[index].clone();
-                        let action = render_instance_screenshot_tile(
-                            column_ui,
-                            &mut state.screenshot_images,
-                            &screenshot,
-                            tile_height,
-                            preload_rect,
-                            retained_image_keys,
-                        );
-                        if action.open_viewer {
-                            open_key = Some(screenshot_key(screenshot.path.as_path()));
-                        }
-                        if action.request_delete {
-                            delete_key = Some(screenshot_key(screenshot.path.as_path()));
-                        }
+        .show_viewport(ui, |ui, viewport| {
+            render_virtualized_masonry(
+                ui,
+                &layout,
+                INSTANCE_SCREENSHOT_TILE_GAP,
+                viewport,
+                INSTANCE_SCREENSHOT_OVERSCAN,
+                |column_ui, index, tile_height| {
+                    let action = render_instance_screenshot_tile(
+                        column_ui,
+                        screenshot_images,
+                        &screenshots[index],
+                        tile_height,
+                        retained_image_keys,
+                    );
+                    if action.open_viewer {
+                        open_key = Some(screenshot_key(screenshots[index].path.as_path()));
                     }
-                }
-            });
+                    if action.request_delete {
+                        delete_key = Some(screenshot_key(screenshots[index].path.as_path()));
+                    }
+                },
+            );
         });
 
     if let Some(screenshot_key) = open_key {
@@ -642,34 +662,7 @@ fn render_instance_screenshot_gallery(
     }
 }
 
-fn build_instance_screenshot_mosaic(
-    screenshots: &[InstanceScreenshotEntry],
-    column_count: usize,
-    column_width: f32,
-) -> Vec<Vec<(usize, f32)>> {
-    let mut assignments = vec![Vec::new(); column_count];
-    let mut heights = vec![0.0; column_count];
-    for (index, screenshot) in screenshots.iter().enumerate() {
-        let tile_height = instance_screenshot_tile_height(screenshot, column_width, index);
-        let column_index = heights
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| {
-                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        assignments[column_index].push((index, tile_height));
-        heights[column_index] += tile_height + INSTANCE_SCREENSHOT_TILE_GAP;
-    }
-    assignments
-}
-
-fn instance_screenshot_tile_height(
-    screenshot: &InstanceScreenshotEntry,
-    column_width: f32,
-    _index: usize,
-) -> f32 {
+fn instance_screenshot_tile_height(screenshot: &InstanceScreenshotEntry, column_width: f32) -> f32 {
     column_width / screenshot_aspect_ratio(screenshot).max(0.01)
 }
 
@@ -678,7 +671,6 @@ fn render_instance_screenshot_tile(
     screenshot_images: &mut LazyImageBytes,
     screenshot: &InstanceScreenshotEntry,
     tile_height: f32,
-    preload_rect: egui::Rect,
     retained_image_keys: &mut HashSet<String>,
 ) -> InstanceScreenshotTileAction {
     let width = ui.available_width().max(1.0);
@@ -693,13 +685,8 @@ fn render_instance_screenshot_tile(
         egui::Sense::click(),
     );
     let image_key = screenshot_uri(screenshot.path.as_path(), screenshot.modified_at_ms);
-    let should_preload = rects_overlap(rect, preload_rect);
-    let image_status = if should_preload {
-        retained_image_keys.insert(image_key.clone());
-        screenshot_images.request(image_key.clone(), screenshot.path.clone())
-    } else {
-        screenshot_images.status(image_key.as_str())
-    };
+    retained_image_keys.insert(image_key.clone());
+    let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     if let Some(bytes) = image_bytes.as_ref() {
         egui::Image::from_bytes(image_key, Arc::clone(bytes))
@@ -786,22 +773,6 @@ fn render_instance_screenshot_tile(
     action
 }
 
-fn instance_screenshot_preload_rect(ui: &Ui) -> egui::Rect {
-    let clip_rect = ui.clip_rect();
-    let margin = (clip_rect.height() * INSTANCE_SCREENSHOT_PRELOAD_VIEWPORTS).max(220.0);
-    egui::Rect::from_min_max(
-        egui::pos2(clip_rect.min.x, clip_rect.min.y - margin),
-        egui::pos2(clip_rect.max.x, clip_rect.max.y + margin),
-    )
-}
-
-fn rects_overlap(left: egui::Rect, right: egui::Rect) -> bool {
-    left.min.x <= right.max.x
-        && left.max.x >= right.min.x
-        && left.min.y <= right.max.y
-        && left.max.y >= right.min.y
-}
-
 fn ui_pointer_over_rect(ui: &Ui, rect: egui::Rect) -> bool {
     ui.input(|input| {
         input
@@ -851,7 +822,6 @@ fn retain_instance_viewer_image(
         .screenshots
         .iter()
         .find(|entry| screenshot_key(entry.path.as_path()) == viewer_key)
-        .cloned()
     else {
         return;
     };
@@ -1548,6 +1518,7 @@ fn poll_instance_screenshot_scan_results(state: &mut InstanceScreenState) {
                     continue;
                 }
                 state.screenshots = screenshots;
+                state.mark_screenshot_layout_dirty();
                 state.last_screenshot_scan_at = Some(Instant::now());
                 state.screenshot_scan_in_flight = false;
             }
@@ -1730,7 +1701,6 @@ fn collect_instance_screenshots(instance_root: &Path) -> Vec<InstanceScreenshotE
             .cmp(&a.modified_at_ms.unwrap_or(0))
             .then_with(|| a.file_name.cmp(&b.file_name))
     });
-    screenshots.truncate(MAX_INSTANCE_SCREENSHOTS);
     screenshots
 }
 

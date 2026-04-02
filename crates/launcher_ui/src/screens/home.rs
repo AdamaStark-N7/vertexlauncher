@@ -19,8 +19,8 @@ use textui::{
     truncate_single_line_text_with_ellipsis_preserving_whitespace as truncate_for_width,
 };
 use ui_foundation::{
-    DialogPreset, UiMetrics, danger_button, dialog_options, fill_tab_row, responsive_columns,
-    secondary_button, show_dialog,
+    DialogPreset, UiMetrics, danger_button, dialog_options, fill_tab_row, secondary_button,
+    show_dialog,
 };
 
 use crate::{
@@ -30,7 +30,13 @@ use crate::{
         build_quick_launch_steam_options, selected_quick_launch_user,
     },
     ui::{
-        components::lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
+        components::{
+            lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
+            virtual_masonry::{
+                CachedVirtualMasonryLayout, build_virtual_masonry_layout,
+                render_virtualized_masonry,
+            },
+        },
         context_menu::{self, ContextMenuItem, ContextMenuRequest},
         instance_context_menu::{self, InstanceContextAction},
         style,
@@ -50,11 +56,11 @@ const FAVORITE_STAR_ICON_SIZE: f32 = 14.0;
 const SCREENSHOT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const SCREENSHOT_PAGE_SIZE: usize = 30;
 const SCREENSHOT_TILE_GAP: f32 = 10.0;
-const SCREENSHOT_PRELOAD_VIEWPORTS: f32 = 0.75;
 const SCREENSHOT_VIEWER_MIN_ZOOM: f32 = 1.0;
 const SCREENSHOT_VIEWER_MAX_ZOOM: f32 = 8.0;
 const SCREENSHOT_VIEWER_ZOOM_STEP: f32 = 0.12;
 const SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY: f32 = 0.0015;
+const HOME_SCREENSHOT_OVERSCAN: f32 = 420.0;
 const HOME_THUMBNAIL_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
 const HOME_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
 
@@ -149,6 +155,8 @@ struct HomeState {
     screenshot_loaded_count: usize,
     latest_requested_screenshot_scan_id: u64,
     screenshot_images: LazyImageBytes,
+    screenshot_layout_revision: u64,
+    screenshot_masonry_layout_cache: Option<CachedVirtualMasonryLayout>,
     thumbnail_cache_frame_index: u64,
     instance_thumbnail_results_tx: Option<mpsc::Sender<(String, Option<Arc<[u8]>>)>>,
     instance_thumbnail_results_rx: Option<Arc<Mutex<mpsc::Receiver<(String, Option<Arc<[u8]>>)>>>>,
@@ -283,6 +291,34 @@ impl ScreenshotEntry {
     }
 }
 
+impl HomeState {
+    fn mark_screenshot_layout_dirty(&mut self) {
+        self.screenshot_layout_revision = self.screenshot_layout_revision.saturating_add(1);
+        self.screenshot_masonry_layout_cache = None;
+    }
+
+    fn purge_screenshot_state(&mut self) {
+        self.latest_requested_screenshot_scan_id =
+            self.latest_requested_screenshot_scan_id.saturating_add(1);
+        self.screenshots.clear();
+        self.last_screenshot_scan_at = None;
+        self.scanned_screenshot_instance_count = 0;
+        self.screenshot_scan_pending = false;
+        self.screenshot_scan_ready = false;
+        self.screenshot_tasks_total = 0;
+        self.screenshot_tasks_done = 0;
+        self.screenshot_candidates.clear();
+        self.screenshot_loaded_count = 0;
+        self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_viewer = None;
+        self.pending_delete_screenshot_key = None;
+        self.delete_screenshot_in_flight = false;
+        self.delete_screenshot_results_tx = None;
+        self.delete_screenshot_results_rx = None;
+        self.mark_screenshot_layout_dirty();
+    }
+}
+
 #[derive(Debug, Clone)]
 struct ScreenshotViewerState {
     screenshot_key: String,
@@ -396,6 +432,16 @@ fn home_state_id() -> egui::Id {
 
 pub fn purge_inactive_state(ctx: &egui::Context) {
     ctx.data_mut(|data| data.insert_temp(home_state_id(), HomeState::default()));
+}
+
+pub fn purge_screenshot_state(ctx: &egui::Context) {
+    ctx.data_mut(|data| {
+        let Some(mut state) = data.get_temp::<HomeState>(home_state_id()) else {
+            return;
+        };
+        state.purge_screenshot_state();
+        data.insert_temp(home_state_id(), state);
+    });
 }
 
 fn home_activity_results() -> &'static Mutex<HomeActivityResultChannel> {
@@ -547,6 +593,7 @@ fn poll_screenshot_results(state: &mut HomeState) {
                 .cmp(&a.modified_at_ms.unwrap_or(0))
                 .then_with(|| a.file_name.cmp(&b.file_name))
         });
+        state.mark_screenshot_layout_dirty();
     }
 }
 
@@ -808,6 +855,7 @@ pub fn render(
         .ctx()
         .data_mut(|data| data.get_temp::<HomeState>(state_id))
         .unwrap_or_default();
+    let previous_tab = state.active_tab;
     ui.ctx().request_repaint_after(Duration::from_millis(250));
     state.screenshot_images.begin_frame();
     state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
@@ -815,6 +863,9 @@ pub fn render(
     let screenshot_images_updated = state.screenshot_images.poll();
 
     render_home_tab_row(ui, text_ui, &mut state.active_tab, metrics);
+    if previous_tab == HomeTab::Screenshots && state.active_tab != HomeTab::Screenshots {
+        state.purge_screenshot_state();
+    }
     ui.add_space(14.0);
 
     match state.active_tab {
@@ -988,59 +1039,57 @@ fn render_screenshot_gallery(
         return;
     }
 
-    let available_width = ui.available_width().max(1.0);
-    let (column_count, column_width) = responsive_columns(
-        available_width,
+    let layout = build_virtual_masonry_layout(
+        ui,
         metrics.screenshot_min_column_width,
         SCREENSHOT_TILE_GAP,
         3,
+        state.screenshots.len(),
+        state.screenshot_layout_revision,
+        &mut state.screenshot_masonry_layout_cache,
+        |index, column_width| screenshot_tile_height(&state.screenshots[index], column_width),
     );
-    let assignments = screenshot_mosaic_assignments(&state.screenshots, column_count, column_width);
 
     let mut open_screenshot_key = None;
     let mut delete_screenshot_key = None;
-    let scroll_output = egui::ScrollArea::vertical()
+    let mut should_load_more = false;
+    egui::ScrollArea::vertical()
         .id_salt("home_screenshots_scroll")
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, viewport| {
             ui.add_space(style::SPACE_SM);
             let screenshots = &state.screenshots;
             let screenshot_images = &mut state.screenshot_images;
-            ui.columns(column_count, |columns| {
-                for (column_ui, items) in columns.iter_mut().zip(assignments.iter()) {
-                    column_ui.spacing_mut().item_spacing.y = SCREENSHOT_TILE_GAP;
-                    let preload_rect = screenshot_preload_rect(column_ui);
-                    for &(index, tile_height) in items {
-                        let action = render_screenshot_tile(
-                            column_ui,
-                            screenshot_images,
-                            &screenshots[index],
-                            tile_height,
-                            preload_rect,
-                            retained_image_keys,
-                            metrics,
-                        );
-                        if action.open_viewer {
-                            open_screenshot_key = Some(screenshots[index].key());
-                        }
-                        if action.request_delete {
-                            delete_screenshot_key = Some(screenshots[index].key());
-                        }
+            render_virtualized_masonry(
+                ui,
+                &layout,
+                SCREENSHOT_TILE_GAP,
+                viewport,
+                HOME_SCREENSHOT_OVERSCAN,
+                |column_ui, index, tile_height| {
+                    let action = render_screenshot_tile(
+                        column_ui,
+                        screenshot_images,
+                        &screenshots[index],
+                        tile_height,
+                        retained_image_keys,
+                        metrics,
+                    );
+                    if action.open_viewer {
+                        open_screenshot_key = Some(screenshots[index].key());
                     }
-                }
-            });
+                    if action.request_delete {
+                        delete_screenshot_key = Some(screenshots[index].key());
+                    }
+                },
+            );
+            should_load_more = state.screenshot_loaded_count < state.screenshot_candidates.len()
+                && viewport.bottom() >= ui.min_rect().bottom() - viewport.height().max(320.0);
         });
 
-    // Trigger next page when the user scrolls near the bottom.
-    let has_more = state.screenshot_loaded_count < state.screenshot_candidates.len();
-    if has_more {
-        let visible_height = scroll_output.inner_rect.height();
-        let near_bottom = scroll_output.state.offset.y + visible_height
-            >= scroll_output.content_size.y - visible_height;
-        if near_bottom {
-            let request_id = state.latest_requested_screenshot_scan_id;
-            spawn_screenshot_load_page(state, request_id, SCREENSHOT_PAGE_SIZE);
-        }
+    if should_load_more {
+        let request_id = state.latest_requested_screenshot_scan_id;
+        spawn_screenshot_load_page(state, request_id, SCREENSHOT_PAGE_SIZE);
     }
 
     if let Some(screenshot_key) = open_screenshot_key {
@@ -1055,30 +1104,7 @@ fn render_screenshot_gallery(
     }
 }
 
-fn screenshot_mosaic_assignments(
-    screenshots: &[ScreenshotEntry],
-    column_count: usize,
-    column_width: f32,
-) -> Vec<Vec<(usize, f32)>> {
-    let mut assignments = vec![Vec::new(); column_count];
-    let mut column_heights = vec![0.0; column_count];
-    for (index, screenshot) in screenshots.iter().enumerate() {
-        let tile_height = screenshot_tile_height(screenshot, column_width, index);
-        let column_index = column_heights
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| {
-                left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal)
-            })
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        assignments[column_index].push((index, tile_height));
-        column_heights[column_index] += tile_height + SCREENSHOT_TILE_GAP;
-    }
-    assignments
-}
-
-fn screenshot_tile_height(screenshot: &ScreenshotEntry, column_width: f32, _index: usize) -> f32 {
+fn screenshot_tile_height(screenshot: &ScreenshotEntry, column_width: f32) -> f32 {
     column_width / screenshot.aspect_ratio().max(0.01)
 }
 
@@ -1087,7 +1113,6 @@ fn render_screenshot_tile(
     screenshot_images: &mut LazyImageBytes,
     screenshot: &ScreenshotEntry,
     tile_height: f32,
-    preload_rect: egui::Rect,
     retained_image_keys: &mut HashSet<String>,
     metrics: HomeUiMetrics,
 ) -> ScreenshotTileAction {
@@ -1100,13 +1125,8 @@ fn render_screenshot_tile(
         egui::Sense::click(),
     );
     let image_key = screenshot.uri();
-    let should_preload = rect_intersects(rect, preload_rect);
-    let image_status = if should_preload {
-        retained_image_keys.insert(image_key.clone());
-        screenshot_images.request(image_key.clone(), screenshot.path.clone())
-    } else {
-        screenshot_images.status(image_key.as_str())
-    };
+    retained_image_keys.insert(image_key.clone());
+    let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     if let Some(bytes) = image_bytes.as_ref() {
         egui::Image::from_bytes(image_key, Arc::clone(bytes))
@@ -1188,22 +1208,6 @@ fn render_screenshot_tile(
     ));
     action.open_viewer = image_response.clicked() && !overlay_clicked;
     action
-}
-
-fn screenshot_preload_rect(ui: &Ui) -> egui::Rect {
-    let clip_rect = ui.clip_rect();
-    let margin = (clip_rect.height() * SCREENSHOT_PRELOAD_VIEWPORTS).max(220.0);
-    egui::Rect::from_min_max(
-        egui::pos2(clip_rect.min.x, clip_rect.min.y - margin),
-        egui::pos2(clip_rect.max.x, clip_rect.max.y + margin),
-    )
-}
-
-fn rect_intersects(left: egui::Rect, right: egui::Rect) -> bool {
-    left.min.x <= right.max.x
-        && left.max.x >= right.min.x
-        && left.min.y <= right.max.y
-        && left.max.y >= right.min.y
 }
 
 fn ui_pointer_over_rect(ui: &Ui, rect: egui::Rect) -> bool {
@@ -3238,6 +3242,9 @@ fn refresh_screenshot_state(
     state.screenshot_tasks_total = 0;
     state.screenshot_tasks_done = 0;
     state.screenshots.clear();
+    state.screenshot_viewer = None;
+    state.pending_delete_screenshot_key = None;
+    state.mark_screenshot_layout_dirty();
 
     // Directory listing reads only file names and mtimes — no file content.
     // Doing it synchronously avoids a full frame of latency before dimension
