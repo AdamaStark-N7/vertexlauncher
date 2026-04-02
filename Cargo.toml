@@ -10,6 +10,7 @@ members = [
     "crates/installation",
     "crates/managed_content",
     "crates/modal_host",
+    "crates/ui_foundation",
     "crates/instances",
     "crates/launcher_runtime",
     "crates/launcher_ui",
@@ -63,6 +64,7 @@ launcher_runtime = { path = "crates/launcher_runtime" }
 launcher_ui = { path = "crates/launcher_ui" }
 managed_content = { path = "crates/managed_content" }
 modal_host = { path = "crates/modal_host" }
+ui_foundation = { path = "crates/ui_foundation" }
 modrinth = { path = "crates/modrinth" }
 modprovider = { path = "crates/modprovider" }
 fontloader = { path = "crates/fontloader" }

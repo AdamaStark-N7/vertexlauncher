@@ -8,7 +8,8 @@ use curseforge::{Client as CurseForgeClient, MINECRAFT_GAME_ID};
 use egui::Ui;
 use installation::{MinecraftVersionEntry, fetch_version_catalog};
 use modrinth::Client as ModrinthClient;
-use textui::{LabelOptions, TextUi};
+use textui::{InputOptions, LabelOptions, TextUi};
+use ui_foundation::{responsive_columns, themed_text_input};
 
 use crate::{
     app::tokio_runtime,
@@ -432,10 +433,16 @@ fn render_discover_browse_content(
             let old_loader_filter = state.loader_filter;
             let old_sort_mode = state.sort_mode;
             let old_game_version_filter = state.game_version_filter.clone();
-            let search_response = ui.add_sized(
-                egui::vec2(ui.available_width(), style::CONTROL_HEIGHT),
-                egui::TextEdit::singleline(&mut state.query_input)
-                    .hint_text("Search modpacks and press Enter"),
+            let search_response = themed_text_input(
+                text_ui,
+                ui,
+                "discover_search_input",
+                &mut state.query_input,
+                InputOptions {
+                    desired_width: Some(ui.available_width()),
+                    placeholder_text: Some("Search modpacks and press Enter".to_owned()),
+                    ..InputOptions::default()
+                },
             );
             let mut search_submitted = false;
             let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -457,71 +464,97 @@ fn render_discover_browse_content(
             }
             ui.add_space(style::SPACE_SM);
 
-            let dropdown_width =
-                ((ui.available_width() - (DISCOVER_CARD_GAP * 3.0)) / 4.0).max(120.0);
-            ui.horizontal(|ui| {
+            let (filter_columns, dropdown_width) =
+                responsive_columns(ui.available_width(), 180.0, DISCOVER_CARD_GAP, 4);
+            let selected_game_version = selected_game_version_label(
+                state.game_version_filter.as_str(),
+                &state.available_game_versions,
+            );
+            let mut render_filter_row = |ui: &mut Ui, row: usize| {
                 ui.spacing_mut().item_spacing.x = DISCOVER_CARD_GAP;
-                sized_combo_box(
-                    ui,
-                    "discover_provider_filter",
-                    dropdown_width,
-                    state.provider_filter.label(),
-                    |ui| {
-                        for provider in DiscoverProviderFilter::ALL {
-                            ui.selectable_value(
-                                &mut state.provider_filter,
-                                provider,
-                                provider.label(),
-                            );
-                        }
-                    },
-                );
-                sized_combo_box(
-                    ui,
-                    "discover_loader_filter",
-                    dropdown_width,
-                    state.loader_filter.label(),
-                    |ui| {
-                        for loader in DiscoverLoaderFilter::ALL {
-                            ui.selectable_value(&mut state.loader_filter, loader, loader.label());
-                        }
-                    },
-                );
-                sized_combo_box(
-                    ui,
-                    "discover_sort_mode",
-                    dropdown_width,
-                    state.sort_mode.label(),
-                    |ui| {
-                        for sort_mode in DiscoverSortMode::ALL {
-                            ui.selectable_value(&mut state.sort_mode, sort_mode, sort_mode.label());
-                        }
-                    },
-                );
-                let selected_game_version = selected_game_version_label(
-                    state.game_version_filter.as_str(),
-                    &state.available_game_versions,
-                );
-                sized_combo_box(
-                    ui,
-                    "discover_game_version",
-                    dropdown_width,
-                    selected_game_version.as_str(),
-                    |ui| {
-                        ui.selectable_value(
-                            &mut state.game_version_filter,
-                            String::new(),
-                            "Any version",
-                        );
-                        for version in &state.available_game_versions {
+                let provider_index = row * filter_columns;
+                if provider_index == 0 {
+                    sized_combo_box(
+                        ui,
+                        "discover_provider_filter",
+                        dropdown_width,
+                        state.provider_filter.label(),
+                        |ui| {
+                            for provider in DiscoverProviderFilter::ALL {
+                                ui.selectable_value(
+                                    &mut state.provider_filter,
+                                    provider,
+                                    provider.label(),
+                                );
+                            }
+                        },
+                    );
+                }
+                if provider_index <= 1 && 1 < (row + 1) * filter_columns {
+                    sized_combo_box(
+                        ui,
+                        "discover_loader_filter",
+                        dropdown_width,
+                        state.loader_filter.label(),
+                        |ui| {
+                            for loader in DiscoverLoaderFilter::ALL {
+                                ui.selectable_value(
+                                    &mut state.loader_filter,
+                                    loader,
+                                    loader.label(),
+                                );
+                            }
+                        },
+                    );
+                }
+                if provider_index <= 2 && 2 < (row + 1) * filter_columns {
+                    sized_combo_box(
+                        ui,
+                        "discover_sort_mode",
+                        dropdown_width,
+                        state.sort_mode.label(),
+                        |ui| {
+                            for sort_mode in DiscoverSortMode::ALL {
+                                ui.selectable_value(
+                                    &mut state.sort_mode,
+                                    sort_mode,
+                                    sort_mode.label(),
+                                );
+                            }
+                        },
+                    );
+                }
+                if provider_index <= 3 && 3 < (row + 1) * filter_columns {
+                    sized_combo_box(
+                        ui,
+                        "discover_game_version",
+                        dropdown_width,
+                        selected_game_version.as_str(),
+                        |ui| {
                             ui.selectable_value(
                                 &mut state.game_version_filter,
-                                version.id.clone(),
-                                version.display_label(),
+                                String::new(),
+                                "Any version",
                             );
-                        }
-                    },
-                );
+                            for version in &state.available_game_versions {
+                                ui.selectable_value(
+                                    &mut state.game_version_filter,
+                                    version.id.clone(),
+                                    version.display_label(),
+                                );
+                            }
+                        },
+                    );
+                }
+            };
+            let filter_rows = 4_usize.div_ceil(filter_columns);
+            ui.vertical(|ui| {
+                for row in 0..filter_rows {
+                    ui.horizontal(|ui| render_filter_row(ui, row));
+                    if row + 1 < filter_rows {
+                        ui.add_space(DISCOVER_CARD_GAP);
+                    }
+                }
             });
             let filters_changed = state.provider_filter != old_provider_filter
                 || state.loader_filter != old_loader_filter
@@ -886,12 +919,26 @@ fn render_discover_detail_content(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
                                             let install_enabled = !state.install_in_flight;
-                                            let response = ui.add_enabled(
-                                                install_enabled,
-                                                egui::Button::new("Create Instance").min_size(
-                                                    egui::vec2(action_width, style::CONTROL_HEIGHT),
-                                                ),
-                                            );
+                                            let response = ui
+                                                .add_enabled_ui(install_enabled, |ui| {
+                                                    text_ui.button(
+                                                        ui,
+                                                        (
+                                                            "discover_create_instance",
+                                                            entry.dedupe_key.as_str(),
+                                                            version.version_id.as_str(),
+                                                        ),
+                                                        "Create Instance",
+                                                        &style::neutral_button_with_min_size(
+                                                            ui,
+                                                            egui::vec2(
+                                                                action_width,
+                                                                style::CONTROL_HEIGHT,
+                                                            ),
+                                                        ),
+                                                    )
+                                                })
+                                                .inner;
                                             if response.clicked()
                                                 && let Some(request) =
                                                     build_install_request(&entry, version)

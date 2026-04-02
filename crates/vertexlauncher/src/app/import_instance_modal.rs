@@ -14,10 +14,7 @@ use instances::{
     instance_root_path,
 };
 use launcher_runtime as tokio_runtime;
-use launcher_ui::{
-    ui::style,
-    ui::{components::settings_widgets, modal},
-};
+use launcher_ui::{ui::components::settings_widgets, ui::style};
 use managed_content::{
     CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, InstalledContentProject,
     ManagedContentSource, ModpackInstallState, load_content_manifest, load_modpack_install_state,
@@ -26,7 +23,8 @@ use managed_content::{
 use modrinth::Client as ModrinthClient;
 use serde::Deserialize;
 use serde_json::Value;
-use textui::{ButtonOptions, LabelOptions, TextUi};
+use textui::{LabelOptions, TextUi};
+use ui_foundation::{DialogPreset, dialog_options, primary_button, secondary_button, show_dialog};
 use vtmpack::{VtmpackDownloadableEntry, VtmpackManifest, read_vtmpack_manifest};
 
 const MODAL_GAP_SM: f32 = 6.0;
@@ -430,39 +428,13 @@ pub fn render(
 ) -> ModalAction {
     poll_preview_results(state);
     let mut action = ModalAction::None;
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_max_width = (viewport_rect.width() * 0.85).max(1.0);
-    let modal_max_height = (viewport_rect.height() * 0.82).max(1.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_max_width * 0.5).clamp(
-            viewport_rect.left(),
-            viewport_rect.right() - modal_max_width,
-        ),
-        (viewport_rect.center().y - modal_max_height * 0.5).clamp(
-            viewport_rect.top(),
-            viewport_rect.bottom() - modal_max_height,
-        ),
-    );
-
-    modal::show_scrim(ctx, "import_instance_modal_scrim", viewport_rect);
     if state.preview_in_flight || state.import_in_flight {
         ctx.request_repaint_after(std::time::Duration::from_millis(100));
     }
-    egui::Window::new("Import Profile")
-        .id(egui::Id::new("import_instance_modal_window"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_max_width, modal_max_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(true)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("import_instance_modal_window", DialogPreset::Form),
+        |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(MODAL_GAP_MD, MODAL_GAP_MD);
             let text_color = ui.visuals().text_color();
             let heading_style = LabelOptions {
@@ -500,7 +472,9 @@ pub fn render(
                 ui,
                 "instance_import_mode",
                 "Import source",
-                Some("Choose whether to import from a pack manifest or an existing launcher instance folder."),
+                Some(
+                    "Choose whether to import from a pack manifest or an existing launcher instance folder.",
+                ),
                 &mut state.source_mode_index,
                 &ImportMode::options(),
             );
@@ -563,7 +537,9 @@ pub fn render(
                     let highlight_curseforge_notice = !curseforge_api_key_configured
                         && (matches!(
                             state.preview.as_ref().map(|preview| preview.kind),
-                            Some(ImportPreviewKind::Manifest(ImportPackageKind::CurseForgePack))
+                            Some(ImportPreviewKind::Manifest(
+                                ImportPackageKind::CurseForgePack
+                            ))
                         ) || state
                             .package_path
                             .as_os_str()
@@ -595,7 +571,9 @@ pub fn render(
                         ui,
                         "instance_import_launcher_kind",
                         "Launcher",
-                        Some("Use Auto-detect unless you know which launcher produced the instance."),
+                        Some(
+                            "Use Auto-detect unless you know which launcher produced the instance.",
+                        ),
                         &mut state.launcher_kind_index,
                         &LAUNCHER_KIND_OPTIONS,
                     );
@@ -604,7 +582,9 @@ pub fn render(
                         ui,
                         "instance_import_launcher_path",
                         "Instance folder",
-                        Some("Choose the instance directory from Modrinth, CurseForge, Prism, ATLauncher, or another launcher."),
+                        Some(
+                            "Choose the instance directory from Modrinth, CurseForge, Prism, ATLauncher, or another launcher.",
+                        ),
                         &mut launcher_path_input,
                     );
                     if update_path_from_input(&mut state.launcher_path, &launcher_path_input)
@@ -730,8 +710,9 @@ pub fn render(
                 let progress = state.import_latest_progress.as_ref();
                 let progress_fraction = progress
                     .and_then(|progress| {
-                        (progress.total_steps > 0)
-                            .then_some(progress.completed_steps as f32 / progress.total_steps as f32)
+                        (progress.total_steps > 0).then_some(
+                            progress.completed_steps as f32 / progress.total_steps as f32,
+                        )
                     })
                     .unwrap_or(0.0)
                     .clamp(0.0, 1.0);
@@ -771,19 +752,14 @@ pub fn render(
 
             ui.add_space(MODAL_GAP_LG);
             ui.horizontal(|ui| {
-                let button_style = ButtonOptions {
-                    min_size: egui::vec2(160.0, style::CONTROL_HEIGHT),
-                    text_color: ui.visuals().text_color(),
-                    fill: ui.visuals().widgets.inactive.bg_fill,
-                    fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                    fill_active: ui.visuals().widgets.active.bg_fill,
-                    fill_selected: ui.visuals().selection.bg_fill,
-                    stroke: ui.visuals().widgets.inactive.bg_stroke,
-                    ..ButtonOptions::default()
-                };
                 if ui
                     .add_enabled_ui(!state.import_in_flight, |ui| {
-                        text_ui.button(ui, "instance_import_cancel", "Cancel", &button_style)
+                        text_ui.button(
+                            ui,
+                            "instance_import_cancel",
+                            "Cancel",
+                            &secondary_button(ui, egui::vec2(160.0, style::CONTROL_HEIGHT)),
+                        )
                     })
                     .inner
                     .clicked()
@@ -791,17 +767,18 @@ pub fn render(
                     action = ModalAction::Cancel;
                 }
 
-                let import_disabled = state.import_in_flight || match selected_import_mode(state) {
-                    ImportMode::ManifestFile => state.package_path.as_os_str().is_empty(),
-                    ImportMode::LauncherDirectory => state.launcher_path.as_os_str().is_empty(),
-                };
+                let import_disabled = state.import_in_flight
+                    || match selected_import_mode(state) {
+                        ImportMode::ManifestFile => state.package_path.as_os_str().is_empty(),
+                        ImportMode::LauncherDirectory => state.launcher_path.as_os_str().is_empty(),
+                    };
                 if ui
                     .add_enabled_ui(!import_disabled, |ui| {
                         text_ui.button(
                             ui,
                             "instance_import_confirm",
                             "Import profile",
-                            &button_style,
+                            &primary_button(ui, egui::vec2(160.0, style::CONTROL_HEIGHT)),
                         )
                     })
                     .inner
@@ -818,12 +795,10 @@ pub fn render(
                                 ImportMode::ManifestFile => {
                                     ImportSource::ManifestFile(state.package_path.clone())
                                 }
-                                ImportMode::LauncherDirectory => {
-                                    ImportSource::LauncherDirectory {
-                                        path: state.launcher_path.clone(),
-                                        launcher: selected_launcher_hint(state),
-                                    }
-                                }
+                                ImportMode::LauncherDirectory => ImportSource::LauncherDirectory {
+                                    path: state.launcher_path.clone(),
+                                    launcher: selected_launcher_hint(state),
+                                },
                             },
                             instance_name,
                             manual_curseforge_files: HashMap::new(),
@@ -833,7 +808,12 @@ pub fn render(
                     }
                 }
             });
-        });
+        },
+    );
+
+    if response.close_requested && !state.import_in_flight && matches!(action, ModalAction::None) {
+        action = ModalAction::Cancel;
+    }
 
     action
 }

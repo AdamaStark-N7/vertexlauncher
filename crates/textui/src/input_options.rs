@@ -21,6 +21,8 @@ pub struct InputOptions {
     pub min_width: f32,
     pub desired_width: Option<f32>,
     pub desired_rows: usize,
+    pub placeholder_text: Option<String>,
+    pub placeholder_color: Option<Color32>,
 }
 
 impl Default for InputOptions {
@@ -44,6 +46,8 @@ impl Default for InputOptions {
             min_width: 64.0,
             desired_width: None,
             desired_rows: 5,
+            placeholder_text: None,
+            placeholder_color: None,
         }
     }
 }

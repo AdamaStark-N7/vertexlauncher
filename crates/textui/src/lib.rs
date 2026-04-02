@@ -1629,6 +1629,41 @@ impl TextUi {
             .rect_stroke(rect, corner_radius, frame_stroke, egui::StrokeKind::Inside);
 
         paint_texture(ui, &texture, content_rect);
+        if !has_focus
+            && text.is_empty()
+            && let Some(placeholder_text) = options
+                .placeholder_text
+                .as_deref()
+                .filter(|placeholder| !placeholder.is_empty())
+        {
+            let placeholder_style = LabelOptions {
+                font_size: options.font_size,
+                line_height: options.line_height,
+                color: options
+                    .placeholder_color
+                    .unwrap_or_else(|| options.text_color.gamma_multiply(0.5)),
+                wrap: multiline,
+                monospace: options.monospace,
+                ..LabelOptions::default()
+            };
+            let placeholder = self.prepare_label_texture(
+                ui.ctx(),
+                id.with("placeholder"),
+                placeholder_text,
+                &placeholder_style,
+                multiline.then_some(content_rect.width()),
+            );
+            let y_offset = if multiline {
+                0.0
+            } else {
+                ((content_rect.height() - placeholder.size_points.y) * 0.5).max(0.0)
+            };
+            let placeholder_rect = Rect::from_min_size(
+                Pos2::new(content_rect.min.x, content_rect.min.y + y_offset),
+                placeholder.size_points.min(content_rect.size()),
+            );
+            placeholder.paint(ui, placeholder_rect);
+        }
 
         response
     }

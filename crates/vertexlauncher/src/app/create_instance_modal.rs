@@ -11,12 +11,10 @@ use installation::{
 use launcher_runtime as tokio_runtime;
 use launcher_ui::{
     assets,
-    ui::{
-        components::{icon_button, settings_widgets},
-        modal,
-    },
+    ui::components::{icon_button, settings_widgets},
 };
 use textui::{LabelOptions, TextUi};
+use ui_foundation::{DialogPreset, dialog_options, show_dialog};
 use url::Url;
 
 const MODLOADER_OPTIONS: [&str; 6] = ["Vanilla", "Fabric", "Forge", "NeoForge", "Quilt", "Custom"];
@@ -145,36 +143,10 @@ pub fn render(
     if state.version_catalog_in_flight || !state.modloader_versions_in_flight.is_empty() {
         ctx.request_repaint_after(Duration::from_millis(100));
     }
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_max_width = (viewport_rect.width() * 0.90).max(1.0);
-    let modal_max_height = (viewport_rect.height() * 0.90).max(1.0);
-    let modal_pos_x = (viewport_rect.center().x - modal_max_width * 0.5).clamp(
-        viewport_rect.left(),
-        viewport_rect.right() - modal_max_width,
-    );
-    let modal_pos_y = (viewport_rect.center().y - modal_max_height * 0.5).clamp(
-        viewport_rect.top(),
-        viewport_rect.bottom() - modal_max_height,
-    );
-    let modal_pos = egui::pos2(modal_pos_x, modal_pos_y);
-    let modal_size = egui::vec2(modal_max_width, modal_max_height);
-    modal::show_scrim(ctx, "create_instance_modal_scrim", viewport_rect);
-
-    egui::Window::new("Create Instance")
-        .id(egui::Id::new("create_instance_modal_window"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(modal_size)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(true)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("create_instance_modal_window", DialogPreset::Form),
+        |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(MODAL_GAP_MD, MODAL_GAP_MD);
             let text_color = ui.visuals().text_color();
             let heading_style = LabelOptions {
@@ -644,7 +616,13 @@ pub fn render(
                     }
                 }
             }
-        });
+        },
+    );
+
+    if response.close_requested && !state.create_in_flight && matches!(action, ModalAction::None) {
+        state.error = None;
+        action = ModalAction::Cancel;
+    }
 
     action
 }

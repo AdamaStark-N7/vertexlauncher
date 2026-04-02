@@ -18,6 +18,9 @@ use textui::{
     LabelOptions, TextUi,
     truncate_single_line_text_with_ellipsis_preserving_whitespace as truncate_for_width,
 };
+use ui_foundation::{
+    DialogPreset, danger_button, dialog_options, fill_tab_row, secondary_button, show_dialog,
+};
 
 use crate::{
     assets, desktop, install_activity, notification,
@@ -29,7 +32,7 @@ use crate::{
         components::lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
         context_menu::{self, ContextMenuItem, ContextMenuRequest},
         instance_context_menu::{self, InstanceContextAction},
-        modal, style,
+        style,
     },
 };
 
@@ -773,7 +776,7 @@ pub fn render(
     ui.ctx().request_repaint_after(Duration::from_millis(250));
     let screenshot_images_updated = state.screenshot_images.poll();
 
-    render_home_tab_row(ui, &mut state.active_tab);
+    render_home_tab_row(ui, text_ui, &mut state.active_tab);
     ui.add_space(14.0);
 
     match state.active_tab {
@@ -887,43 +890,22 @@ pub fn render(
     output
 }
 
-fn render_home_tab_row(ui: &mut Ui, active_tab: &mut HomeTab) {
-    let button_gap = style::SPACE_MD;
-    let tab_count = 2.0;
-    let button_width =
-        ((ui.available_width() - button_gap * (tab_count - 1.0)) / tab_count).max(0.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = button_gap;
-        for tab in [HomeTab::InstancesAndWorlds, HomeTab::Screenshots] {
-            let selected = *active_tab == tab;
-            let button =
-                egui::Button::new(egui::RichText::new(tab.label()).size(15.0).strong().color(
-                    if selected {
-                        ui.visuals().widgets.active.fg_stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                ))
-                .min_size(egui::vec2(button_width, HOME_TAB_HEIGHT))
-                .fill(if selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().widgets.inactive.bg_fill
-                })
-                .stroke(if selected {
-                    ui.visuals().selection.stroke
-                } else {
-                    ui.visuals().widgets.inactive.bg_stroke
-                })
-                .corner_radius(egui::CornerRadius::same(10));
-            if ui
-                .add_sized([button_width, HOME_TAB_HEIGHT], button)
-                .clicked()
-            {
-                *active_tab = tab;
-            }
-        }
-    });
+fn render_home_tab_row(ui: &mut Ui, text_ui: &mut TextUi, active_tab: &mut HomeTab) {
+    fill_tab_row(
+        text_ui,
+        ui,
+        "home_tab_row",
+        active_tab,
+        &[
+            (
+                HomeTab::InstancesAndWorlds,
+                HomeTab::InstancesAndWorlds.label(),
+            ),
+            (HomeTab::Screenshots, HomeTab::Screenshots.label()),
+        ],
+        HOME_TAB_HEIGHT,
+        style::SPACE_MD,
+    );
 }
 
 fn render_screenshot_gallery(
@@ -1275,35 +1257,13 @@ fn render_screenshot_viewer_modal(
         .request(image_key.clone(), screenshot.path.clone());
     let image_bytes = state.screenshot_images.bytes(image_key.as_str());
 
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_width = (viewport_rect.width() * 0.92).max(320.0);
-    let modal_height = (viewport_rect.height() * 0.9).max(280.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_width * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
-        (viewport_rect.center().y - modal_height * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
-    );
     let now_ms = current_time_millis();
     let mut close_requested = false;
     let mut delete_requested = false;
-    modal::show_scrim(ctx, "home_screenshot_viewer_scrim", viewport_rect);
-
-    egui::Window::new("Screenshot Viewer")
-        .id(egui::Id::new("home_screenshot_viewer_window"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_width, modal_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("home_screenshot_viewer_window", DialogPreset::Viewer),
+        |ui| {
             let title_style = style::heading(ui, 24.0, 28.0);
             let body_style = style::muted_single_line(ui);
 
@@ -1330,14 +1290,38 @@ fn render_screenshot_viewer_modal(
                     );
                 });
                 ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "home_screenshot_viewer_close",
+                            "Close",
+                            &secondary_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         close_requested = true;
                     }
-                    if ui.button("Delete").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "home_screenshot_viewer_delete",
+                            "Delete",
+                            &danger_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         delete_requested = true;
                     }
                     if ui
-                        .add_enabled(image_bytes.is_some(), egui::Button::new("Copy"))
+                        .add_enabled_ui(image_bytes.is_some(), |ui| {
+                            text_ui.button(
+                                ui,
+                                "home_screenshot_viewer_copy",
+                                "Copy",
+                                &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                            )
+                        })
+                        .inner
                         .clicked()
                         && let Some(bytes) = image_bytes.as_deref()
                     {
@@ -1347,15 +1331,39 @@ fn render_screenshot_viewer_modal(
                             bytes,
                         );
                     }
-                    if ui.button("Reset").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "home_screenshot_viewer_reset",
+                            "Reset",
+                            &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom = SCREENSHOT_VIEWER_MIN_ZOOM;
                         viewer_state.pan_uv = egui::Vec2::ZERO;
                     }
-                    if ui.button("+").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "home_screenshot_viewer_zoom_in",
+                            "+",
+                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom = adjust_viewer_zoom(viewer_state.zoom, 1.0);
                         clamp_viewer_pan(viewer_state);
                     }
-                    if ui.button("-").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "home_screenshot_viewer_zoom_out",
+                            "-",
+                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom = adjust_viewer_zoom(viewer_state.zoom, -1.0);
                         clamp_viewer_pan(viewer_state);
                     }
@@ -1422,7 +1430,9 @@ fn render_screenshot_viewer_modal(
                 ui.visuals().widgets.inactive.bg_stroke,
                 egui::StrokeKind::Inside,
             );
-        });
+        },
+    );
+    close_requested |= response.close_requested;
 
     if delete_requested {
         tracing::info!(
@@ -1447,36 +1457,15 @@ fn render_screenshot_viewer_loading_modal(
     text_ui: &mut TextUi,
     screenshot_key: &str,
 ) {
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_width = (viewport_rect.width() * 0.92).max(320.0);
-    let modal_height = (viewport_rect.height() * 0.9).max(280.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_width * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
-        (viewport_rect.center().y - modal_height * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
-    );
     let title = Path::new(screenshot_key)
         .file_name()
         .and_then(OsStr::to_str)
         .unwrap_or("Screenshot");
 
-    modal::show_scrim(ctx, "home_screenshot_viewer_scrim", viewport_rect);
-    egui::Window::new("Screenshot Viewer")
-        .id(egui::Id::new("home_screenshot_viewer_window"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_width, modal_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("home_screenshot_viewer_window", DialogPreset::Viewer),
+        |ui| {
             let title_style = style::heading(ui, 24.0, 28.0);
             let body_style = style::muted(ui);
             let _ = text_ui.label(
@@ -1506,7 +1495,9 @@ fn render_screenshot_viewer_loading_modal(
                 egui::TextStyle::Button.resolve(ui.style()),
                 ui.visuals().weak_text_color(),
             );
-        });
+        },
+    );
+    let _ = response;
 }
 
 fn render_delete_screenshot_modal(
@@ -1529,32 +1520,13 @@ fn render_delete_screenshot_modal(
         return;
     };
 
-    let viewport_rect = ctx.input(|input| input.content_rect());
-    let modal_size = egui::vec2(viewport_rect.width().min(520.0), 260.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_size.x * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_size.x),
-        (viewport_rect.center().y - modal_size.y * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_size.y),
-    );
     let danger = ctx.style().visuals.error_fg_color;
     let mut cancel_requested = false;
     let mut delete_requested = false;
-    modal::show_scrim(ctx, "home_delete_screenshot_modal_scrim", viewport_rect);
-
-    egui::Window::new("Delete Screenshot")
-        .id(egui::Id::new("home_delete_screenshot_modal"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(modal_size)
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("home_delete_screenshot_modal", DialogPreset::Confirm),
+        |ui| {
             let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
             let body_style = style::body(ui);
             let muted_style = style::muted(ui);
@@ -1601,23 +1573,30 @@ fn render_delete_screenshot_modal(
 
             ui.add_space(16.0);
             ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                let delete_button =
-                    egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
-                        .fill(danger.gamma_multiply(0.84))
-                        .stroke(egui::Stroke::new(1.0, danger))
-                        .min_size(egui::vec2(120.0, 34.0))
-                        .corner_radius(egui::CornerRadius::same(8));
-                let cancel_button = egui::Button::new("Cancel")
-                    .min_size(egui::vec2(120.0, 34.0))
-                    .corner_radius(egui::CornerRadius::same(8));
                 if ui
-                    .add_enabled(!state.delete_screenshot_in_flight, delete_button)
+                    .add_enabled_ui(!state.delete_screenshot_in_flight, |ui| {
+                        text_ui.button(
+                            ui,
+                            "home_delete_screenshot_confirm",
+                            "Delete",
+                            &danger_button(ui, egui::vec2(120.0, 34.0)),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     delete_requested = true;
                 }
                 if ui
-                    .add_enabled(!state.delete_screenshot_in_flight, cancel_button)
+                    .add_enabled_ui(!state.delete_screenshot_in_flight, |ui| {
+                        text_ui.button(
+                            ui,
+                            "home_delete_screenshot_cancel",
+                            "Cancel",
+                            &secondary_button(ui, egui::vec2(120.0, 34.0)),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     cancel_requested = true;
@@ -1626,7 +1605,9 @@ fn render_delete_screenshot_modal(
                     ui.spinner();
                 }
             });
-        });
+        },
+    );
+    cancel_requested |= response.close_requested && !state.delete_screenshot_in_flight;
 
     if cancel_requested && !state.delete_screenshot_in_flight {
         state.pending_delete_screenshot_key = None;

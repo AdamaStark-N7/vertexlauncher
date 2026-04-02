@@ -2,6 +2,7 @@ use super::content_lookup_result::ContentLookupResultEntry;
 use super::*;
 use content_resolver::detect_installed_content_kind;
 use std::collections::{BTreeMap, HashSet};
+use ui_foundation::fill_tab_row;
 
 const CONTENT_HASH_CACHE_FLUSH_DEBOUNCE: Duration = Duration::from_millis(750);
 const CONTENT_LOOKUP_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
@@ -92,46 +93,19 @@ pub(super) fn render_installed_content_section(
         });
 
     ui.add_space(10.0);
-    let item_spacing = 6.0;
-    let tab_count = InstalledContentKind::ALL.len() as f32;
-    let tab_width =
-        ((ui.available_width() - item_spacing * (tab_count - 1.0)) / tab_count).max(0.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = item_spacing;
-        for tab in InstalledContentKind::ALL {
-            let selected = state.selected_content_tab == tab;
-            let button =
-                egui::Button::new(egui::RichText::new(tab.label()).size(14.0).strong().color(
-                    if selected {
-                        ui.visuals().widgets.active.fg_stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                ))
-                .min_size(egui::vec2(tab_width, 30.0))
-                .fill(if selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().widgets.inactive.bg_fill
-                })
-                .stroke(if selected {
-                    ui.visuals().selection.stroke
-                } else {
-                    ui.visuals().widgets.inactive.bg_stroke
-                })
-                .corner_radius(egui::CornerRadius::same(10));
-            if ui
-                .push_id(("instance_content_tab", instance_id, tab.label()), |ui| {
-                    ui.add_sized([tab_width, 30.0], button)
-                })
-                .inner
-                .clicked()
-            {
-                state.selected_content_tab = tab;
-                state.installed_content_page = 1;
-            }
-        }
-    });
+    let previous_tab = state.selected_content_tab;
+    fill_tab_row(
+        text_ui,
+        ui,
+        ("instance_content_tab", instance_id),
+        &mut state.selected_content_tab,
+        &InstalledContentKind::ALL.map(|tab| (tab, tab.label())),
+        30.0,
+        6.0,
+    );
+    if state.selected_content_tab != previous_tab {
+        state.installed_content_page = 1;
+    }
 
     ui.add_space(10.0);
 
@@ -612,6 +586,7 @@ fn render_installed_content_entry(
                                             if let Some(update) = update_label {
                                                 if render_installed_content_update_badge(
                                                     ui,
+                                                    text_ui,
                                                     (id_source, "update_badge"),
                                                     update,
                                                     !state.content_apply_in_flight,
@@ -905,6 +880,7 @@ fn render_installed_content_badge(
 
 fn render_installed_content_update_badge(
     ui: &mut Ui,
+    text_ui: &mut TextUi,
     id_source: impl std::hash::Hash + Copy,
     label: &str,
     enabled: bool,
@@ -925,19 +901,26 @@ fn render_installed_content_update_badge(
         } else {
             ui.visuals().widgets.noninteractive.bg_stroke.color
         };
-        let response = ui.add_enabled(
-            enabled,
-            egui::Button::new(
-                egui::RichText::new(label)
-                    .size(13.0)
-                    .color(text_color)
-                    .strong(),
-            )
-            .corner_radius(egui::CornerRadius::same(6))
-            .fill(fill)
-            .stroke(egui::Stroke::new(1.0, stroke_color))
-            .min_size(egui::vec2(0.0, 0.0)),
-        );
+        let response = ui
+            .add_enabled_ui(enabled, |ui| {
+                text_ui.button(
+                    ui,
+                    ("installed_content_update_badge", label),
+                    label,
+                    &ButtonOptions {
+                        min_size: egui::vec2(0.0, 0.0),
+                        corner_radius: 6,
+                        text_color,
+                        fill,
+                        fill_hovered: fill.gamma_multiply(1.08),
+                        fill_active: fill.gamma_multiply(0.92),
+                        fill_selected: fill,
+                        stroke: egui::Stroke::new(1.0, stroke_color),
+                        ..ButtonOptions::default()
+                    },
+                )
+            })
+            .inner;
         response
             .on_hover_text(if enabled {
                 "Update to this version"

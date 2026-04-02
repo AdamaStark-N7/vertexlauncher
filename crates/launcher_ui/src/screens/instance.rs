@@ -30,7 +30,11 @@ use std::{
     sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
 };
-use textui::{ButtonOptions, LabelOptions, TextUi, TooltipOptions};
+use textui::{ButtonOptions, InputOptions, LabelOptions, TextUi, TooltipOptions};
+use ui_foundation::{
+    DialogPreset, danger_button, dialog_options, fill_tab_row, is_compact_width, primary_button,
+    secondary_button, selectable_row_button, show_dialog, themed_text_input,
+};
 use vtmpack::{
     VTMPACK_EXTENSION, VtmpackInstanceMetadata, VtmpackProviderMode, default_vtmpack_file_name,
     default_vtmpack_root_entry_selected, enforce_vtmpack_extension,
@@ -419,7 +423,7 @@ pub fn render(
         config,
     );
     ui.add_space(10.0);
-    render_instance_tab_row(ui, &mut state.active_tab);
+    render_instance_tab_row(ui, text_ui, &mut state.active_tab);
     ui.add_space(12.0);
 
     match state.active_tab {
@@ -517,42 +521,16 @@ pub fn render(
     output
 }
 
-fn render_instance_tab_row(ui: &mut Ui, active_tab: &mut InstanceScreenTab) {
-    let item_spacing = 8.0;
-    let tab_count = InstanceScreenTab::ALL.len() as f32;
-    let width = ((ui.available_width() - item_spacing * (tab_count - 1.0)) / tab_count).max(0.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = item_spacing;
-        for tab in InstanceScreenTab::ALL {
-            let selected = *active_tab == tab;
-            let button =
-                egui::Button::new(egui::RichText::new(tab.label()).size(15.0).strong().color(
-                    if selected {
-                        ui.visuals().widgets.active.fg_stroke.color
-                    } else {
-                        ui.visuals().text_color()
-                    },
-                ))
-                .min_size(egui::vec2(width, INSTANCE_TABS_HEIGHT))
-                .fill(if selected {
-                    ui.visuals().selection.bg_fill
-                } else {
-                    ui.visuals().widgets.inactive.bg_fill
-                })
-                .stroke(if selected {
-                    ui.visuals().selection.stroke
-                } else {
-                    ui.visuals().widgets.inactive.bg_stroke
-                })
-                .corner_radius(egui::CornerRadius::same(10));
-            if ui
-                .add_sized([width, INSTANCE_TABS_HEIGHT], button)
-                .clicked()
-            {
-                *active_tab = tab;
-            }
-        }
-    });
+fn render_instance_tab_row(ui: &mut Ui, text_ui: &mut TextUi, active_tab: &mut InstanceScreenTab) {
+    fill_tab_row(
+        text_ui,
+        ui,
+        "instance_tab_row",
+        active_tab,
+        &InstanceScreenTab::ALL.map(|tab| (tab, tab.label())),
+        INSTANCE_TABS_HEIGHT,
+        8.0,
+    );
 }
 
 fn render_instance_screenshot_gallery(
@@ -904,34 +882,12 @@ fn render_instance_screenshot_viewer_modal(
         .request(image_key.clone(), screenshot.path.clone());
     let image_bytes = state.screenshot_images.bytes(image_key.as_str());
 
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_width = (viewport_rect.width() * 0.92).max(320.0);
-    let modal_height = (viewport_rect.height() * 0.9).max(280.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_width * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
-        (viewport_rect.center().y - modal_height * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
-    );
     let mut close_requested = false;
     let mut delete_requested = false;
-    modal::show_scrim(ctx, "instance_screenshot_viewer_scrim", viewport_rect);
-
-    egui::Window::new("Instance Screenshot Viewer")
-        .id(egui::Id::new("instance_screenshot_viewer_window"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_width, modal_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("instance_screenshot_viewer_window", DialogPreset::Viewer),
+        |ui| {
             let title_style = style::heading(ui, 24.0, 28.0);
             let body_style = style::muted_single_line(ui);
 
@@ -957,14 +913,38 @@ fn render_instance_screenshot_viewer_modal(
                     );
                 });
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Close").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "instance_screenshot_viewer_close",
+                            "Close",
+                            &secondary_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         close_requested = true;
                     }
-                    if ui.button("Delete").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "instance_screenshot_viewer_delete",
+                            "Delete",
+                            &danger_button(ui, egui::vec2(92.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         delete_requested = true;
                     }
                     if ui
-                        .add_enabled(image_bytes.is_some(), egui::Button::new("Copy"))
+                        .add_enabled_ui(image_bytes.is_some(), |ui| {
+                            text_ui.button(
+                                ui,
+                                "instance_screenshot_viewer_copy",
+                                "Copy",
+                                &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                            )
+                        })
+                        .inner
                         .clicked()
                         && let Some(bytes) = image_bytes.as_deref()
                     {
@@ -974,15 +954,39 @@ fn render_instance_screenshot_viewer_modal(
                             bytes,
                         );
                     }
-                    if ui.button("Reset").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "instance_screenshot_viewer_reset",
+                            "Reset",
+                            &secondary_button(ui, egui::vec2(82.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom = INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM;
                         viewer_state.pan_uv = egui::Vec2::ZERO;
                     }
-                    if ui.button("+").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "instance_screenshot_viewer_zoom_in",
+                            "+",
+                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom = adjust_instance_screenshot_zoom(viewer_state.zoom, 1.0);
                         clamp_instance_screenshot_pan(viewer_state);
                     }
-                    if ui.button("-").clicked() {
+                    if text_ui
+                        .button(
+                            ui,
+                            "instance_screenshot_viewer_zoom_out",
+                            "-",
+                            &secondary_button(ui, egui::vec2(40.0, style::CONTROL_HEIGHT)),
+                        )
+                        .clicked()
+                    {
                         viewer_state.zoom =
                             adjust_instance_screenshot_zoom(viewer_state.zoom, -1.0);
                         clamp_instance_screenshot_pan(viewer_state);
@@ -1056,7 +1060,9 @@ fn render_instance_screenshot_viewer_modal(
                 ui.visuals().widgets.inactive.bg_stroke,
                 egui::StrokeKind::Inside,
             );
-        });
+        },
+    );
+    close_requested |= response.close_requested;
 
     if delete_requested {
         tracing::info!(
@@ -1095,32 +1101,13 @@ fn render_instance_delete_screenshot_modal(
         return;
     };
 
-    let viewport_rect = ctx.input(|input| input.content_rect());
-    let modal_size = egui::vec2(viewport_rect.width().min(520.0), 250.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_size.x * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_size.x),
-        (viewport_rect.center().y - modal_size.y * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_size.y),
-    );
     let danger = ctx.style().visuals.error_fg_color;
     let mut cancel_requested = false;
     let mut delete_requested = false;
-    modal::show_scrim(ctx, "instance_delete_screenshot_modal_scrim", viewport_rect);
-
-    egui::Window::new("Delete Instance Screenshot")
-        .id(egui::Id::new("instance_delete_screenshot_modal"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(modal_size)
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("instance_delete_screenshot_modal", DialogPreset::Confirm),
+        |ui| {
             let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
             let body_style = style::body(ui);
             let muted_style = style::muted(ui);
@@ -1156,23 +1143,30 @@ fn render_instance_delete_screenshot_modal(
 
             ui.add_space(16.0);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let delete_button =
-                    egui::Button::new(egui::RichText::new("Delete").color(egui::Color32::WHITE))
-                        .fill(danger.gamma_multiply(0.84))
-                        .stroke(egui::Stroke::new(1.0, danger))
-                        .min_size(egui::vec2(120.0, 34.0))
-                        .corner_radius(egui::CornerRadius::same(8));
-                let cancel_button = egui::Button::new("Cancel")
-                    .min_size(egui::vec2(120.0, 34.0))
-                    .corner_radius(egui::CornerRadius::same(8));
                 if ui
-                    .add_enabled(!state.delete_screenshot_in_flight, delete_button)
+                    .add_enabled_ui(!state.delete_screenshot_in_flight, |ui| {
+                        text_ui.button(
+                            ui,
+                            "instance_delete_screenshot_confirm",
+                            "Delete",
+                            &danger_button(ui, egui::vec2(120.0, 34.0)),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     delete_requested = true;
                 }
                 if ui
-                    .add_enabled(!state.delete_screenshot_in_flight, cancel_button)
+                    .add_enabled_ui(!state.delete_screenshot_in_flight, |ui| {
+                        text_ui.button(
+                            ui,
+                            "instance_delete_screenshot_cancel",
+                            "Cancel",
+                            &secondary_button(ui, egui::vec2(120.0, 34.0)),
+                        )
+                    })
+                    .inner
                     .clicked()
                 {
                     cancel_requested = true;
@@ -1181,7 +1175,9 @@ fn render_instance_delete_screenshot_modal(
                     ui.spinner();
                 }
             });
-        });
+        },
+    );
+    cancel_requested |= response.close_requested && !state.delete_screenshot_in_flight;
 
     if cancel_requested && !state.delete_screenshot_in_flight {
         state.pending_delete_screenshot_key = None;
@@ -1374,122 +1370,140 @@ fn render_instance_logs_tab(ui: &mut Ui, text_ui: &mut TextUi, state: &mut Insta
     }
 
     let full_size = ui.available_size().max(egui::vec2(1.0, 1.0));
+    let compact = is_compact_width(full_size.x, 760.0);
     let sidebar_width = (full_size.x * 0.28).clamp(220.0, 320.0);
     let logs_snapshot = state.logs.clone();
-    ui.horizontal(|ui| {
+    if compact {
+        let list_height = (full_size.y * 0.32).clamp(140.0, 240.0);
         ui.allocate_ui_with_layout(
-            egui::vec2(sidebar_width, full_size.y),
+            egui::vec2(full_size.x, list_height),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt("instance_logs_file_list")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for log in &logs_snapshot {
-                            let selected = state.selected_log_path.as_ref() == Some(&log.path);
-                            let mut label = log.file_name.clone();
-                            if log.size_bytes > 0 {
-                                label.push_str(&format!(
-                                    "\n{} | {}",
-                                    format_log_file_size(log.size_bytes),
-                                    format_time_ago(log.modified_at_ms, current_time_millis())
-                                ));
-                            }
-                            let response = ui.add_sized(
-                                egui::vec2(ui.available_width(), 44.0),
-                                egui::Button::new(egui::RichText::new(label).color(if selected {
-                                    ui.visuals().selection.stroke.color
-                                } else {
-                                    ui.visuals().text_color()
-                                }))
-                                .selected(selected)
-                                .fill(if selected {
-                                    ui.visuals().selection.bg_fill
-                                } else {
-                                    ui.visuals().widgets.inactive.bg_fill
-                                })
-                                .stroke(if selected {
-                                    ui.visuals().selection.stroke
-                                } else {
-                                    ui.visuals().widgets.inactive.bg_stroke
-                                })
-                                .corner_radius(egui::CornerRadius::same(8)),
-                            );
-                            if response.clicked() {
-                                state.selected_log_path = Some(log.path.clone());
-                                load_selected_instance_log(state);
-                            }
-                            ui.add_space(6.0);
-                        }
-                    });
-            },
+            |ui| render_instance_log_list(ui, state, &logs_snapshot),
         );
         ui.add_space(12.0);
         ui.allocate_ui_with_layout(
-            egui::vec2((full_size.x - sidebar_width - 12.0).max(1.0), full_size.y),
+            egui::vec2(full_size.x, (full_size.y - list_height - 12.0).max(1.0)),
             egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                if let Some(selected_log_path) = state.selected_log_path.as_ref() {
-                    let log_name = selected_log_path
-                        .file_name()
-                        .and_then(OsStr::to_str)
-                        .unwrap_or("Log");
-                    let _ =
-                        text_ui.label(ui, "instance_logs_selected_name", log_name, &title_style);
-                    let mut details = selected_log_path.display().to_string();
-                    if state.loaded_log_truncated {
-                        details
-                            .push_str(&format!(" | showing last {} lines", MAX_INSTANCE_LOG_LINES));
-                    }
-                    let _ = text_ui.label(
-                        ui,
-                        "instance_logs_selected_path",
-                        details.as_str(),
-                        &body_style,
-                    );
-                    ui.add_space(8.0);
-                    if state.log_load_in_flight {
-                        let _ = text_ui.label(
-                            ui,
-                            "instance_logs_loading",
-                            "Loading log contents...",
-                            &body_style,
-                        );
-                        ui.add_space(8.0);
-                    }
-                    if let Some(error) = state.loaded_log_error.as_deref() {
-                        let _ = text_ui.label(
-                            ui,
-                            "instance_logs_error",
-                            error,
-                            &LabelOptions {
-                                color: ui.visuals().error_fg_color,
-                                wrap: true,
-                                ..LabelOptions::default()
-                            },
-                        );
-                        return;
-                    }
-                    console_screen::render_log_buffer(
-                        ui,
-                        text_ui,
-                        ("instance_log_viewer", selected_log_path),
-                        &state.loaded_log_lines,
-                        "Log is empty.",
-                        false,
-                        crate::console::text_redraw_generation(),
-                    );
-                } else {
-                    let _ = text_ui.label(
-                        ui,
-                        "instance_logs_no_selection",
-                        "Select a log file from the left to view it.",
-                        &body_style,
-                    );
-                }
-            },
+            |ui| render_instance_log_viewer(ui, text_ui, state, &title_style, &body_style),
         );
-    });
+    } else {
+        ui.horizontal(|ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(sidebar_width, full_size.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_instance_log_list(ui, state, &logs_snapshot),
+            );
+            ui.add_space(12.0);
+            ui.allocate_ui_with_layout(
+                egui::vec2((full_size.x - sidebar_width - 12.0).max(1.0), full_size.y),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| render_instance_log_viewer(ui, text_ui, state, &title_style, &body_style),
+            );
+        });
+    }
+}
+
+fn render_instance_log_list(
+    ui: &mut Ui,
+    state: &mut InstanceScreenState,
+    logs_snapshot: &[InstanceLogEntry],
+) {
+    egui::ScrollArea::vertical()
+        .id_salt("instance_logs_file_list")
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            for log in logs_snapshot {
+                let selected = state.selected_log_path.as_ref() == Some(&log.path);
+                let mut label = log.file_name.clone();
+                if log.size_bytes > 0 {
+                    label.push_str(&format!(
+                        "\n{} | {}",
+                        format_log_file_size(log.size_bytes),
+                        format_time_ago(log.modified_at_ms, current_time_millis())
+                    ));
+                }
+                let response = selectable_row_button(
+                    ui,
+                    egui::RichText::new(label).color(if selected {
+                        ui.visuals().selection.stroke.color
+                    } else {
+                        ui.visuals().text_color()
+                    }),
+                    selected,
+                    egui::vec2(ui.available_width(), 44.0),
+                );
+                if response.clicked() {
+                    state.selected_log_path = Some(log.path.clone());
+                    load_selected_instance_log(state);
+                }
+                ui.add_space(6.0);
+            }
+        });
+}
+
+fn render_instance_log_viewer(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
+    title_style: &LabelOptions,
+    body_style: &LabelOptions,
+) {
+    if let Some(selected_log_path) = state.selected_log_path.as_ref() {
+        let log_name = selected_log_path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("Log");
+        let _ = text_ui.label(ui, "instance_logs_selected_name", log_name, title_style);
+        let mut details = selected_log_path.display().to_string();
+        if state.loaded_log_truncated {
+            details.push_str(&format!(" | showing last {} lines", MAX_INSTANCE_LOG_LINES));
+        }
+        let _ = text_ui.label(
+            ui,
+            "instance_logs_selected_path",
+            details.as_str(),
+            body_style,
+        );
+        ui.add_space(8.0);
+        if state.log_load_in_flight {
+            let _ = text_ui.label(
+                ui,
+                "instance_logs_loading",
+                "Loading log contents...",
+                body_style,
+            );
+            ui.add_space(8.0);
+        }
+        if let Some(error) = state.loaded_log_error.as_deref() {
+            let _ = text_ui.label(
+                ui,
+                "instance_logs_error",
+                error,
+                &LabelOptions {
+                    color: ui.visuals().error_fg_color,
+                    wrap: true,
+                    ..LabelOptions::default()
+                },
+            );
+            return;
+        }
+        console_screen::render_log_buffer(
+            ui,
+            text_ui,
+            ("instance_log_viewer", selected_log_path),
+            &state.loaded_log_lines,
+            "Log is empty.",
+            false,
+            crate::console::text_redraw_generation(),
+        );
+    } else {
+        let _ = text_ui.label(
+            ui,
+            "instance_logs_no_selection",
+            "Select a log file from the left to view it.",
+            body_style,
+        );
+    }
 }
 
 fn ensure_instance_screenshot_scan_channel(state: &mut InstanceScreenState) {
@@ -2935,9 +2949,7 @@ fn render_export_vtmpack_modal(
         return;
     }
 
-    let mut open = state.show_export_vtmpack_modal;
     let mut close_requested = false;
-    let viewport_rect = ctx.input(|i| i.content_rect());
     let installations_root = config.minecraft_installations_root_path().to_path_buf();
     let instance_root = instances
         .find(instance_id)
@@ -2945,37 +2957,14 @@ fn render_export_vtmpack_modal(
     if let Some(instance_root) = instance_root.as_deref() {
         sync_vtmpack_export_options(instance_root, &mut state.export_vtmpack_options);
     }
-    let modal_width = viewport_rect.width().min(560.0).max(320.0);
-    let modal_height = viewport_rect.height().min(520.0).max(300.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_width * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
-        (viewport_rect.center().y - modal_height * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
-    );
-    modal::show_scrim(
-        ctx,
-        ("instance_export_vtmpack_modal_scrim", instance_id),
-        viewport_rect,
-    );
-
     let mut export_requested = false;
-    egui::Window::new("Export .vtmpack")
-        .id(egui::Id::new(("instance_export_vtmpack_modal", instance_id)))
-        .order(egui::Order::Foreground)
-        .open(&mut open)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_width, modal_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(true)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options(
+            ("instance_export_vtmpack_modal", instance_id),
+            DialogPreset::Form,
+        ),
+        |ui| {
             let title_style = style::heading(ui, 26.0, 30.0);
             let body_style = style::muted(ui);
             let _ = text_ui.label(
@@ -2996,8 +2985,9 @@ fn render_export_vtmpack_modal(
                 let progress = state.export_vtmpack_latest_progress.as_ref();
                 let progress_fraction = progress
                     .and_then(|progress| {
-                        (progress.total_steps > 0)
-                            .then_some(progress.completed_steps as f32 / progress.total_steps as f32)
+                        (progress.total_steps > 0).then_some(
+                            progress.completed_steps as f32 / progress.total_steps as f32,
+                        )
                     })
                     .unwrap_or(0.0)
                     .clamp(0.0, 1.0);
@@ -3142,12 +3132,11 @@ fn render_export_vtmpack_modal(
                                             .or_insert_with(|| {
                                                 default_vtmpack_root_entry_selected(&entry)
                                             });
-                                        let label =
-                                            if instance_root.join(entry.as_str()).is_dir() {
-                                                format!("{entry}/")
-                                            } else {
-                                                entry.clone()
-                                            };
+                                        let label = if instance_root.join(entry.as_str()).is_dir() {
+                                            format!("{entry}/")
+                                        } else {
+                                            entry.clone()
+                                        };
                                         ui.checkbox(checked, label);
                                     }
                                 });
@@ -3169,7 +3158,7 @@ fn render_export_vtmpack_modal(
                             ui,
                             ("instance_export_vtmpack_cancel", instance_id),
                             "Cancel",
-                            &ButtonOptions::default(),
+                            &secondary_button(ui, egui::vec2(120.0, style::CONTROL_HEIGHT)),
                         )
                         .clicked()
                     {
@@ -3180,7 +3169,7 @@ fn render_export_vtmpack_modal(
                             ui,
                             ("instance_export_vtmpack_confirm", instance_id),
                             "Choose file",
-                            &ButtonOptions::default(),
+                            &primary_button(ui, egui::vec2(140.0, style::CONTROL_HEIGHT)),
                         )
                         .clicked()
                     {
@@ -3188,10 +3177,12 @@ fn render_export_vtmpack_modal(
                     }
                 });
             }
-        });
+        },
+    );
+    close_requested |= response.close_requested;
 
     if close_requested && !state.export_vtmpack_in_flight {
-        open = false;
+        state.show_export_vtmpack_modal = false;
     }
 
     if export_requested {
@@ -3220,15 +3211,16 @@ fn render_export_vtmpack_modal(
                     output_path,
                     state.export_vtmpack_options.clone(),
                 );
-                open = true;
+                state.show_export_vtmpack_modal = true;
             }
         } else {
             state.status_message = Some("Instance was removed before export.".to_owned());
-            open = false;
+            state.show_export_vtmpack_modal = false;
         }
     }
 
-    state.show_export_vtmpack_modal = open || state.export_vtmpack_in_flight;
+    state.show_export_vtmpack_modal =
+        state.show_export_vtmpack_modal || state.export_vtmpack_in_flight;
 }
 
 fn ensure_vtmpack_export_channels(state: &mut InstanceScreenState) {
@@ -3466,9 +3458,7 @@ fn render_export_server_modal(
         return;
     }
 
-    let mut open = state.show_export_server_modal;
     let mut close_requested = false;
-    let viewport_rect = ctx.input(|i| i.content_rect());
     let installations_root = config.minecraft_installations_root_path().to_path_buf();
     let instance_root = instances
         .find(instance_id)
@@ -3479,37 +3469,14 @@ fn render_export_server_modal(
             &mut state.export_server_included_root_entries,
         );
     }
-    let modal_width = viewport_rect.width().min(620.0).max(340.0);
-    let modal_height = viewport_rect.height().min(560.0).max(320.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_width * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_width),
-        (viewport_rect.center().y - modal_height * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_height),
-    );
-    modal::show_scrim(
-        ctx,
-        ("instance_export_server_modal_scrim", instance_id),
-        viewport_rect,
-    );
-
     let mut export_requested = false;
-    egui::Window::new("Auto-generate server zip")
-        .id(egui::Id::new(("instance_export_server_modal", instance_id)))
-        .order(egui::Order::Foreground)
-        .open(&mut open)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_width, modal_height))
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .hscroll(false)
-        .vscroll(true)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options(
+            ("instance_export_server_modal", instance_id),
+            DialogPreset::Form,
+        ),
+        |ui| {
             let title_style = style::heading(ui, 26.0, 30.0);
             let body_style = style::muted(ui);
             let _ = text_ui.label(
@@ -3530,8 +3497,9 @@ fn render_export_server_modal(
                 let progress = state.export_server_latest_progress.as_ref();
                 let progress_fraction = progress
                     .and_then(|progress| {
-                        (progress.total_steps > 0)
-                            .then_some(progress.completed_steps as f32 / progress.total_steps as f32)
+                        (progress.total_steps > 0).then_some(
+                            progress.completed_steps as f32 / progress.total_steps as f32,
+                        )
                     })
                     .unwrap_or(0.0)
                     .clamp(0.0, 1.0);
@@ -3652,7 +3620,7 @@ fn render_export_server_modal(
                             ui,
                             ("instance_export_server_cancel", instance_id),
                             "Cancel",
-                            &ButtonOptions::default(),
+                            &secondary_button(ui, egui::vec2(120.0, style::CONTROL_HEIGHT)),
                         )
                         .clicked()
                     {
@@ -3663,7 +3631,7 @@ fn render_export_server_modal(
                             ui,
                             ("instance_export_server_confirm", instance_id),
                             "Build zip in Downloads",
-                            &ButtonOptions::default(),
+                            &primary_button(ui, egui::vec2(196.0, style::CONTROL_HEIGHT)),
                         )
                         .clicked()
                     {
@@ -3671,10 +3639,12 @@ fn render_export_server_modal(
                     }
                 });
             }
-        });
+        },
+    );
+    close_requested |= response.close_requested;
 
     if close_requested && !state.export_server_in_flight {
-        open = false;
+        state.show_export_server_modal = false;
     }
 
     if export_requested {
@@ -3689,14 +3659,15 @@ fn render_export_server_modal(
                 state.export_server_included_root_entries.clone(),
                 config.force_java_21_minimum(),
             );
-            open = true;
+            state.show_export_server_modal = true;
         } else {
             state.status_message = Some("Instance was removed before export.".to_owned());
-            open = false;
+            state.show_export_server_modal = false;
         }
     }
 
-    state.show_export_server_modal = open || state.export_server_in_flight;
+    state.show_export_server_modal =
+        state.show_export_server_modal || state.export_server_in_flight;
 }
 
 fn ensure_server_export_channels(state: &mut InstanceScreenState) {
@@ -4592,10 +4563,20 @@ fn render_move_instance_modal(
             if !state.move_instance_in_flight && state.move_instance_completion_message.is_none() {
                 let input_changed = ui
                     .horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(&mut state.move_instance_dest_input)
-                                .id(egui::Id::new(("move_instance_dest", instance_id)))
-                                .desired_width(f32::INFINITY),
+                        let input_width = (ui.available_width() - 124.0).max(180.0);
+                        let response = themed_text_input(
+                            text_ui,
+                            ui,
+                            ("move_instance_dest", instance_id),
+                            &mut state.move_instance_dest_input,
+                            InputOptions {
+                                desired_width: Some(input_width),
+                                placeholder_text: Some(
+                                    "Choose an empty folder or enter a new destination path"
+                                        .to_owned(),
+                                ),
+                                ..InputOptions::default()
+                            },
                         );
                         let browse_clicked = text_ui
                             .button(
@@ -4698,7 +4679,11 @@ fn render_move_instance_modal(
                 };
                 let bytes_text = if total_bytes > 0 {
                     if state.move_instance_in_flight {
-                        format!("{} / {}", format_bytes(bytes_done), format_bytes(total_bytes))
+                        format!(
+                            "{} / {}",
+                            format_bytes(bytes_done),
+                            format_bytes(total_bytes)
+                        )
                     } else {
                         format!("{} transferred", format_bytes(total_bytes))
                     }
@@ -4752,23 +4737,19 @@ fn render_move_instance_modal(
                     );
                     if total_bytes > 0 && state.move_instance_in_flight {
                         let pct = (progress_fraction * 100.0) as u32;
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{pct}%"))
-                                        .size(15.0)
-                                        .strong()
-                                        .color(weak_text_color),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{pct}%"))
+                                    .size(15.0)
+                                    .strong()
+                                    .color(weak_text_color),
+                            );
+                        });
                     }
                 });
                 ui.add_space(6.0);
                 ui.add(
-                    egui::ProgressBar::new(progress_fraction)
-                        .desired_width(ui.available_width()),
+                    egui::ProgressBar::new(progress_fraction).desired_width(ui.available_width()),
                 );
                 ui.add_space(8.0);
 
@@ -4783,16 +4764,13 @@ fn render_move_instance_modal(
                             bytes_text.as_str(),
                             &detail_style,
                         );
-                        ui.with_layout(
-                            egui::Layout::right_to_left(egui::Align::Center),
-                            |ui| {
-                                ui.label(
-                                    egui::RichText::new(files_text.as_str())
-                                        .size(13.0)
-                                        .color(weak_text_color),
-                                );
-                            },
-                        );
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(
+                                egui::RichText::new(files_text.as_str())
+                                    .size(13.0)
+                                    .color(weak_text_color),
+                            );
+                        });
                     });
                 } else {
                     if !bytes_text.is_empty() {

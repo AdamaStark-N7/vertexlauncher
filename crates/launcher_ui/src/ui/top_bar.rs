@@ -8,6 +8,7 @@ use egui::{
 };
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use textui::{ButtonOptions, LabelOptions, TextUi};
+use ui_foundation::{is_compact_width, popup_width};
 
 use crate::{
     assets, privacy,
@@ -24,8 +25,10 @@ const PROFILE_TO_CONTROLS_GAP: f32 = style::SPACE_MD;
 const ACTIVE_USER_TO_PROFILE_GAP: f32 = style::SPACE_SM;
 const ACTIVE_USER_BUTTON_MIN_WIDTH: f32 = 148.0;
 const PROFILE_POPUP_MIN_WIDTH: f32 = 310.0;
+const PROFILE_POPUP_MIN_WIDTH_COMPACT: f32 = 220.0;
 const RESIZE_GRAB_THICKNESS: f32 = 6.0;
 const PROFILE_BUTTON_CORNER_RADIUS: u8 = 10;
+const TOP_BAR_COMPACT_THRESHOLD: f32 = 720.0;
 
 #[derive(Debug, Clone, Default)]
 pub struct TopBarOutput {
@@ -85,9 +88,15 @@ pub fn render(
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             let full_rect = ui.max_rect();
+            let viewport_width = full_rect.width();
+            let compact = is_compact_width(viewport_width, TOP_BAR_COMPACT_THRESHOLD);
             let profile_button_size =
                 (TOP_BAR_HEIGHT - (PROFILE_BUTTON_VERTICAL_PADDING * 2.0)).max(1.0);
-            let active_user_button_width = ACTIVE_USER_BUTTON_MIN_WIDTH;
+            let active_user_button_width = if compact {
+                (viewport_width * 0.2).clamp(96.0, ACTIVE_USER_BUTTON_MIN_WIDTH)
+            } else {
+                ACTIVE_USER_BUTTON_MIN_WIDTH
+            };
             let active_user_visible = profile_ui.user_instance_active;
             let control_group_width =
                 (CONTROL_SLOT_WIDTH * 3.0) + (CONTROL_GAP * 2.0) + (CONTROL_GROUP_PADDING * 2.0);
@@ -172,7 +181,16 @@ pub fn render(
 
                     let _ = egui::Popup::menu(&profile_response)
                         .id(profile_popup_id)
-                        .width(PROFILE_POPUP_MIN_WIDTH)
+                        .width(popup_width(
+                            viewport_width,
+                            if compact {
+                                PROFILE_POPUP_MIN_WIDTH_COMPACT
+                            } else {
+                                PROFILE_POPUP_MIN_WIDTH
+                            },
+                            PROFILE_POPUP_MIN_WIDTH,
+                            8.0,
+                        ))
                         .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
                         .show(|ui| {
                             render_profile_popup(
@@ -181,13 +199,20 @@ pub fn render(
                                 profile_ui,
                                 &mut output,
                                 profile_popup_id,
+                                compact,
                             );
                         });
 
                     if active_user_visible {
                         ui.add_space(ACTIVE_USER_TO_PROFILE_GAP);
-                        if render_active_user_terminal_button(ui, text_ui, profile_button_size)
-                            .clicked()
+                        if render_active_user_terminal_button(
+                            ui,
+                            text_ui,
+                            profile_button_size,
+                            active_user_button_width,
+                            compact,
+                        )
+                        .clicked()
                         {
                             output.open_active_user_terminal = true;
                         }
@@ -475,6 +500,8 @@ fn render_active_user_terminal_button(
     ui: &mut egui::Ui,
     text_ui: &mut TextUi,
     button_height: f32,
+    button_width: f32,
+    compact: bool,
 ) -> egui::Response {
     let text_color = ui.visuals().text_color();
     let themed_svg = apply_text_color(assets::TERMINAL_2_SVG, text_color);
@@ -486,7 +513,7 @@ fn render_active_user_terminal_button(
     );
     let icon_size = (button_height - 14.0).clamp(12.0, 18.0);
     let (rect, response) = ui.allocate_exact_size(
-        egui::vec2(ACTIVE_USER_BUTTON_MIN_WIDTH, button_height),
+        egui::vec2(button_width, button_height),
         egui::Sense::click(),
     );
     let fill = if response.is_pointer_button_down_on() {
@@ -528,8 +555,12 @@ fn render_active_user_terminal_button(
                         wrap: false,
                         ..LabelOptions::default()
                     };
-                    let _ =
-                        text_ui.label(ui, "topbar_user_active_label", "user active", &label_style);
+                    let _ = text_ui.label(
+                        ui,
+                        "topbar_user_active_label",
+                        if compact { "active" } else { "user active" },
+                        &label_style,
+                    );
                 },
             );
         });
@@ -1008,9 +1039,14 @@ fn render_profile_popup(
     profile_ui: ProfileUiModel<'_>,
     output: &mut TopBarOutput,
     popup_id: egui::Id,
+    compact: bool,
 ) {
     ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
-    let full_action_width = ui.available_width().max(220.0);
+    let full_action_width = if compact {
+        ui.available_width().max(160.0)
+    } else {
+        ui.available_width().max(220.0)
+    };
 
     let muted_text = ui.visuals().weak_text_color();
     let heading_style = LabelOptions {

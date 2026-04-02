@@ -19,12 +19,10 @@ use instances::{
     record_instance_launch_usage, remove_instance_record,
 };
 use textui::{LabelOptions, TextUi};
+use ui_foundation::{DialogPreset, danger_button, dialog_options, secondary_button, show_dialog};
 
 use crate::app::tokio_runtime;
-use crate::{
-    assets, console, desktop, install_activity, notification,
-    ui::{modal, style},
-};
+use crate::{assets, console, desktop, install_activity, notification, ui::style};
 
 use super::{
     AppScreen, LaunchAuthContext, QuickLaunchCommandMode, build_quick_launch_command,
@@ -523,7 +521,9 @@ fn render_instance_tile(
             InstanceContextAction::OpenInstance => RuntimeAction::OpenInstanceRequested,
             InstanceContextAction::OpenFolder => RuntimeAction::OpenFolderRequested,
             InstanceContextAction::CopyLaunchCommand => RuntimeAction::CopyCommandRequested,
-            InstanceContextAction::CopySteamLaunchOptions => RuntimeAction::CopySteamOptionsRequested,
+            InstanceContextAction::CopySteamLaunchOptions => {
+                RuntimeAction::CopySteamOptionsRequested
+            }
             InstanceContextAction::Delete => RuntimeAction::DeleteRequested,
         };
     }
@@ -785,32 +785,13 @@ fn render_delete_instance_modal(
         return;
     };
 
-    let viewport_rect = ctx.input(|input| input.content_rect());
-    let modal_size = egui::vec2(viewport_rect.width().min(520.0), 280.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_size.x * 0.5)
-            .clamp(viewport_rect.left(), viewport_rect.right() - modal_size.x),
-        (viewport_rect.center().y - modal_size.y * 0.5)
-            .clamp(viewport_rect.top(), viewport_rect.bottom() - modal_size.y),
-    );
     let instance_root = instance_root_path(installations_root, &instance);
     let instance_running = is_instance_running(instance_root.as_path());
     let danger = ctx.style().visuals.error_fg_color;
-    modal::show_scrim(ctx, "library_delete_instance_modal_scrim", viewport_rect);
-
-    egui::Window::new("Delete Instance")
-        .id(egui::Id::new("library_delete_instance_modal"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(modal_pos)
-        .fixed_size(modal_size)
-        .title_bar(false)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("library_delete_instance_modal", DialogPreset::Confirm),
+        |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
 
             let heading_style = style::heading_color(ui, 28.0, 32.0, danger);
@@ -867,23 +848,13 @@ fn render_delete_instance_modal(
 
             ui.add_space(style::SPACE_MD);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let delete_button_style = textui::ButtonOptions {
-                    text_color: egui::Color32::WHITE,
-                    fill: danger.gamma_multiply(0.84),
-                    fill_hovered: danger,
-                    fill_active: danger.gamma_multiply(0.9),
-                    fill_selected: danger,
-                    stroke: egui::Stroke::new(1.0, danger),
-                    min_size: egui::vec2(140.0, style::CONTROL_HEIGHT),
-                    ..textui::ButtonOptions::default()
-                };
                 let delete_clicked = ui
                     .add_enabled_ui(!instance_running && !state.delete_in_flight, |ui| {
                         text_ui.button(
                             ui,
                             ("library_delete_confirm", instance.id.as_str()),
                             "Delete Folder",
-                            &delete_button_style,
+                            &danger_button(ui, egui::vec2(140.0, style::CONTROL_HEIGHT)),
                         )
                     })
                     .inner
@@ -893,10 +864,7 @@ fn render_delete_instance_modal(
                         ui,
                         ("library_delete_cancel", instance.id.as_str()),
                         "Cancel",
-                        &textui::ButtonOptions {
-                            min_size: egui::vec2(96.0, style::CONTROL_HEIGHT),
-                            ..textui::ButtonOptions::default()
-                        },
+                        &secondary_button(ui, egui::vec2(96.0, style::CONTROL_HEIGHT)),
                     )
                     .clicked();
 
@@ -918,7 +886,12 @@ fn render_delete_instance_modal(
                     );
                 }
             });
-        });
+        },
+    );
+    if response.close_requested && !state.delete_in_flight {
+        state.delete_target_instance_id = None;
+        state.delete_error = None;
+    }
 }
 
 fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {

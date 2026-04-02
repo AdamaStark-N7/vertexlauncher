@@ -1,7 +1,7 @@
 use config::ConfigFormat;
 use eframe::egui;
-use launcher_ui::ui::modal;
 use textui::{ButtonOptions, LabelOptions, TextUi};
+use ui_foundation::{DialogPreset, dialog_options, primary_button, secondary_button, show_dialog};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ModalAction {
@@ -17,23 +17,10 @@ pub fn render(
     config_creation_error: Option<&str>,
 ) -> ModalAction {
     let mut action = ModalAction::None;
-    let viewport_rect = ctx.input(|i| i.content_rect());
-    let modal_width = (viewport_rect.width() * 0.42).clamp(420.0, 560.0);
-    modal::show_scrim(ctx, "config_format_modal_scrim", viewport_rect);
-
-    egui::Window::new("Config format")
-        .id(egui::Id::new("config_format_modal_window"))
-        .order(egui::Order::Foreground)
-        .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
-        .default_width(modal_width)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .title_bar(false)
-        .frame(modal::window_frame(ctx))
-        .show(ctx, |ui| {
-            ui.set_min_width(modal_width);
-            ui.set_max_width(modal_width);
+    let response = show_dialog(
+        ctx,
+        dialog_options("config_format_modal_window", DialogPreset::Compact),
+        |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
             let text_color = ui.visuals().text_color();
             let heading = LabelOptions {
@@ -128,31 +115,21 @@ pub fn render(
             let mut cancel_clicked = false;
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let create_style = ButtonOptions {
-                    min_size: egui::vec2(136.0, 32.0),
-                    text_color: ui.visuals().widgets.active.fg_stroke.color,
-                    fill: ui.visuals().selection.bg_fill,
-                    fill_hovered: ui.visuals().selection.bg_fill.gamma_multiply(1.1),
-                    fill_active: ui.visuals().selection.bg_fill.gamma_multiply(0.9),
-                    fill_selected: ui.visuals().selection.bg_fill,
-                    stroke: ui.visuals().selection.stroke,
-                    ..ButtonOptions::default()
-                };
-                let cancel_style = ButtonOptions {
-                    min_size: egui::vec2(100.0, 32.0),
-                    text_color: text_color,
-                    fill: ui.visuals().widgets.inactive.bg_fill,
-                    fill_hovered: ui.visuals().widgets.hovered.bg_fill,
-                    fill_active: ui.visuals().widgets.active.bg_fill,
-                    fill_selected: ui.visuals().selection.bg_fill,
-                    stroke: ui.visuals().widgets.inactive.bg_stroke,
-                    ..ButtonOptions::default()
-                };
                 create_clicked = text_ui
-                    .button(ui, "config_modal_create", "Create config", &create_style)
+                    .button(
+                        ui,
+                        "config_modal_create",
+                        "Create config",
+                        &primary_button(ui, egui::vec2(136.0, 32.0)),
+                    )
                     .clicked();
                 cancel_clicked = text_ui
-                    .button(ui, "config_modal_cancel", "Cancel", &cancel_style)
+                    .button(
+                        ui,
+                        "config_modal_cancel",
+                        "Cancel",
+                        &secondary_button(ui, egui::vec2(100.0, 32.0)),
+                    )
                     .clicked();
             });
 
@@ -161,7 +138,12 @@ pub fn render(
             } else if create_clicked {
                 action = ModalAction::Create(*selected_format);
             }
-        });
+        },
+    );
+
+    if response.close_requested && matches!(action, ModalAction::None) {
+        action = ModalAction::Cancel;
+    }
 
     action
 }

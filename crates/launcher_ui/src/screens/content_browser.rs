@@ -21,7 +21,8 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use textui::{LabelOptions, TextUi, normalize_inline_whitespace};
+use textui::{InputOptions, LabelOptions, TextUi, normalize_inline_whitespace};
+use ui_foundation::{responsive_columns, themed_text_input};
 
 use crate::app::tokio_runtime;
 use crate::assets;
@@ -720,10 +721,17 @@ fn render_controls(
         let button_style = style::neutral_button(ui);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_MD, style::SPACE_MD);
-            let edit = egui::TextEdit::singleline(&mut state.query_input)
-                .hint_text("Search project names, summaries, and tags")
-                .desired_width((ui.available_width() - 460.0).max(160.0));
-            let response = ui.add(edit);
+            let response = themed_text_input(
+                text_ui,
+                ui,
+                ("content_browser_query", instance_id),
+                &mut state.query_input,
+                InputOptions {
+                    desired_width: Some((ui.available_width() - 460.0).max(160.0)),
+                    placeholder_text: Some("Search project names, summaries, and tags".to_owned()),
+                    ..InputOptions::default()
+                },
+            );
             let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
             let submit_pressed = enter_pressed && (response.has_focus() || response.lost_focus());
             if submit_pressed {
@@ -791,53 +799,82 @@ fn render_controls(
         }
         ui.add_space(style::SPACE_MD);
         let gap = ui.spacing().item_spacing.x;
-        let column_width = ((ui.available_width() - (gap * 2.0)) / 3.0).max(140.0);
-        ui.columns(3, |cols| {
-            cols[0].set_min_width(column_width);
-            cols[1].set_min_width(column_width);
-            cols[2].set_min_width(column_width);
-
-            egui::ComboBox::from_id_salt(("content_browser_minecraft_version", instance_id))
-                .width(column_width)
-                .selected_text(format!(
-                    "Version: {}",
-                    selected_minecraft_version_label(
-                        state.minecraft_version_filter.as_str(),
-                        &state.available_game_versions,
-                    )
-                ))
-                .show_ui(&mut cols[0], |ui| {
-                    ui.selectable_value(
-                        &mut state.minecraft_version_filter,
-                        String::new(),
-                        "Any version",
-                    );
-                    for version in &state.available_game_versions {
-                        ui.selectable_value(
-                            &mut state.minecraft_version_filter,
-                            version.id.clone(),
-                            version.display_label(),
-                        );
+        let (columns, column_width) = responsive_columns(ui.available_width(), 180.0, gap, 3);
+        let selected_version = selected_minecraft_version_label(
+            state.minecraft_version_filter.as_str(),
+            &state.available_game_versions,
+        );
+        ui.vertical(|ui| {
+            for row in 0..3_usize.div_ceil(columns) {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = gap;
+                    let start = row * columns;
+                    let end = (start + columns).min(3);
+                    for index in start..end {
+                        match index {
+                            0 => {
+                                egui::ComboBox::from_id_salt((
+                                    "content_browser_minecraft_version",
+                                    instance_id,
+                                ))
+                                .width(column_width)
+                                .selected_text(format!("Version: {}", selected_version))
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut state.minecraft_version_filter,
+                                        String::new(),
+                                        "Any version",
+                                    );
+                                    for version in &state.available_game_versions {
+                                        ui.selectable_value(
+                                            &mut state.minecraft_version_filter,
+                                            version.id.clone(),
+                                            version.display_label(),
+                                        );
+                                    }
+                                });
+                            }
+                            1 => {
+                                egui::ComboBox::from_id_salt((
+                                    "content_browser_scope",
+                                    instance_id,
+                                ))
+                                .width(column_width)
+                                .selected_text(format!("Type: {}", state.content_scope.label()))
+                                .show_ui(ui, |ui| {
+                                    for scope in ContentScope::ALL {
+                                        ui.selectable_value(
+                                            &mut state.content_scope,
+                                            scope,
+                                            scope.label(),
+                                        );
+                                    }
+                                });
+                            }
+                            _ => {
+                                egui::ComboBox::from_id_salt((
+                                    "content_browser_mod_sort",
+                                    instance_id,
+                                ))
+                                .width(column_width)
+                                .selected_text(format!("Sort: {}", state.mod_sort_mode.label()))
+                                .show_ui(ui, |ui| {
+                                    for mode in ModSortMode::ALL {
+                                        ui.selectable_value(
+                                            &mut state.mod_sort_mode,
+                                            mode,
+                                            mode.label(),
+                                        );
+                                    }
+                                });
+                            }
+                        }
                     }
                 });
-
-            egui::ComboBox::from_id_salt(("content_browser_scope", instance_id))
-                .width(column_width)
-                .selected_text(format!("Type: {}", state.content_scope.label()))
-                .show_ui(&mut cols[1], |ui| {
-                    for scope in ContentScope::ALL {
-                        ui.selectable_value(&mut state.content_scope, scope, scope.label());
-                    }
-                });
-
-            egui::ComboBox::from_id_salt(("content_browser_mod_sort", instance_id))
-                .width(column_width)
-                .selected_text(format!("Sort: {}", state.mod_sort_mode.label()))
-                .show_ui(&mut cols[2], |ui| {
-                    for mode in ModSortMode::ALL {
-                        ui.selectable_value(&mut state.mod_sort_mode, mode, mode.label());
-                    }
-                });
+                if row + 1 < 3_usize.div_ceil(columns) {
+                    ui.add_space(style::SPACE_SM);
+                }
+            }
         });
 
         let queue_status = if state.download_in_flight {

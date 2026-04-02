@@ -30,6 +30,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use textui::TextUi;
+use ui_foundation::{DialogPreset, dialog_options, secondary_button, show_dialog};
 
 use self::auth_state::{AuthState, REPAINT_INTERVAL};
 use self::config_format_modal::ModalAction;
@@ -1800,38 +1801,12 @@ fn render_curseforge_manual_download_modal(
     text_ui: &mut TextUi,
     state: &mut PendingCurseForgeManualDownloadState,
 ) -> ManualCurseForgeDownloadAction {
-    let viewport_rect = ctx.input(|input| input.content_rect());
-    let modal_max_width = (viewport_rect.width() * 0.78).clamp(480.0, 900.0);
-    let modal_max_height = (viewport_rect.height() * 0.82).max(1.0);
-    let modal_pos = egui::pos2(
-        (viewport_rect.center().x - modal_max_width * 0.5).clamp(
-            viewport_rect.left(),
-            viewport_rect.right() - modal_max_width,
-        ),
-        (viewport_rect.center().y - modal_max_height * 0.5).clamp(
-            viewport_rect.top(),
-            viewport_rect.bottom() - modal_max_height,
-        ),
-    );
-    launcher_ui::ui::modal::show_scrim(
-        ctx,
-        "curseforge_manual_download_modal_scrim",
-        viewport_rect,
-    );
     let mut action = ManualCurseForgeDownloadAction::None;
-    egui::Window::new("CurseForge Manual Downloads")
-        .id(egui::Id::new("curseforge_manual_download_modal"))
-        .order(egui::Order::Foreground)
-        .collapsible(false)
-        .resizable(false)
-        .movable(false)
-        .fixed_pos(modal_pos)
-        .fixed_size(egui::vec2(modal_max_width, modal_max_height))
-        .title_bar(false)
-        .constrain(true)
-        .constrain_to(viewport_rect)
-        .frame(launcher_ui::ui::modal::window_frame(ctx))
-        .show(ctx, |ui| {
+    let response = show_dialog(
+        ctx,
+        dialog_options("curseforge_manual_download_modal", DialogPreset::Form),
+        |ui| {
+            let modal_max_height = ui.max_rect().height();
             let body_style = textui::LabelOptions {
                 color: ui.visuals().text_color(),
                 wrap: true,
@@ -1859,7 +1834,11 @@ fn render_curseforge_manual_download_modal(
                 let message = format!(
                     "{} file{} remaining",
                     state.pending_files.len(),
-                    if state.pending_files.len() == 1 { "" } else { "s" }
+                    if state.pending_files.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
                 );
                 let _ = text_ui.label(
                     ui,
@@ -1889,13 +1868,17 @@ fn render_curseforge_manual_download_modal(
                         ui,
                         "cf_manual_download_open_downloads",
                         "Open Downloads Folder",
-                        &textui::ButtonOptions::default(),
+                        &secondary_button(ui, egui::vec2(190.0, ui::style::CONTROL_HEIGHT)),
                     )
                     .clicked()
                 {
                     action = ManualCurseForgeDownloadAction::OpenDownloadsFolder;
                 }
-                let staged_message = format!("{} of {} detected", state.staged_files.len(), state.staged_files.len() + state.pending_files.len());
+                let staged_message = format!(
+                    "{} of {} detected",
+                    state.staged_files.len(),
+                    state.staged_files.len() + state.pending_files.len()
+                );
                 let _ = text_ui.label(
                     ui,
                     "cf_manual_download_detected_count",
@@ -1937,7 +1920,10 @@ fn render_curseforge_manual_download_modal(
                                 reference.as_str(),
                                 &subtle_style,
                             );
-                            ui.hyperlink_to("Open CurseForge file page", requirement.download_page_url.as_str());
+                            ui.hyperlink_to(
+                                "Open CurseForge file page",
+                                requirement.download_page_url.as_str(),
+                            );
                         });
                         ui.add_space(ui::style::SPACE_XS);
                     }
@@ -1952,13 +1938,17 @@ fn render_curseforge_manual_download_modal(
                     ui,
                     "cf_manual_download_cancel",
                     cancel_label,
-                    &textui::ButtonOptions::default(),
+                    &secondary_button(ui, egui::vec2(160.0, ui::style::CONTROL_HEIGHT)),
                 )
                 .clicked()
             {
                 action = ManualCurseForgeDownloadAction::Cancel;
             }
-        });
+        },
+    );
+    if response.close_requested && matches!(action, ManualCurseForgeDownloadAction::None) {
+        action = ManualCurseForgeDownloadAction::Cancel;
+    }
     action
 }
 
