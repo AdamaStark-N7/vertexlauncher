@@ -1608,7 +1608,7 @@ pub(super) fn poll_runtime_prepare(
                     );
                     if had_install_progress {
                         notification::info!(
-                            format!("Installation Complete {}", state.name_input),
+                            "Installation Complete!",
                             "{} finished installing files and launched successfully.",
                             state.name_input
                         );
@@ -1636,7 +1636,7 @@ pub(super) fn poll_runtime_prepare(
                             );
                             if had_install_progress {
                                 notification::info!(
-                                    format!("Installation Complete {}", state.name_input),
+                                    "Installation Complete!",
                                     "{} finished installing successfully.",
                                     state.name_input
                                 );
@@ -1657,7 +1657,7 @@ pub(super) fn poll_runtime_prepare(
                             );
                             if had_install_progress {
                                 notification::info!(
-                                    format!("Installation Complete {}", state.name_input),
+                                    "Installation Complete!",
                                     "{} finished installing successfully.",
                                     state.name_input
                                 );

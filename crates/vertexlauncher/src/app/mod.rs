@@ -3178,7 +3178,7 @@ fn start_initial_instance_install(
                     setup.resolved_modloader_version.as_deref().unwrap_or("n/a")
                 );
                 notification::info!(
-                    format!("Installation Complete {}", instance_name),
+                    "Installation Complete!",
                     "{} installed successfully.",
                     instance_name
                 );
