@@ -7,7 +7,7 @@ use std::{
 };
 
 use config::{Config, JavaRuntimeVersion};
-use egui::Ui;
+use egui::{TextureOptions, Ui};
 use installation::{
     DownloadPolicy, InstallProgressCallback, LaunchRequest, LaunchResult, display_user_path,
     ensure_game_files, ensure_openjdk_runtime, is_instance_running,
@@ -24,6 +24,7 @@ use ui_foundation::{
 };
 
 use crate::app::tokio_runtime;
+use crate::ui::components::{image_memory::load_image_path_for_memory, image_textures};
 use crate::{assets, console, desktop, install_activity, notification, ui::style};
 
 use super::{
@@ -154,11 +155,11 @@ pub fn render(
         .data_mut(|data| data.get_temp::<LibraryRuntimeState>(state_id))
         .unwrap_or_default();
     state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
-    trim_library_thumbnail_cache(&mut state);
+    trim_library_thumbnail_cache(ui.ctx(), &mut state);
     let pending_launch_intent = peek_launch_intent(ui.ctx());
     poll_runtime_actions(&mut state, config, instances);
     poll_delete_instance_results(&mut state, instances);
-    poll_thumbnail_results(&mut state);
+    poll_thumbnail_results(ui.ctx(), &mut state);
     if !state.pending_launches.is_empty()
         || state.delete_in_flight
         || !state.thumbnail_in_flight.is_empty()
@@ -797,12 +798,18 @@ fn render_running_user_avatar(
         let mut hasher = DefaultHasher::new();
         instance_id.hash(&mut hasher);
         bytes.hash(&mut hasher);
-        let image = egui::Image::from_bytes(
-            format!("bytes://library/runtime-avatar/{}", hasher.finish()),
-            bytes.to_vec(),
-        )
-        .fit_to_exact_size(rect.size());
-        let _ = ui.put(rect, image);
+        let key = format!("bytes://library/runtime-avatar/{}", hasher.finish());
+        if let image_textures::ManagedTextureStatus::Ready(texture) =
+            image_textures::request_texture(
+                ui.ctx(),
+                key,
+                Arc::<[u8]>::from(bytes.to_vec().into_boxed_slice()),
+                TextureOptions::LINEAR,
+            )
+        {
+            let image = egui::Image::from_texture(&texture).fit_to_exact_size(rect.size());
+            let _ = ui.put(rect, image);
+        }
         return;
     }
 
@@ -1732,11 +1739,8 @@ fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str
     };
     state.thumbnail_in_flight.insert(key.clone());
     let path = path.to_path_buf();
-    let _ = tokio_runtime::spawn_detached(async move {
-        let bytes = tokio::fs::read(path.as_path())
-            .await
-            .ok()
-            .map(|bytes| Arc::<[u8]>::from(bytes.into_boxed_slice()));
+    tokio_runtime::spawn_detached(async move {
+        let bytes = load_image_path_for_memory(path.clone()).await.ok();
         if let Err(err) = tx.send((key.clone(), bytes)) {
             tracing::error!(
                 target: "vertexlauncher/library",
@@ -1749,7 +1753,7 @@ fn request_instance_thumbnail(state: &mut LibraryRuntimeState, instance_id: &str
     });
 }
 
-fn poll_thumbnail_results(state: &mut LibraryRuntimeState) {
+fn poll_thumbnail_results(ctx: &egui::Context, state: &mut LibraryRuntimeState) {
     let Some(rx) = state.thumbnail_results_rx.as_ref() else {
         return;
     };
@@ -1787,15 +1791,23 @@ fn poll_thumbnail_results(state: &mut LibraryRuntimeState) {
             },
         );
     }
-    trim_library_thumbnail_cache(state);
+    trim_library_thumbnail_cache(ctx, state);
 }
 
-fn trim_library_thumbnail_cache(state: &mut LibraryRuntimeState) {
+fn trim_library_thumbnail_cache(_ctx: &egui::Context, state: &mut LibraryRuntimeState) {
     let stale_before = state
         .thumbnail_cache_frame_index
         .saturating_sub(LIBRARY_THUMBNAIL_CACHE_STALE_FRAMES);
     state.thumbnail_cache.retain(|key, entry| {
-        state.thumbnail_in_flight.contains(key.as_str()) || entry.last_touched_frame >= stale_before
+        let keep = state.thumbnail_in_flight.contains(key.as_str())
+            || entry.last_touched_frame >= stale_before;
+        if !keep {
+            let Some((instance_id, path)) = key.split_once('\n') else {
+                return keep;
+            };
+            image_textures::evict_source_key(thumbnail_uri(instance_id, Path::new(path)).as_str());
+        }
+        keep
     });
 
     let mut total_bytes = state
@@ -1820,6 +1832,11 @@ fn trim_library_thumbnail_cache(state: &mut LibraryRuntimeState) {
             break;
         }
         if state.thumbnail_cache.remove(key.as_str()).is_some() {
+            if let Some((instance_id, path)) = key.split_once('\n') {
+                image_textures::evict_source_key(
+                    thumbnail_uri(instance_id, Path::new(path)).as_str(),
+                );
+            }
             total_bytes = total_bytes.saturating_sub(approx_bytes);
         }
     }
@@ -1860,11 +1877,20 @@ fn render_instance_thumbnail(
                             ui.allocate_exact_size(thumbnail_size, egui::Sense::hover());
                         let image_rect =
                             egui::Rect::from_center_size(rect.center(), centered_thumbnail_size);
-                        ui.put(
-                            image_rect,
-                            egui::Image::from_bytes(uri, bytes)
-                                .fit_to_exact_size(centered_thumbnail_size),
-                        );
+                        if let image_textures::ManagedTextureStatus::Ready(texture) =
+                            image_textures::request_texture(
+                                ui.ctx(),
+                                uri,
+                                bytes,
+                                TextureOptions::LINEAR,
+                            )
+                        {
+                            ui.put(
+                                image_rect,
+                                egui::Image::from_texture(&texture)
+                                    .fit_to_exact_size(centered_thumbnail_size),
+                            );
+                        }
                         return;
                     }
                 }

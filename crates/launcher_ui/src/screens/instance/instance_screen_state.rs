@@ -429,13 +429,13 @@ impl InstanceScreenState {
         self.screenshot_masonry_layout_cache = None;
     }
 
-    pub(super) fn purge_screenshot_state(&mut self) {
+    pub(super) fn purge_screenshot_state(&mut self, ctx: &egui::Context) {
         self.screenshots.clear();
         self.last_screenshot_scan_at = None;
         self.screenshot_scan_in_flight = false;
         self.screenshot_scan_results_tx = None;
         self.screenshot_scan_results_rx = None;
-        self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_images.clear(ctx);
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;
@@ -444,7 +444,7 @@ impl InstanceScreenState {
         self.mark_screenshot_layout_dirty();
     }
 
-    pub(super) fn purge_heavy_state(&mut self) {
+    pub(super) fn purge_heavy_state(&mut self, ctx: &egui::Context) {
         self.status_message = None;
         self.selected_content_tab = InstalledContentKind::Mods;
         self.installed_content_page = 1;
@@ -496,7 +496,7 @@ impl InstanceScreenState {
         self.screenshot_scan_request_serial = 0;
         self.screenshot_scan_results_tx = None;
         self.screenshot_scan_results_rx = None;
-        self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_images.clear(ctx);
         self.screenshot_layout_revision = 0;
         self.screenshot_masonry_layout_cache = None;
         self.screenshot_viewer = None;

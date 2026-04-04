@@ -12,4 +12,5 @@ syntect = "*"
 skrifa = "*"
 tracing.workspace = true
 launcher_runtime.workspace = true
-
+shared_lru.workspace = true
+etagere.workspace = true

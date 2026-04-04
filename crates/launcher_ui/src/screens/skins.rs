@@ -16,7 +16,10 @@ use launcher_runtime as tokio_runtime;
 use textui::TextUi;
 
 use super::LaunchAuthContext;
-use crate::{notification, privacy, ui::style};
+use crate::{
+    notification, privacy,
+    ui::{components::image_textures, style},
+};
 
 const PREVIEW_ORBIT_SECONDS: f64 = 45.0;
 const PREVIEW_TARGET_FPS: f32 = 60.0;
@@ -6702,16 +6705,34 @@ fn draw_cape_tile(
                 egui::StrokeKind::Middle,
             );
 
-            egui::Image::from_bytes(uri, bytes.to_vec())
-                .uv(back_uv)
-                .fit_to_exact_size(back_rect.size())
-                .texture_options(TextureOptions::NEAREST)
-                .paint_at(ui, back_rect);
+            if let image_textures::ManagedTextureStatus::Ready(texture) =
+                image_textures::request_texture(
+                    ui.ctx(),
+                    uri.clone(),
+                    Arc::<[u8]>::from(bytes.to_vec().into_boxed_slice()),
+                    TextureOptions::NEAREST,
+                )
+            {
+                egui::Image::from_texture(&texture)
+                    .uv(back_uv)
+                    .fit_to_exact_size(back_rect.size())
+                    .texture_options(TextureOptions::NEAREST)
+                    .paint_at(ui, back_rect);
+            }
         } else {
-            let image = egui::Image::from_bytes(uri, bytes.to_vec())
-                .fit_to_exact_size(preview_rect.size())
-                .texture_options(TextureOptions::NEAREST);
-            image.paint_at(ui, preview_rect);
+            if let image_textures::ManagedTextureStatus::Ready(texture) =
+                image_textures::request_texture(
+                    ui.ctx(),
+                    uri,
+                    Arc::<[u8]>::from(bytes.to_vec().into_boxed_slice()),
+                    TextureOptions::NEAREST,
+                )
+            {
+                let image = egui::Image::from_texture(&texture)
+                    .fit_to_exact_size(preview_rect.size())
+                    .texture_options(TextureOptions::NEAREST);
+                image.paint_at(ui, preview_rect);
+            }
         }
     } else {
         ui.painter().rect_filled(

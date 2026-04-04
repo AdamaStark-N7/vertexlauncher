@@ -1,36 +1,40 @@
-use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::sync::{Arc, Mutex, OnceLock, mpsc};
 use std::time::Duration;
 
-use egui::Ui;
-use image::ImageFormat;
+use egui::{TextureOptions, Ui};
+use shared_lru::ThreadSafeLru;
 
 use crate::app::tokio_runtime;
+
+use super::{image_memory::compress_rgba_image_for_memory, image_textures};
 
 const TILE_MAX_DIM: u32 = 4096;
 const REMOTE_IMAGE_MAX_BYTES: usize = 96 * 1024 * 1024;
 const REMOTE_IMAGE_STALE_FRAMES: u64 = 900;
 
+#[derive(Clone)]
 enum RemoteImageState {
     Loading,
     Ready(Arc<TiledImage>),
     Failed,
 }
 
+#[derive(Clone)]
 struct RemoteImageEntry {
     state: RemoteImageState,
-    approx_bytes: usize,
     last_touched_frame: u64,
 }
 
+#[derive(Clone)]
 struct TiledImage {
     width: u32,
     height: u32,
     tiles: Vec<TileImage>,
 }
 
+#[derive(Clone)]
 struct TileImage {
     x: u32,
     y: u32,
@@ -40,12 +44,22 @@ struct TileImage {
     bytes: Arc<[u8]>,
 }
 
-#[derive(Default)]
 struct RemoteImageCache {
-    states: HashMap<String, RemoteImageEntry>,
+    states: ThreadSafeLru<String, RemoteImageEntry>,
     frame_index: u64,
     tx: Option<mpsc::Sender<(String, Result<Arc<TiledImage>, String>)>>,
     rx: Option<Arc<Mutex<mpsc::Receiver<(String, Result<Arc<TiledImage>, String>)>>>>,
+}
+
+impl Default for RemoteImageCache {
+    fn default() -> Self {
+        Self {
+            states: ThreadSafeLru::new(REMOTE_IMAGE_MAX_BYTES),
+            frame_index: 0,
+            tx: None,
+            rx: None,
+        }
+    }
 }
 
 fn cache() -> &'static Mutex<RemoteImageCache> {
@@ -62,7 +76,7 @@ fn ensure_channel(cache: &mut RemoteImageCache) {
     cache.rx = Some(Arc::new(Mutex::new(rx)));
 }
 
-fn poll_updates(cache: &mut RemoteImageCache) -> bool {
+fn poll_updates(ctx: &egui::Context, cache: &mut RemoteImageCache) -> bool {
     let mut updates = Vec::new();
     let mut should_reset = false;
     if let Some(rx) = cache.rx.as_ref() {
@@ -94,20 +108,35 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
     if should_reset {
         cache.tx = None;
         cache.rx = None;
+        // Remove any entries still stuck in Loading state — their in-flight tasks
+        // held the old sender and can no longer deliver results. Removing them lets
+        // the next show() call re-dispatch a fresh request on the new channel.
+        cache.states.write(|state| {
+            state.retain(|_, entry| !matches!(entry.value.state, RemoteImageState::Loading))
+        });
     }
 
     let mut did_update = false;
     for (url, result) in updates {
         match result {
             Ok(image) => {
-                cache.states.insert(
-                    url,
-                    RemoteImageEntry {
-                        approx_bytes: tiled_image_bytes(image.as_ref()),
-                        last_touched_frame: cache.frame_index,
-                        state: RemoteImageState::Ready(image),
-                    },
-                );
+                let approx_bytes = tiled_image_bytes(image.as_ref());
+                let evicted = cache.states.write(|state| {
+                    state.insert_without_eviction(
+                        url,
+                        RemoteImageEntry {
+                            last_touched_frame: cache.frame_index,
+                            state: RemoteImageState::Ready(image),
+                        },
+                        approx_bytes,
+                    );
+                    state.evict_to_budget_where(|_, entry| {
+                        !matches!(entry.value.state, RemoteImageState::Loading)
+                    })
+                });
+                for (_, entry) in evicted {
+                    forget_remote_entry(ctx, &entry);
+                }
             }
             Err(err) => {
                 tracing::warn!(
@@ -116,20 +145,28 @@ fn poll_updates(cache: &mut RemoteImageCache) -> bool {
                     error = %err,
                     "Remote image load failed."
                 );
-                cache.states.insert(
-                    url,
-                    RemoteImageEntry {
-                        approx_bytes: 0,
-                        last_touched_frame: cache.frame_index,
-                        state: RemoteImageState::Failed,
-                    },
-                );
+                let evicted = cache.states.write(|state| {
+                    state.insert_without_eviction(
+                        url,
+                        RemoteImageEntry {
+                            last_touched_frame: cache.frame_index,
+                            state: RemoteImageState::Failed,
+                        },
+                        0,
+                    );
+                    state.evict_to_budget_where(|_, entry| {
+                        !matches!(entry.value.state, RemoteImageState::Loading)
+                    })
+                });
+                for (_, entry) in evicted {
+                    forget_remote_entry(ctx, &entry);
+                }
             }
         }
         did_update = true;
     }
     if did_update {
-        trim_remote_cache(cache);
+        trim_remote_cache(ctx, cache);
     }
     did_update
 }
@@ -155,11 +192,14 @@ pub fn show(
         };
         cache.frame_index = cache.frame_index.saturating_add(1);
         let frame_index = cache.frame_index;
-        trim_remote_cache(&mut cache);
-        let mut request_follow_up_repaint = poll_updates(&mut cache);
+        trim_remote_cache(ui.ctx(), &mut cache);
+        let mut request_follow_up_repaint = poll_updates(ui.ctx(), &mut cache);
 
-        if let Some(entry) = cache.states.get_mut(normalized_url) {
-            entry.last_touched_frame = frame_index;
+        if let Some(entry) = cache.states.write(|state| {
+            let entry = state.touch(&normalized_url.to_owned())?;
+            entry.value.last_touched_frame = frame_index;
+            Some(entry.value.clone())
+        }) {
             match &entry.state {
                 RemoteImageState::Ready(image) => {
                     render_ready = Some(Arc::clone(image));
@@ -178,14 +218,16 @@ pub fn show(
                 show_placeholder(ui, desired_size, id_source, placeholder_svg);
                 return;
             };
-            cache.states.insert(
-                normalized_url.to_owned(),
-                RemoteImageEntry {
-                    state: RemoteImageState::Loading,
-                    approx_bytes: 0,
-                    last_touched_frame: frame_index,
-                },
-            );
+            cache.states.write(|state| {
+                state.insert_without_eviction(
+                    normalized_url.to_owned(),
+                    RemoteImageEntry {
+                        state: RemoteImageState::Loading,
+                        last_touched_frame: frame_index,
+                    },
+                    0,
+                );
+            });
             request_follow_up_repaint = true;
             let url_owned = normalized_url.to_owned();
             tokio_runtime::spawn_blocking_detached(move || {
@@ -225,9 +267,17 @@ fn show_tiled(ui: &mut Ui, image: &TiledImage, desired_size: egui::Vec2) {
         let max_y = rect.top() + rect.height() * ((tile.y + tile.height) as f32 / height);
         let tile_rect =
             egui::Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y));
-        let image = egui::Image::from_bytes(tile.uri.clone(), Arc::clone(&tile.bytes))
-            .fit_to_exact_size(tile_rect.size());
-        let _ = ui.put(tile_rect, image);
+        if let image_textures::ManagedTextureStatus::Ready(texture) =
+            image_textures::request_texture(
+                ui.ctx(),
+                tile.uri.clone(),
+                Arc::clone(&tile.bytes),
+                TextureOptions::LINEAR,
+            )
+        {
+            let image = egui::Image::from_texture(&texture).fit_to_exact_size(tile_rect.size());
+            let _ = ui.put(tile_rect, image);
+        }
     }
 }
 
@@ -272,12 +322,8 @@ fn fetch_and_tile_remote_image(url: &str) -> Result<Arc<TiledImage>, String> {
         for x in (0..width).step_by(TILE_MAX_DIM as usize) {
             let tile_width = (width - x).min(TILE_MAX_DIM);
             let tile_height = (height - y).min(TILE_MAX_DIM);
-            let tile_image = image.crop_imm(x, y, tile_width, tile_height);
-            let mut cursor = std::io::Cursor::new(Vec::new());
-            tile_image
-                .write_to(&mut cursor, ImageFormat::Png)
-                .map_err(|err| format!("failed to encode tiled icon {url}: {err}"))?;
-            let tile_bytes = cursor.into_inner();
+            let tile_image = image.crop_imm(x, y, tile_width, tile_height).to_rgba8();
+            let tile_bytes = compress_rgba_image_for_memory(tile_image, None);
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             url.hash(&mut hasher);
             x.hash(&mut hasher);
@@ -303,39 +349,32 @@ fn fetch_and_tile_remote_image(url: &str) -> Result<Arc<TiledImage>, String> {
     }))
 }
 
-fn trim_remote_cache(cache: &mut RemoteImageCache) {
+fn trim_remote_cache(ctx: &egui::Context, cache: &mut RemoteImageCache) {
     let stale_before = cache.frame_index.saturating_sub(REMOTE_IMAGE_STALE_FRAMES);
-    cache.states.retain(|_, entry| {
-        matches!(entry.state, RemoteImageState::Loading) || entry.last_touched_frame >= stale_before
+    let evicted = cache.states.write(|state| {
+        state.retain(|_, entry| {
+            matches!(entry.value.state, RemoteImageState::Loading)
+                || entry.value.last_touched_frame >= stale_before
+        })
     });
-
-    let mut total_bytes = cache
-        .states
-        .values()
-        .map(|entry| entry.approx_bytes)
-        .sum::<usize>();
-    if total_bytes <= REMOTE_IMAGE_MAX_BYTES {
-        return;
+    for (_, entry) in evicted {
+        forget_remote_entry(ctx, &entry);
     }
 
-    let mut eviction_order = cache
-        .states
-        .iter()
-        .filter_map(|(key, entry)| match entry.state {
-            RemoteImageState::Ready(_) | RemoteImageState::Failed => {
-                Some((key.clone(), entry.last_touched_frame, entry.approx_bytes))
-            }
-            RemoteImageState::Loading => None,
+    let evicted = cache.states.write(|state| {
+        state.evict_to_budget_where(|_, entry| {
+            !matches!(entry.value.state, RemoteImageState::Loading)
         })
-        .collect::<Vec<_>>();
-    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
+    });
+    for (_, entry) in evicted {
+        forget_remote_entry(ctx, &entry);
+    }
+}
 
-    for (key, _, approx_bytes) in eviction_order {
-        if total_bytes <= REMOTE_IMAGE_MAX_BYTES {
-            break;
-        }
-        if cache.states.remove(key.as_str()).is_some() {
-            total_bytes = total_bytes.saturating_sub(approx_bytes);
+fn forget_remote_entry(_ctx: &egui::Context, entry: &RemoteImageEntry) {
+    if let RemoteImageState::Ready(image) = &entry.state {
+        for tile in &image.tiles {
+            image_textures::evict_source_key(tile.uri.as_str());
         }
     }
 }

@@ -7,7 +7,7 @@ use content_resolver::{
     InstalledContentResolver, ResolveInstalledContentRequest,
 };
 use directories::UserDirs;
-use egui::{Ui, scroll_area::ScrollSource};
+use egui::{TextureOptions, Ui, scroll_area::ScrollSource};
 use flate2::read::GzDecoder;
 use installation::{
     DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, LaunchRequest,
@@ -47,7 +47,7 @@ use crate::desktop;
 use crate::screens::{AppScreen, LaunchAuthContext};
 use crate::ui::{
     components::{
-        icon_button,
+        icon_button, image_textures,
         lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
         remote_tiled_image, settings_widgets,
         virtual_masonry::{build_virtual_masonry_layout, render_virtualized_masonry},
@@ -168,7 +168,7 @@ pub fn purge_inactive_state(ctx: &egui::Context, selected_instance_id: Option<&s
         let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
             return;
         };
-        state.purge_heavy_state();
+        state.purge_heavy_state(ctx);
         data.insert_temp(state_id, state);
     });
 }
@@ -182,7 +182,7 @@ pub fn purge_screenshot_state(ctx: &egui::Context, selected_instance_id: Option<
         let Some(mut state) = data.get_temp::<InstanceScreenState>(state_id) else {
             return;
         };
-        state.purge_screenshot_state();
+        state.purge_screenshot_state(ctx);
         data.insert_temp(state_id, state);
     });
 }
@@ -290,6 +290,8 @@ pub fn render(
     config: &mut Config,
     account_avatars_by_key: &HashMap<String, Vec<u8>>,
 ) -> InstanceScreenOutput {
+    ui.ctx()
+        .options_mut(|options| options.reduce_texture_memory = true);
     let mut output = InstanceScreenOutput::default();
     let body_style = style::body(ui);
     let muted_style = style::muted(ui);
@@ -320,7 +322,6 @@ pub fn render(
         .data_mut(|d| d.get_temp::<InstanceScreenState>(state_id))
         .unwrap_or_else(|| InstanceScreenState::from_instance(&instance_snapshot, config));
     let previous_tab = state.active_tab;
-    state.screenshot_images.begin_frame();
 
     poll_background_tasks(&mut state, config, instances, instance_id);
     poll_vtmpack_export_progress(&mut state);
@@ -351,7 +352,6 @@ pub fn render(
     poll_instance_screenshot_scan_results(&mut state);
     poll_instance_log_scan_results(&mut state);
     poll_instance_log_load_results(&mut state);
-    let screenshot_images_updated = state.screenshot_images.poll();
     sync_version_catalog(&mut state, config.include_snapshots_and_betas(), false);
     if state.version_catalog_in_flight
         || !state.modloader_versions_in_flight.is_empty()
@@ -458,8 +458,10 @@ pub fn render(
     if previous_tab == InstanceScreenTab::ScreenshotGallery
         && state.active_tab != InstanceScreenTab::ScreenshotGallery
     {
-        state.purge_screenshot_state();
+        state.purge_screenshot_state(ui.ctx());
     }
+    state.screenshot_images.begin_frame(ui.ctx());
+    let screenshot_images_updated = state.screenshot_images.poll(ui.ctx());
     ui.add_space(12.0);
 
     match state.active_tab {
@@ -477,7 +479,9 @@ pub fn render(
 
             let mut retained_image_keys = HashSet::new();
             retain_instance_viewer_image(&mut state, &mut retained_image_keys);
-            state.screenshot_images.retain_loaded(&retained_image_keys);
+            state
+                .screenshot_images
+                .retain_loaded(ui.ctx(), &retained_image_keys);
         }
         InstanceScreenTab::ScreenshotGallery => {
             let should_scan = state
@@ -513,7 +517,9 @@ pub fn render(
             let mut retained_image_keys = HashSet::new();
             render_instance_screenshot_gallery(ui, text_ui, &mut state, &mut retained_image_keys);
             retain_instance_viewer_image(&mut state, &mut retained_image_keys);
-            state.screenshot_images.retain_loaded(&retained_image_keys);
+            state
+                .screenshot_images
+                .retain_loaded(ui.ctx(), &retained_image_keys);
         }
         InstanceScreenTab::Logs => {
             let should_scan = state
@@ -528,7 +534,9 @@ pub fn render(
 
             let mut retained_image_keys = HashSet::new();
             retain_instance_viewer_image(&mut state, &mut retained_image_keys);
-            state.screenshot_images.retain_loaded(&retained_image_keys);
+            state
+                .screenshot_images
+                .retain_loaded(ui.ctx(), &retained_image_keys);
         }
     }
 
@@ -689,10 +697,25 @@ fn render_instance_screenshot_tile(
     let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     if let Some(bytes) = image_bytes.as_ref() {
-        egui::Image::from_bytes(image_key, Arc::clone(bytes))
-            .fit_to_exact_size(rect.size())
-            .corner_radius(egui::CornerRadius::same(14))
-            .paint_at(ui, rect);
+        match image_textures::request_texture(
+            ui.ctx(),
+            image_key.clone(),
+            Arc::clone(bytes),
+            TextureOptions::LINEAR,
+        ) {
+            image_textures::ManagedTextureStatus::Ready(texture) => {
+                egui::Image::from_texture(&texture)
+                    .fit_to_exact_size(rect.size())
+                    .corner_radius(egui::CornerRadius::same(14))
+                    .paint_at(ui, rect);
+            }
+            image_textures::ManagedTextureStatus::Loading => {
+                paint_instance_screenshot_placeholder(ui, rect, LazyImageBytesStatus::Loading);
+            }
+            image_textures::ManagedTextureStatus::Failed => {
+                paint_instance_screenshot_placeholder(ui, rect, LazyImageBytesStatus::Failed);
+            }
+        }
     } else {
         paint_instance_screenshot_placeholder(ui, rect, image_status);
     }
@@ -1014,12 +1037,49 @@ fn render_instance_screenshot_viewer_modal(
             }
 
             if let Some(bytes) = image_bytes.as_ref() {
-                egui::Image::from_bytes(image_key, Arc::clone(bytes))
-                    .fit_to_exact_size(image_rect.size())
-                    .maintain_aspect_ratio(false)
-                    .uv(instance_viewer_uv_rect(viewer_state))
-                    .corner_radius(egui::CornerRadius::same(12))
-                    .paint_at(ui, image_rect);
+                match image_textures::request_texture(
+                    ui.ctx(),
+                    image_key.clone(),
+                    Arc::clone(bytes),
+                    TextureOptions::LINEAR,
+                ) {
+                    image_textures::ManagedTextureStatus::Ready(texture) => {
+                        egui::Image::from_texture(&texture)
+                            .fit_to_exact_size(image_rect.size())
+                            .maintain_aspect_ratio(false)
+                            .uv(instance_viewer_uv_rect(viewer_state))
+                            .corner_radius(egui::CornerRadius::same(12))
+                            .paint_at(ui, image_rect);
+                    }
+                    image_textures::ManagedTextureStatus::Loading => {
+                        ui.painter().rect_filled(
+                            image_rect,
+                            egui::CornerRadius::same(12),
+                            ui.visuals().widgets.inactive.bg_fill,
+                        );
+                        ui.painter().text(
+                            image_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Loading screenshot...",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                    image_textures::ManagedTextureStatus::Failed => {
+                        ui.painter().rect_filled(
+                            image_rect,
+                            egui::CornerRadius::same(12),
+                            ui.visuals().widgets.inactive.bg_fill,
+                        );
+                        ui.painter().text(
+                            image_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Failed to load screenshot",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
             } else {
                 ui.painter().rect_filled(
                     image_rect,
@@ -1657,8 +1717,19 @@ fn refresh_instance_screenshots(
     let request_id = state.screenshot_scan_request_serial;
     state.screenshot_scan_in_flight = true;
     let instance_root = instance_root.to_path_buf();
-    let _ = tokio_runtime::spawn_detached(async move {
-        let screenshots = collect_instance_screenshots(instance_root.as_path());
+    tokio_runtime::spawn_detached(async move {
+        let screenshots = tokio_runtime::spawn_blocking(move || {
+            collect_instance_screenshots(instance_root.as_path())
+        })
+        .await;
+        let Ok(screenshots) = screenshots else {
+            tracing::error!(
+                target: "vertexlauncher/instance",
+                request_id,
+                "Failed to complete instance screenshot scan task."
+            );
+            return;
+        };
         if let Err(err) = tx.send((request_id, screenshots)) {
             tracing::error!(
                 target: "vertexlauncher/instance",

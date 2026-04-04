@@ -7,8 +7,7 @@ use std::{
 };
 
 use managed_content::{
-    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource,
-    content_manifest_path,
+    CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource, content_manifest_path,
 };
 
 use crate::constants::VTMPACK_MANIFEST_VERSION;

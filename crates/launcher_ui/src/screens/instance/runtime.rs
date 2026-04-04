@@ -343,7 +343,7 @@ pub(super) fn render_runtime_row(
             } else if state.running {
                 "Running"
             } else {
-                "Stopped"
+                "Instance is not Running"
             },
             &muted_style,
         );
@@ -545,12 +545,18 @@ pub(super) fn render_runtime_avatar(
         let mut hasher = DefaultHasher::new();
         id.hash(&mut hasher);
         bytes.hash(&mut hasher);
-        let image = egui::Image::from_bytes(
-            format!("bytes://instance/runtime-avatar/{}", hasher.finish()),
-            bytes.to_vec(),
-        )
-        .fit_to_exact_size(rect.size());
-        let _ = ui.put(rect, image);
+        let key = format!("bytes://instance/runtime-avatar/{}", hasher.finish());
+        if let crate::ui::components::image_textures::ManagedTextureStatus::Ready(texture) =
+            crate::ui::components::image_textures::request_texture(
+                ui.ctx(),
+                key,
+                Arc::<[u8]>::from(bytes.to_vec().into_boxed_slice()),
+                egui::TextureOptions::LINEAR,
+            )
+        {
+            let image = egui::Image::from_texture(&texture).fit_to_exact_size(rect.size());
+            let _ = ui.put(rect, image);
+        }
         return;
     }
 

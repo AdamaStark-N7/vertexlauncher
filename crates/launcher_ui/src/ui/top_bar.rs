@@ -1,18 +1,22 @@
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 use egui::{
     self, Align, Context, CursorIcon, Layout, ResizeDirection, Sense, TopBottomPanel,
     ViewportCommand,
 };
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
+use shared_lru::ThreadSafeLru;
 use textui::{ButtonOptions, LabelOptions, TextUi};
 use ui_foundation::{is_compact_width, popup_width};
 
 use crate::{
     assets, privacy,
-    ui::{components::icon_button, style},
+    ui::{
+        components::{icon_button, image_textures},
+        style,
+    },
 };
 
 const TOP_BAR_HEIGHT: f32 = 38.0;
@@ -348,12 +352,9 @@ fn render_profile_button(
         let mut hasher = DefaultHasher::new();
         avatar_png.hash(&mut hasher);
         let avatar_hash = hasher.finish();
-        let uri = format!("bytes://vertex-profile/avatar-rounded-{avatar_hash:016x}.png");
-        let icon = egui::Image::from_bytes(
-            uri,
-            rounded_profile_avatar_png(avatar_hash, avatar_png, PROFILE_BUTTON_CORNER_RADIUS),
-        )
-        .fit_to_exact_size(egui::vec2(button_size.max(1.0), button_size.max(1.0)));
+        let key = format!("bytes://vertex-profile/avatar-rounded-{avatar_hash:016x}.png");
+        let rounded =
+            rounded_profile_avatar_png(avatar_hash, avatar_png, PROFILE_BUTTON_CORNER_RADIUS);
 
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(button_size, button_size), egui::Sense::click());
@@ -377,7 +378,13 @@ fn render_profile_button(
             egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
             egui::StrokeKind::Inside,
         );
-        let _ = ui.put(rect, icon);
+        if let image_textures::ManagedTextureStatus::Ready(texture) =
+            image_textures::request_texture(ui.ctx(), key, rounded, egui::TextureOptions::LINEAR)
+        {
+            let icon = egui::Image::from_texture(&texture)
+                .fit_to_exact_size(egui::vec2(button_size.max(1.0), button_size.max(1.0)));
+            let _ = ui.put(rect, icon);
+        }
         response
     } else if profile_ui.display_name.is_none() && profile_ui.auth_busy {
         render_profile_pending_button(ui, button_size)
@@ -436,40 +443,29 @@ fn render_profile_pending_button(ui: &mut egui::Ui, button_size: f32) -> egui::R
 }
 
 fn rounded_profile_avatar_png(cache_key: u64, avatar_png: &[u8], radius: u8) -> Arc<[u8]> {
-    static CACHE: OnceLock<Mutex<HashMap<u64, (Arc<[u8]>, u64)>>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut next_tick = 0u64;
+    static CACHE: OnceLock<ThreadSafeLru<u64, Arc<[u8]>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| ThreadSafeLru::new(usize::MAX));
 
-    if let Ok(mut cache) = cache.lock() {
-        next_tick = cache.values().map(|(_, tick)| *tick).max().unwrap_or(0) + 1;
-        if let Some((bytes, tick)) = cache.get_mut(&cache_key) {
-            *tick = next_tick;
-            return Arc::clone(bytes);
-        }
+    if let Some(bytes) = cache.write(|state| {
+        state
+            .touch(&cache_key)
+            .map(|entry| Arc::clone(&entry.value))
+    }) {
+        return bytes;
     }
 
     let rounded = Arc::<[u8]>::from(
         round_avatar_png_bytes(avatar_png, radius).unwrap_or_else(|| avatar_png.to_vec()),
     );
 
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(cache_key, (Arc::clone(&rounded), next_tick));
-        if cache.len() > ROUNDED_AVATAR_CACHE_MAX_ENTRIES {
-            let mut eviction_order = cache
-                .iter()
-                .map(|(key, (_, tick))| (*key, *tick))
-                .collect::<Vec<_>>();
-            eviction_order.sort_by_key(|(_, tick)| *tick);
-            while cache.len() > ROUNDED_AVATAR_CACHE_MAX_ENTRIES {
-                if let Some((key, _)) = eviction_order.first().copied() {
-                    cache.remove(&key);
-                    eviction_order.remove(0);
-                } else {
-                    break;
-                }
+    cache.write(|state| {
+        state.insert_without_eviction(cache_key, Arc::clone(&rounded), rounded.len());
+        while state.len() > ROUNDED_AVATAR_CACHE_MAX_ENTRIES {
+            if state.pop_lru().is_none() {
+                break;
             }
         }
-    }
+    });
 
     rounded
 }

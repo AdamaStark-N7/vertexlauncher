@@ -18,6 +18,7 @@ members = [
     "crates/modprovider",
     "crates/modrinth",
     "crates/runtime_bootstrap",
+    "crates/shared_lru",
     "crates/textui",
     "crates/vertex_constants",
     "crates/vtmpack",
@@ -41,6 +42,7 @@ directories = "6.0.0"
 image = "0.24.9"
 cosmic-text = "0.15.0"
 glyphon = "0.10.0"
+etagere = "0.2.15"
 pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
 base64 = "0.22.1"
@@ -69,6 +71,7 @@ modrinth = { path = "crates/modrinth" }
 modprovider = { path = "crates/modprovider" }
 fontloader = { path = "crates/fontloader" }
 runtime_bootstrap = { path = "crates/runtime_bootstrap" }
+shared_lru = { path = "crates/shared_lru" }
 textui = { path = "crates/textui" }
 vtmpack = { path = "crates/vtmpack" }
 vertex_constants = { path = "crates/vertex_constants" }

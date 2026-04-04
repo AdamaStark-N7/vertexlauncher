@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::hash::{Hash, Hasher};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
 use config::Config;
-use egui::{Color32, Layout, Ui};
+use egui::{Color32, Layout, TextureOptions, Ui};
 use flate2::read::GzDecoder;
 use instances::{InstanceStore, instance_root_path, set_server_favorite, set_world_favorite};
 use launcher_runtime as tokio_runtime;
@@ -31,6 +31,8 @@ use crate::{
     },
     ui::{
         components::{
+            image_memory::{load_image_path_for_memory, prepare_owned_image_bytes_for_memory},
+            image_textures,
             lazy_image_bytes::{LazyImageBytes, LazyImageBytesStatus},
             virtual_masonry::{
                 CachedVirtualMasonryLayout, build_virtual_masonry_layout,
@@ -53,6 +55,10 @@ const ENTRY_ICON_SIZE: f32 = 14.0;
 const SERVER_PING_ICON_SIZE: f32 = 24.0;
 const FAVORITE_STAR_BUTTON_SIZE: f32 = 20.0;
 const FAVORITE_STAR_ICON_SIZE: f32 = 14.0;
+const ACTIVITY_ENTRY_THUMBNAIL_SIZE: f32 = 34.0;
+const ACTIVITY_ENTRY_CONTENT_GAP: f32 = 8.0;
+const ACTIVITY_ENTRY_ROW_VERTICAL_PADDING: f32 = 5.0;
+const ACTIVITY_ENTRY_ROW_HORIZONTAL_PADDING: f32 = 8.0;
 const SCREENSHOT_SCAN_INTERVAL: Duration = Duration::from_secs(10);
 const SCREENSHOT_PAGE_SIZE: usize = 30;
 const SCREENSHOT_TILE_GAP: f32 = 10.0;
@@ -188,7 +194,7 @@ struct WorldEntry {
     cheats_enabled: Option<bool>,
     difficulty: Option<String>,
     version_name: Option<String>,
-    thumbnail_png: Option<Vec<u8>>,
+    thumbnail_png: Option<Arc<[u8]>>,
     last_used_at_ms: Option<u64>,
     favorite: bool,
 }
@@ -202,7 +208,7 @@ struct ServerEntry {
     favorite_id: String,
     host: String,
     port: u16,
-    icon_png: Option<Vec<u8>>,
+    icon_png: Option<Arc<[u8]>>,
     last_used_at_ms: Option<u64>,
     favorite: bool,
 }
@@ -297,7 +303,7 @@ impl HomeState {
         self.screenshot_masonry_layout_cache = None;
     }
 
-    fn purge_screenshot_state(&mut self) {
+    fn purge_screenshot_state(&mut self, ctx: &egui::Context) {
         self.latest_requested_screenshot_scan_id =
             self.latest_requested_screenshot_scan_id.saturating_add(1);
         self.screenshots.clear();
@@ -309,13 +315,40 @@ impl HomeState {
         self.screenshot_tasks_done = 0;
         self.screenshot_candidates.clear();
         self.screenshot_loaded_count = 0;
-        self.screenshot_images = LazyImageBytes::default();
+        self.screenshot_images.clear(ctx);
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;
         self.delete_screenshot_results_tx = None;
         self.delete_screenshot_results_rx = None;
         self.mark_screenshot_layout_dirty();
+    }
+
+    fn purge_activity_image_state(&mut self, ctx: &egui::Context) {
+        for world in &mut self.worlds {
+            if world.thumbnail_png.take().is_some() {
+                image_textures::evict_source_key(&home_world_thumbnail_uri(
+                    world.instance_id.as_str(),
+                    world.world_id.as_str(),
+                ));
+            }
+        }
+        for server in &mut self.servers {
+            if server.icon_png.take().is_some() {
+                image_textures::evict_source_key(&home_server_icon_uri(
+                    server.instance_id.as_str(),
+                    server.favorite_id.as_str(),
+                ));
+            }
+        }
+        for key in self.instance_thumbnail_cache.keys() {
+            forget_home_thumbnail(ctx, key);
+        }
+        self.instance_thumbnail_cache.clear();
+        self.instance_thumbnail_in_flight.clear();
+        self.instance_thumbnail_results_tx = None;
+        self.instance_thumbnail_results_rx = None;
+        self.last_scan_at = None;
     }
 }
 
@@ -431,7 +464,13 @@ fn home_state_id() -> egui::Id {
 }
 
 pub fn purge_inactive_state(ctx: &egui::Context) {
-    ctx.data_mut(|data| data.insert_temp(home_state_id(), HomeState::default()));
+    ctx.data_mut(|data| {
+        if let Some(mut state) = data.get_temp::<HomeState>(home_state_id()) {
+            state.purge_screenshot_state(ctx);
+            state.purge_activity_image_state(ctx);
+        }
+        data.insert_temp(home_state_id(), HomeState::default());
+    });
 }
 
 pub fn purge_screenshot_state(ctx: &egui::Context) {
@@ -439,7 +478,7 @@ pub fn purge_screenshot_state(ctx: &egui::Context) {
         let Some(mut state) = data.get_temp::<HomeState>(home_state_id()) else {
             return;
         };
-        state.purge_screenshot_state();
+        state.purge_screenshot_state(ctx);
         data.insert_temp(home_state_id(), state);
     });
 }
@@ -623,8 +662,8 @@ fn spawn_screenshot_load_page(state: &mut HomeState, request_id: u64, page_size:
 
     for candidate in state.screenshot_candidates[start..end].iter().cloned() {
         let tx = result_tx.clone();
-        let _ = tokio_runtime::spawn(async move {
-            let entry = (|| {
+        tokio_runtime::spawn_detached(async move {
+            let entry = tokio_runtime::spawn_blocking(move || {
                 let Ok((width, height)) = image::image_dimensions(&candidate.path) else {
                     return None;
                 };
@@ -639,7 +678,10 @@ fn spawn_screenshot_load_page(state: &mut HomeState, request_id: u64, page_size:
                     height,
                     modified_at_ms: candidate.modified_at_ms,
                 })
-            })();
+            })
+            .await
+            .ok()
+            .flatten();
             if let Some(entry) = entry {
                 if let Err(err) = tx.send(ScreenshotScanMessage::EntryLoaded { request_id, entry })
                 {
@@ -849,6 +891,8 @@ pub fn render(
     streamer_mode: bool,
 ) -> HomeOutput {
     let mut output = HomeOutput::default();
+    ui.ctx()
+        .options_mut(|options| options.reduce_texture_memory = true);
     let metrics = HomeUiMetrics::from_ui(ui);
     let state_id = home_state_id();
     let mut state = ui
@@ -856,23 +900,28 @@ pub fn render(
         .data_mut(|data| data.get_temp::<HomeState>(state_id))
         .unwrap_or_default();
     let previous_tab = state.active_tab;
-    ui.ctx().request_repaint_after(Duration::from_millis(250));
-    state.screenshot_images.begin_frame();
-    state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
-    trim_home_thumbnail_cache(&mut state);
-    let screenshot_images_updated = state.screenshot_images.poll();
 
     render_home_tab_row(ui, text_ui, &mut state.active_tab, metrics);
     if previous_tab == HomeTab::Screenshots && state.active_tab != HomeTab::Screenshots {
-        state.purge_screenshot_state();
+        state.purge_screenshot_state(ui.ctx());
     }
+    if previous_tab == HomeTab::InstancesAndWorlds
+        && state.active_tab != HomeTab::InstancesAndWorlds
+    {
+        state.purge_activity_image_state(ui.ctx());
+    }
+    ui.ctx().request_repaint_after(Duration::from_millis(250));
+    state.screenshot_images.begin_frame(ui.ctx());
+    state.thumbnail_cache_frame_index = state.thumbnail_cache_frame_index.saturating_add(1);
+    trim_home_thumbnail_cache(ui.ctx(), &mut state);
+    let screenshot_images_updated = state.screenshot_images.poll(ui.ctx());
     ui.add_space(14.0);
 
     match state.active_tab {
         HomeTab::InstancesAndWorlds => {
             poll_home_activity_results(&mut state);
             poll_server_ping_results(&mut state);
-            poll_instance_thumbnail_results(&mut state);
+            poll_instance_thumbnail_results(ui.ctx(), &mut state);
             let should_scan = state
                 .last_scan_at
                 .is_none_or(|last| last.elapsed() >= HOME_SCAN_INTERVAL)
@@ -920,7 +969,9 @@ pub fn render(
 
             let mut retained_image_keys = HashSet::new();
             retain_home_viewer_image(&mut state, &mut retained_image_keys);
-            state.screenshot_images.retain_loaded(&retained_image_keys);
+            state
+                .screenshot_images
+                .retain_loaded(ui.ctx(), &retained_image_keys);
         }
         HomeTab::Screenshots => {
             poll_delete_screenshot_results(&mut state, instances, config);
@@ -963,7 +1014,9 @@ pub fn render(
             let mut retained_image_keys = HashSet::new();
             render_screenshot_gallery(ui, text_ui, &mut state, &mut retained_image_keys, metrics);
             retain_home_viewer_image(&mut state, &mut retained_image_keys);
-            state.screenshot_images.retain_loaded(&retained_image_keys);
+            state
+                .screenshot_images
+                .retain_loaded(ui.ctx(), &retained_image_keys);
         }
     }
 
@@ -1129,10 +1182,25 @@ fn render_screenshot_tile(
     let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     if let Some(bytes) = image_bytes.as_ref() {
-        egui::Image::from_bytes(image_key, Arc::clone(bytes))
-            .fit_to_exact_size(rect.size())
-            .corner_radius(egui::CornerRadius::same(14))
-            .paint_at(ui, rect);
+        match image_textures::request_texture(
+            ui.ctx(),
+            image_key.clone(),
+            Arc::clone(bytes),
+            TextureOptions::LINEAR,
+        ) {
+            image_textures::ManagedTextureStatus::Ready(texture) => {
+                egui::Image::from_texture(&texture)
+                    .fit_to_exact_size(rect.size())
+                    .corner_radius(egui::CornerRadius::same(14))
+                    .paint_at(ui, rect);
+            }
+            image_textures::ManagedTextureStatus::Loading => {
+                paint_screenshot_tile_placeholder(ui, rect, LazyImageBytesStatus::Loading);
+            }
+            image_textures::ManagedTextureStatus::Failed => {
+                paint_screenshot_tile_placeholder(ui, rect, LazyImageBytesStatus::Failed);
+            }
+        }
     } else {
         paint_screenshot_tile_placeholder(ui, rect, image_status);
     }
@@ -1482,12 +1550,49 @@ fn render_screenshot_viewer_modal(
             }
 
             if let Some(bytes) = image_bytes.as_ref() {
-                egui::Image::from_bytes(image_key, Arc::clone(bytes))
-                    .fit_to_exact_size(image_rect.size())
-                    .maintain_aspect_ratio(false)
-                    .uv(viewer_uv_rect(viewer_state))
-                    .corner_radius(egui::CornerRadius::same(12))
-                    .paint_at(ui, image_rect);
+                match image_textures::request_texture(
+                    ui.ctx(),
+                    image_key.clone(),
+                    Arc::clone(bytes),
+                    TextureOptions::LINEAR,
+                ) {
+                    image_textures::ManagedTextureStatus::Ready(texture) => {
+                        egui::Image::from_texture(&texture)
+                            .fit_to_exact_size(image_rect.size())
+                            .maintain_aspect_ratio(false)
+                            .uv(viewer_uv_rect(viewer_state))
+                            .corner_radius(egui::CornerRadius::same(12))
+                            .paint_at(ui, image_rect);
+                    }
+                    image_textures::ManagedTextureStatus::Loading => {
+                        ui.painter().rect_filled(
+                            image_rect,
+                            egui::CornerRadius::same(12),
+                            ui.visuals().widgets.inactive.bg_fill,
+                        );
+                        ui.painter().text(
+                            image_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Loading screenshot...",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                    image_textures::ManagedTextureStatus::Failed => {
+                        ui.painter().rect_filled(
+                            image_rect,
+                            egui::CornerRadius::same(12),
+                            ui.visuals().widgets.inactive.bg_fill,
+                        );
+                        ui.painter().text(
+                            image_rect.center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Failed to load screenshot",
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                    }
+                }
             } else {
                 ui.painter().rect_filled(
                     image_rect,
@@ -1971,7 +2076,7 @@ fn render_instance_usage(
         .max_height(max_height)
         .show(ui, |ui| {
             for (index, instance) in items.into_iter().enumerate() {
-                let thumbnail_png = instance
+                let thumbnail = instance
                     .thumbnail_path
                     .as_deref()
                     .filter(|path| !path.as_os_str().is_empty())
@@ -1980,7 +2085,12 @@ fn render_instance_usage(
                         match state.instance_thumbnail_cache.get_mut(&key) {
                             Some(entry) => {
                                 entry.last_touched_frame = state.thumbnail_cache_frame_index;
-                                entry.bytes.clone()
+                                entry.bytes.clone().map(|bytes| {
+                                    (
+                                        home_instance_thumbnail_uri(instance.id.as_str(), path),
+                                        bytes,
+                                    )
+                                })
                             }
                             None => {
                                 request_instance_thumbnail(
@@ -1999,8 +2109,8 @@ fn render_instance_usage(
                     |ui| {
                         render_entry_thumbnail(
                             ui,
-                            ("home_instance_thumb", index),
-                            thumbnail_png.as_deref(),
+                            ("home_instance_thumb", instance.id.as_str()),
+                            thumbnail.clone(),
                             assets::LIBRARY_SVG,
                             40.0,
                             18.0,
@@ -2125,6 +2235,21 @@ fn instance_thumbnail_cache_key(instance_id: &str, path: &Path) -> String {
     format!("{instance_id}\n{}", path.display())
 }
 
+fn home_instance_thumbnail_uri(instance_id: &str, path: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
+    instance_id.hash(&mut hasher);
+    path.hash(&mut hasher);
+    format!("bytes://home/instance-thumbnail/{:016x}", hasher.finish())
+}
+
+fn home_world_thumbnail_uri(instance_id: &str, world_id: &str) -> String {
+    format!("bytes://home/world-thumbnail/{instance_id}/{world_id}")
+}
+
+fn home_server_icon_uri(instance_id: &str, favorite_id: &str) -> String {
+    format!("bytes://home/server-icon/{instance_id}/{favorite_id}")
+}
+
 fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: PathBuf) {
     let key = instance_thumbnail_cache_key(instance_id, path.as_path());
     if state.instance_thumbnail_in_flight.contains(key.as_str()) {
@@ -2135,9 +2260,9 @@ fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: Pa
         return;
     };
     state.instance_thumbnail_in_flight.insert(key.clone());
-    let _ = tokio_runtime::spawn_detached(async move {
-        let bytes = match tokio::fs::read(path.as_path()).await {
-            Ok(bytes) => Some(Arc::<[u8]>::from(bytes.into_boxed_slice())),
+    tokio_runtime::spawn_detached(async move {
+        let bytes = match load_image_path_for_memory(path.clone()).await {
+            Ok(bytes) => Some(bytes),
             Err(err) => {
                 tracing::warn!(
                     target: "vertexlauncher/home",
@@ -2161,7 +2286,7 @@ fn request_instance_thumbnail(state: &mut HomeState, instance_id: &str, path: Pa
     });
 }
 
-fn poll_instance_thumbnail_results(state: &mut HomeState) {
+fn poll_instance_thumbnail_results(ctx: &egui::Context, state: &mut HomeState) {
     let Some(rx) = state.instance_thumbnail_results_rx.as_ref() else {
         return;
     };
@@ -2206,16 +2331,20 @@ fn poll_instance_thumbnail_results(state: &mut HomeState) {
             },
         );
     }
-    trim_home_thumbnail_cache(state);
+    trim_home_thumbnail_cache(ctx, state);
 }
 
-fn trim_home_thumbnail_cache(state: &mut HomeState) {
+fn trim_home_thumbnail_cache(ctx: &egui::Context, state: &mut HomeState) {
     let stale_before = state
         .thumbnail_cache_frame_index
         .saturating_sub(HOME_THUMBNAIL_CACHE_STALE_FRAMES);
     state.instance_thumbnail_cache.retain(|key, entry| {
-        state.instance_thumbnail_in_flight.contains(key.as_str())
-            || entry.last_touched_frame >= stale_before
+        let keep = state.instance_thumbnail_in_flight.contains(key.as_str())
+            || entry.last_touched_frame >= stale_before;
+        if !keep {
+            forget_home_thumbnail(ctx, key);
+        }
+        keep
     });
 
     let mut total_bytes = state
@@ -2244,9 +2373,20 @@ fn trim_home_thumbnail_cache(state: &mut HomeState) {
             .remove(key.as_str())
             .is_some()
         {
+            forget_home_thumbnail(ctx, key.as_str());
             total_bytes = total_bytes.saturating_sub(approx_bytes);
         }
     }
+}
+
+fn forget_home_thumbnail(ctx: &egui::Context, key: &str) {
+    let Some((instance_id, path)) = key.split_once('\n') else {
+        return;
+    };
+    let _ = ctx;
+    image_textures::evict_source_key(
+        home_instance_thumbnail_uri(instance_id, Path::new(path)).as_str(),
+    );
 }
 
 fn render_activity_feed(
@@ -2461,67 +2601,70 @@ fn render_world_row(
     active_launch_auth: Option<&LaunchAuthContext>,
     metrics: HomeUiMetrics,
 ) {
+    let name_label_options = activity_entry_name_label_options(ui);
+    let meta_label_options = activity_entry_meta_label_options(ui);
+    let row_height = activity_entry_min_row_height(
+        ui,
+        text_ui,
+        metrics,
+        &name_label_options,
+        &meta_label_options,
+        0.0,
+    );
     let mut star_clicked = false;
-    let row_response =
-        render_clickable_entry_row(ui, (id_source, "row"), metrics.activity_row_height, |ui| {
-            if render_favorite_star_button(ui, (id_source, "world_star"), world.favorite)
-                .on_hover_text("Toggle world favorite")
-                .clicked()
-            {
-                star_clicked = true;
-            }
-            ui.add_space(8.0);
-            render_entry_thumbnail(
+    let row_response = render_clickable_entry_row(ui, (id_source, "row"), row_height, |ui| {
+        if render_favorite_star_button(ui, (id_source, "world_star"), world.favorite)
+            .on_hover_text("Toggle world favorite")
+            .clicked()
+        {
+            star_clicked = true;
+        }
+        ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
+        render_entry_thumbnail(
+            ui,
+            (id_source, "thumb"),
+            world.thumbnail_png.clone().map(|bytes| {
+                (
+                    home_world_thumbnail_uri(world.instance_id.as_str(), world.world_id.as_str()),
+                    bytes,
+                )
+            }),
+            assets::HOME_SVG,
+            ACTIVITY_ENTRY_THUMBNAIL_SIZE,
+            ACTIVITY_ENTRY_THUMBNAIL_SIZE,
+        );
+        ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
+        let text_max_width = ui.available_width().max(80.0);
+        let world_name = truncate_for_width(
+            text_ui,
+            ui,
+            world.world_name.as_str(),
+            text_max_width,
+            &name_label_options,
+        );
+        let world_meta = truncate_for_width(
+            text_ui,
+            ui,
+            world_meta_line(world, now_ms).as_str(),
+            text_max_width,
+            &meta_label_options,
+        );
+        ui.vertical(|ui| {
+            ui.set_max_width(text_max_width);
+            let _ = text_ui.label(
                 ui,
-                (id_source, "thumb"),
-                world.thumbnail_png.as_deref(),
-                assets::HOME_SVG,
-                34.0,
-                34.0,
-            );
-            ui.add_space(8.0);
-            let name_label_options = LabelOptions {
-                weight: 600,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let meta_label_options = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let text_max_width = ui.available_width().max(80.0);
-            let world_name = truncate_for_width(
-                text_ui,
-                ui,
-                world.world_name.as_str(),
-                text_max_width,
+                (id_source, "name"),
+                world_name.as_str(),
                 &name_label_options,
             );
-            let world_meta = truncate_for_width(
-                text_ui,
+            let _ = text_ui.label(
                 ui,
-                world_meta_line(world, now_ms).as_str(),
-                text_max_width,
+                (id_source, "meta"),
+                world_meta.as_str(),
                 &meta_label_options,
             );
-            ui.vertical(|ui| {
-                ui.set_max_width(text_max_width);
-                let _ = text_ui.label(
-                    ui,
-                    (id_source, "name"),
-                    world_name.as_str(),
-                    &name_label_options,
-                );
-                let _ = text_ui.label(
-                    ui,
-                    (id_source, "meta"),
-                    world_meta.as_str(),
-                    &meta_label_options,
-                );
-            });
         });
+    });
     if star_clicked {
         let _ = set_world_favorite(
             instances,
@@ -2633,70 +2776,73 @@ fn render_server_row(
     metrics: HomeUiMetrics,
 ) {
     let server_meta_full = server_meta_line(server, ping, now_ms, streamer_mode);
+    let name_label_options = activity_entry_name_label_options(ui);
+    let meta_label_options = activity_entry_meta_label_options(ui);
+    let row_height = activity_entry_min_row_height(
+        ui,
+        text_ui,
+        metrics,
+        &name_label_options,
+        &meta_label_options,
+        SERVER_PING_ICON_SIZE,
+    );
     let mut star_clicked = false;
-    let row_response =
-        render_clickable_entry_row(ui, (id_source, "row"), metrics.activity_row_height, |ui| {
-            if render_favorite_star_button(ui, (id_source, "server_star"), server.favorite)
-                .on_hover_text("Toggle server favorite")
-                .clicked()
-            {
-                star_clicked = true;
-            }
-            ui.add_space(8.0);
-            render_entry_thumbnail(
+    let row_response = render_clickable_entry_row(ui, (id_source, "row"), row_height, |ui| {
+        if render_favorite_star_button(ui, (id_source, "server_star"), server.favorite)
+            .on_hover_text("Toggle server favorite")
+            .clicked()
+        {
+            star_clicked = true;
+        }
+        ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
+        render_entry_thumbnail(
+            ui,
+            (id_source, "thumb"),
+            server.icon_png.clone().map(|bytes| {
+                (
+                    home_server_icon_uri(server.instance_id.as_str(), server.favorite_id.as_str()),
+                    bytes,
+                )
+            }),
+            assets::TERMINAL_SVG,
+            ACTIVITY_ENTRY_THUMBNAIL_SIZE,
+            ACTIVITY_ENTRY_THUMBNAIL_SIZE,
+        );
+        ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
+        let text_max_width = (ui.available_width() - SERVER_PING_ICON_SIZE - 8.0).max(80.0);
+        let server_name = truncate_for_width(
+            text_ui,
+            ui,
+            server.server_name.as_str(),
+            text_max_width,
+            &name_label_options,
+        );
+        let server_meta = truncate_for_width(
+            text_ui,
+            ui,
+            server_meta_full.as_str(),
+            text_max_width,
+            &meta_label_options,
+        );
+        ui.vertical(|ui| {
+            ui.set_max_width(text_max_width);
+            let _ = text_ui.label(
                 ui,
-                (id_source, "thumb"),
-                server.icon_png.as_deref(),
-                assets::TERMINAL_SVG,
-                34.0,
-                34.0,
-            );
-            ui.add_space(8.0);
-            let name_label_options = LabelOptions {
-                weight: 600,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let meta_label_options = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let text_max_width = (ui.available_width() - SERVER_PING_ICON_SIZE - 8.0).max(80.0);
-            let server_name = truncate_for_width(
-                text_ui,
-                ui,
-                server.server_name.as_str(),
-                text_max_width,
+                (id_source, "name"),
+                server_name.as_str(),
                 &name_label_options,
             );
-            let server_meta = truncate_for_width(
-                text_ui,
+            let _ = text_ui.label(
                 ui,
-                server_meta_full.as_str(),
-                text_max_width,
+                (id_source, "meta"),
+                server_meta.as_str(),
                 &meta_label_options,
             );
-            ui.vertical(|ui| {
-                ui.set_max_width(text_max_width);
-                let _ = text_ui.label(
-                    ui,
-                    (id_source, "name"),
-                    server_name.as_str(),
-                    &name_label_options,
-                );
-                let _ = text_ui.label(
-                    ui,
-                    (id_source, "meta"),
-                    server_meta.as_str(),
-                    &meta_label_options,
-                );
-            });
-            ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                render_server_ping_icon(ui, ping);
-            });
         });
+        ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
+            render_server_ping_icon(ui, ping);
+        });
+    });
     if star_clicked {
         let _ = set_server_favorite(
             instances,
@@ -2755,6 +2901,47 @@ fn render_server_row(
         }
         _ => {}
     }
+}
+
+fn activity_entry_name_label_options(ui: &Ui) -> LabelOptions {
+    LabelOptions {
+        weight: 600,
+        color: ui.visuals().text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    }
+}
+
+fn activity_entry_meta_label_options(ui: &Ui) -> LabelOptions {
+    LabelOptions {
+        color: ui.visuals().weak_text_color(),
+        wrap: false,
+        ..LabelOptions::default()
+    }
+}
+
+fn activity_entry_min_row_height(
+    ui: &Ui,
+    text_ui: &mut TextUi,
+    metrics: HomeUiMetrics,
+    name_label_options: &LabelOptions,
+    meta_label_options: &LabelOptions,
+    trailing_content_height: f32,
+) -> f32 {
+    let name_height = activity_entry_label_height(ui, text_ui, name_label_options);
+    let meta_height = activity_entry_label_height(ui, text_ui, meta_label_options);
+    let text_stack_height = name_height + ui.spacing().item_spacing.y + meta_height;
+    let content_height = text_stack_height
+        .max(ACTIVITY_ENTRY_THUMBNAIL_SIZE)
+        .max(FAVORITE_STAR_BUTTON_SIZE)
+        .max(trailing_content_height);
+    metrics
+        .activity_row_height
+        .max((content_height + (ACTIVITY_ENTRY_ROW_VERTICAL_PADDING * 2.0)).ceil())
+}
+
+fn activity_entry_label_height(ui: &Ui, text_ui: &mut TextUi, label_options: &LabelOptions) -> f32 {
+    (text_ui.measure_text_size(ui, "Ag", label_options).y + (label_options.padding.y * 2.0)).ceil()
 }
 
 fn server_meta_line(
@@ -2990,7 +3177,10 @@ fn render_clickable_entry_row(
         stroke,
         egui::StrokeKind::Inside,
     );
-    let inner = rect.shrink2(egui::vec2(8.0, 5.0));
+    let inner = rect.shrink2(egui::vec2(
+        ACTIVITY_ENTRY_ROW_HORIZONTAL_PADDING,
+        ACTIVITY_ENTRY_ROW_VERTICAL_PADDING,
+    ));
     ui.scope_builder(
         egui::UiBuilder::new()
             .id_salt(id_source)
@@ -3011,7 +3201,7 @@ fn render_clickable_entry_row(
 fn render_entry_thumbnail(
     ui: &mut Ui,
     id_source: impl std::hash::Hash,
-    image_png: Option<&[u8]>,
+    image_png: Option<(String, Arc<[u8]>)>,
     icon_svg: &'static [u8],
     width: f32,
     height: f32,
@@ -3026,29 +3216,31 @@ fn render_entry_thumbnail(
         egui::StrokeKind::Inside,
     );
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        if let Some(png) = image_png {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            id_source.hash(&mut hasher);
-            let uri = format!("bytes://home/entry-thumb/{}.png", hasher.finish());
+        if let Some((uri, png)) = image_png {
             let image_size = (height - 4.0).max(1.0).min(width - 4.0).max(1.0);
             let image_rect =
                 egui::Rect::from_center_size(rect.center(), egui::vec2(image_size, image_size));
-            ui.put(
-                image_rect,
-                egui::Image::from_bytes(uri, png.to_vec())
-                    .fit_to_exact_size(egui::vec2(image_size, image_size)),
-            );
-        } else {
-            ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
-                ui.add_space(((height - ENTRY_ICON_SIZE) * 0.5).max(0.0));
-                let themed_svg = apply_color_to_svg(icon_svg, ui.visuals().text_color());
-                let uri = format!("bytes://home/entry-thumb/{:?}.svg", ui.id().with(id_source));
-                ui.add(
-                    egui::Image::from_bytes(uri, themed_svg)
-                        .fit_to_exact_size(egui::vec2(ENTRY_ICON_SIZE, ENTRY_ICON_SIZE)),
+            if let image_textures::ManagedTextureStatus::Ready(texture) =
+                image_textures::request_texture(ui.ctx(), uri, png, TextureOptions::LINEAR)
+            {
+                ui.put(
+                    image_rect,
+                    egui::Image::from_texture(&texture)
+                        .fit_to_exact_size(egui::vec2(image_size, image_size)),
                 );
-            });
+                return;
+            }
         }
+
+        ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
+            ui.add_space(((height - ENTRY_ICON_SIZE) * 0.5).max(0.0));
+            let themed_svg = apply_color_to_svg(icon_svg, ui.visuals().text_color());
+            let uri = format!("bytes://home/entry-thumb/{:?}.svg", ui.id().with(id_source));
+            ui.add(
+                egui::Image::from_bytes(uri, themed_svg)
+                    .fit_to_exact_size(egui::vec2(ENTRY_ICON_SIZE, ENTRY_ICON_SIZE)),
+            );
+        });
     });
 }
 
@@ -3204,13 +3396,22 @@ fn refresh_home_state(
 
     state.latest_requested_activity_scan_id = request_id;
     state.activity_scan_pending = true;
-    let _ = tokio_runtime::spawn_detached(async move {
+    tokio_runtime::spawn_detached(async move {
         let scanned_instance_count = request.scanned_instance_count;
-        let result = HomeActivityScanResult {
+        let result = tokio_runtime::spawn_blocking(move || HomeActivityScanResult {
             request_id,
             scanned_instance_count,
             worlds: collect_worlds_from_request(&request),
             servers: collect_servers_from_request(&request),
+        })
+        .await;
+        let Ok(result) = result else {
+            tracing::error!(
+                target: "vertexlauncher/home",
+                request_id,
+                "Failed to complete home activity scan task."
+            );
+            return;
         };
         if let Err(err) = result_tx.send(result) {
             tracing::error!(
@@ -3815,7 +4016,7 @@ fn read_nbt_file(path: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
-fn read_world_thumbnail(path: &Path) -> Option<Vec<u8>> {
+fn read_world_thumbnail(path: &Path) -> Option<Arc<[u8]>> {
     let bytes = fs::read(path).ok()?;
     if bytes.is_empty() {
         return None;
@@ -3824,10 +4025,10 @@ fn read_world_thumbnail(path: &Path) -> Option<Vec<u8>> {
     if bytes.len() > 4 * 1024 * 1024 {
         return None;
     }
-    Some(bytes)
+    Some(prepare_owned_image_bytes_for_memory(bytes))
 }
 
-fn decode_server_icon(raw: Option<&str>) -> Option<Vec<u8>> {
+fn decode_server_icon(raw: Option<&str>) -> Option<Arc<[u8]>> {
     let raw = raw?.trim();
     if raw.is_empty() {
         return None;
@@ -3847,7 +4048,7 @@ fn decode_server_icon(raw: Option<&str>) -> Option<Vec<u8>> {
     if decoded.is_empty() || decoded.len() > 4 * 1024 * 1024 {
         return None;
     }
-    Some(decoded)
+    Some(prepare_owned_image_bytes_for_memory(decoded))
 }
 
 fn parse_servers_dat(path: &Path) -> Option<Vec<ServerDatEntry>> {

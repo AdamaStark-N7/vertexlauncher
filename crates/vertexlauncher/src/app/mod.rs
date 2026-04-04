@@ -344,6 +344,7 @@ impl VertexApp {
     fn update_inner(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.apply_frame_limiter();
         self.text_ui.begin_frame(ctx);
+        launcher_ui::ui::components::image_textures::begin_frame(ctx);
         poll_config_save_results(self);
         poll_instance_store_save_results(self);
         self.auth.poll();

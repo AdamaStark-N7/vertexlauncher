@@ -9,6 +9,10 @@ const CONTENT_LOOKUP_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
 const CONTENT_LOOKUP_BATCH_SIZE: usize = 24;
 const CONTENT_UPDATE_PREFETCH_BATCH_SIZE: usize = 4;
 const CONTENT_UPDATE_LOG_TARGET: &str = "vertexlauncher/content_update";
+const INSTALLED_CONTENT_BADGE_FONT_SIZE: f32 = 13.0;
+const INSTALLED_CONTENT_BADGE_LINE_HEIGHT: f32 = 16.0;
+const INSTALLED_CONTENT_BADGE_PADDING_X: f32 = 6.0;
+const INSTALLED_CONTENT_BADGE_PADDING_Y: f32 = 3.0;
 
 #[derive(Clone, Debug)]
 pub(super) struct ContentApplyResult {
@@ -861,15 +865,18 @@ fn render_installed_content_badge(
         .fill(fill)
         .stroke(egui::Stroke::NONE)
         .corner_radius(egui::CornerRadius::same(6))
-        .inner_margin(egui::Margin::symmetric(6, 3))
+        .inner_margin(egui::Margin::symmetric(
+            INSTALLED_CONTENT_BADGE_PADDING_X as i8,
+            INSTALLED_CONTENT_BADGE_PADDING_Y as i8,
+        ))
         .show(ui, |ui| {
             let _ = text_ui.label(
                 ui,
                 id_source,
                 label,
                 &LabelOptions {
-                    font_size: 13.0,
-                    line_height: 16.0,
+                    font_size: INSTALLED_CONTENT_BADGE_FONT_SIZE,
+                    line_height: INSTALLED_CONTENT_BADGE_LINE_HEIGHT,
                     color: text_color,
                     wrap: false,
                     ..LabelOptions::default()
@@ -908,6 +915,12 @@ fn render_installed_content_update_badge(
                     ("installed_content_update_badge", label),
                     label,
                     &ButtonOptions {
+                        font_size: INSTALLED_CONTENT_BADGE_FONT_SIZE,
+                        line_height: INSTALLED_CONTENT_BADGE_LINE_HEIGHT,
+                        padding: egui::vec2(
+                            INSTALLED_CONTENT_BADGE_PADDING_X,
+                            INSTALLED_CONTENT_BADGE_PADDING_Y,
+                        ),
                         min_size: egui::vec2(0.0, 0.0),
                         corner_radius: 6,
                         text_color,

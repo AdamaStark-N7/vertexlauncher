@@ -1,15 +1,19 @@
 use std::{
-    collections::{HashMap, HashSet, hash_map::DefaultHasher},
+    collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     sync::{Arc, Mutex, OnceLock, mpsc},
 };
 
 use egui::{Button, Ui};
+use shared_lru::ThreadSafeLru;
 
 use crate::{
     app::tokio_runtime,
     assets,
-    ui::{components::icon_button, instance_context_menu, style},
+    ui::{
+        components::{icon_button, image_memory::load_image_path_for_memory, image_textures},
+        instance_context_menu, style,
+    },
 };
 
 use super::{ProfileShortcut, SidebarOutput};
@@ -20,14 +24,21 @@ const SIDEBAR_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
 #[derive(Clone)]
 struct SidebarThumbnailEntry {
     bytes: Option<Arc<[u8]>>,
-    approx_bytes: usize,
     last_touched_frame: u64,
 }
 
-#[derive(Default)]
 struct SidebarThumbnailCache {
-    entries: HashMap<String, SidebarThumbnailEntry>,
+    entries: ThreadSafeLru<String, SidebarThumbnailEntry>,
     frame_index: u64,
+}
+
+impl Default for SidebarThumbnailCache {
+    fn default() -> Self {
+        Self {
+            entries: ThreadSafeLru::new(SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES),
+            frame_index: 0,
+        }
+    }
 }
 
 /// Renders the instance shortcut list and emits click or context-menu actions.
@@ -41,8 +52,8 @@ pub fn render(
         return;
     }
 
-    begin_thumbnail_cache_frame();
-    poll_thumbnail_results();
+    begin_thumbnail_cache_frame(ui.ctx());
+    poll_thumbnail_results(ui.ctx());
     let row_height = max_icon_width.max(1.0);
     ui.scope(|ui| {
         ui.spacing_mut().item_spacing.y = style::SPACE_SM;
@@ -63,15 +74,26 @@ pub fn render(
                             .and_then(|path| {
                                 let key = thumbnail_cache_key(profile.id.as_str(), path);
                                 match thumbnail_cache().lock() {
-                                    Ok(mut cache) => {
+                                    Ok(cache) => {
                                         let frame_index = cache.frame_index;
-                                        cache.entries.get_mut(key.as_str()).and_then(|entry| {
-                                            entry.last_touched_frame = frame_index;
-                                            entry.bytes.clone()
+                                        cache.entries.write(|state| {
+                                            let entry = state.touch(&key)?;
+                                            entry.value.last_touched_frame = frame_index;
+                                            entry.value.bytes.clone()
                                         })
                                     }
                                     Err(_) => None,
                                 }
+                            });
+                        let thumbnail_uri = profile
+                            .thumbnail_path
+                            .as_deref()
+                            .filter(|path| !path.as_os_str().is_empty())
+                            .map(|path| {
+                                thumbnail_uri_from_key(&thumbnail_cache_key(
+                                    profile.id.as_str(),
+                                    path,
+                                ))
                             });
                         if thumbnail.is_none()
                             && let Some(path) = profile
@@ -86,6 +108,7 @@ pub fn render(
                             icon_id.as_str(),
                             profile.name.as_str(),
                             max_icon_width,
+                            thumbnail_uri,
                             thumbnail,
                         )
                     },
@@ -118,30 +141,30 @@ fn render_profile_icon(
     icon_id: &str,
     tooltip: &str,
     max_icon_width: f32,
+    thumbnail_uri: Option<String>,
     thumbnail_bytes: Option<Arc<[u8]>>,
 ) -> egui::Response {
     if let Some(bytes) = thumbnail_bytes {
         let button_size = ui.available_width().min(max_icon_width).max(1.0);
         let icon_size = (button_size - 8.0).clamp(10.0, button_size);
-        let mut hasher = DefaultHasher::new();
-        icon_id.hash(&mut hasher);
-        bytes.hash(&mut hasher);
-        let image = egui::Image::from_bytes(
-            format!("bytes://sidebar/profile-thumb/{}", hasher.finish()),
-            bytes,
-        )
-        .fit_to_exact_size(egui::vec2(icon_size, icon_size));
-        return ui.add_sized(
-            [button_size, button_size],
-            Button::image(image)
-                .frame(true)
-                .corner_radius(egui::CornerRadius::same(10))
-                .stroke(egui::Stroke::new(
-                    1.0,
-                    ui.visuals().widgets.inactive.bg_stroke.color,
-                ))
-                .fill(ui.visuals().widgets.inactive.weak_bg_fill),
-        );
+        let uri = thumbnail_uri.unwrap_or_else(|| thumbnail_uri_from_key(icon_id));
+        if let image_textures::ManagedTextureStatus::Ready(texture) =
+            image_textures::request_texture(ui.ctx(), uri, bytes, egui::TextureOptions::LINEAR)
+        {
+            let image = egui::Image::from_texture(&texture)
+                .fit_to_exact_size(egui::vec2(icon_size, icon_size));
+            return ui.add_sized(
+                [button_size, button_size],
+                Button::image(image)
+                    .frame(true)
+                    .corner_radius(egui::CornerRadius::same(10))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        ui.visuals().widgets.inactive.bg_stroke.color,
+                    ))
+                    .fill(ui.visuals().widgets.inactive.weak_bg_fill),
+            );
+        }
     }
 
     icon_button::svg(
@@ -185,7 +208,7 @@ fn thumbnail_cache_key(instance_id: &str, path: &std::path::Path) -> String {
 fn request_thumbnail(instance_id: &str, path: std::path::PathBuf) {
     let key = thumbnail_cache_key(instance_id, path.as_path());
     if let Ok(cache) = thumbnail_cache().lock()
-        && cache.entries.contains_key(key.as_str())
+        && cache.entries.read(|state| state.contains_key(&key))
     {
         return;
     }
@@ -196,9 +219,9 @@ fn request_thumbnail(instance_id: &str, path: std::path::PathBuf) {
         in_flight.insert(key.clone());
     }
     let tx = thumbnail_results_channel().0.clone();
-    let _ = tokio_runtime::spawn_detached(async move {
-        let bytes = match tokio::fs::read(path.as_path()).await {
-            Ok(bytes) => Some(Arc::<[u8]>::from(bytes.into_boxed_slice())),
+    tokio_runtime::spawn_detached(async move {
+        let bytes = match load_image_path_for_memory(path.clone()).await {
+            Ok(bytes) => Some(bytes),
             Err(err) => {
                 tracing::warn!(
                     target: "vertexlauncher/sidebar",
@@ -222,7 +245,7 @@ fn request_thumbnail(instance_id: &str, path: std::path::PathBuf) {
     });
 }
 
-fn poll_thumbnail_results() {
+fn poll_thumbnail_results(ctx: &egui::Context) {
     let rx = thumbnail_results_channel().1.clone();
     let Ok(receiver) = rx.lock() else {
         tracing::error!(
@@ -254,56 +277,52 @@ fn poll_thumbnail_results() {
         let frame_index = cache.frame_index;
         for (key, bytes) in updates {
             in_flight.remove(key.as_str());
-            cache.entries.insert(
-                key,
-                SidebarThumbnailEntry {
-                    approx_bytes: bytes.as_ref().map_or(0, |bytes| bytes.len()),
-                    bytes,
-                    last_touched_frame: frame_index,
-                },
-            );
+            let approx_bytes = bytes.as_ref().map_or(0, |bytes| bytes.len());
+            let evicted = cache.entries.write(|state| {
+                state.insert_without_eviction(
+                    key,
+                    SidebarThumbnailEntry {
+                        bytes,
+                        last_touched_frame: frame_index,
+                    },
+                    approx_bytes,
+                );
+                state.evict_to_budget()
+            });
+            for (key, _) in evicted {
+                image_textures::evict_source_key(thumbnail_uri_from_key(&key).as_str());
+            }
         }
-        trim_thumbnail_cache(&mut cache);
+        trim_thumbnail_cache(ctx, &mut cache);
     }
 }
 
-fn begin_thumbnail_cache_frame() {
+fn begin_thumbnail_cache_frame(ctx: &egui::Context) {
     if let Ok(mut cache) = thumbnail_cache().lock() {
         cache.frame_index = cache.frame_index.saturating_add(1);
-        trim_thumbnail_cache(&mut cache);
+        trim_thumbnail_cache(ctx, &mut cache);
     }
 }
 
-fn trim_thumbnail_cache(cache: &mut SidebarThumbnailCache) {
+fn trim_thumbnail_cache(_ctx: &egui::Context, cache: &mut SidebarThumbnailCache) {
     let stale_before = cache
         .frame_index
         .saturating_sub(SIDEBAR_THUMBNAIL_CACHE_STALE_FRAMES);
-    cache
+    let evicted = cache
         .entries
-        .retain(|_, entry| entry.last_touched_frame >= stale_before);
-
-    let mut total_bytes = cache
-        .entries
-        .values()
-        .map(|entry| entry.approx_bytes)
-        .sum::<usize>();
-    if total_bytes <= SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES {
-        return;
+        .write(|state| state.retain(|_, entry| entry.value.last_touched_frame >= stale_before));
+    for (key, _) in evicted {
+        image_textures::evict_source_key(thumbnail_uri_from_key(&key).as_str());
     }
 
-    let mut eviction_order = cache
-        .entries
-        .iter()
-        .map(|(key, entry)| (key.clone(), entry.last_touched_frame, entry.approx_bytes))
-        .collect::<Vec<_>>();
-    eviction_order.sort_by_key(|(_, last_touched_frame, _)| *last_touched_frame);
-
-    for (key, _, approx_bytes) in eviction_order {
-        if total_bytes <= SIDEBAR_THUMBNAIL_CACHE_MAX_BYTES {
-            break;
-        }
-        if cache.entries.remove(key.as_str()).is_some() {
-            total_bytes = total_bytes.saturating_sub(approx_bytes);
-        }
+    let evicted = cache.entries.write(|state| state.evict_to_budget());
+    for (key, _) in evicted {
+        image_textures::evict_source_key(thumbnail_uri_from_key(&key).as_str());
     }
+}
+
+fn thumbnail_uri_from_key(key: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    key.hash(&mut hasher);
+    format!("bytes://sidebar/profile-thumb/{}", hasher.finish())
 }
