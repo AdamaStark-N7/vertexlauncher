@@ -187,6 +187,7 @@ pub(super) fn render_discover_detail_content(
     ui.add_space(style::SPACE_MD);
     let versions_height = ui.available_height().max(1.0);
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("discover_detail_versions_scroll")
         .auto_shrink([false, false])
         .max_height(versions_height)

@@ -106,6 +106,10 @@ const fn default_macos_visual_effect_state() -> MacosVisualEffectState {
     MacosVisualEffectState::Active
 }
 
+const fn default_drag_scroll_enabled() -> bool {
+    true
+}
+
 const fn default_ui_opacity_percent() -> u8 {
     100
 }
@@ -250,6 +254,8 @@ pub struct Config {
     sync_hotbars_enabled: bool,
     #[serde(default)]
     sync_servers_to_all_instances_by_default: bool,
+    #[serde(default = "default_drag_scroll_enabled")]
+    drag_scroll_enabled: bool,
     frame_limit_fps: i32,
     ui_font_size: f32,
     ui_font_weight: i32,
@@ -357,6 +363,11 @@ impl Config {
     /// Whether multiplayer servers are copied between instances.
     pub fn sync_servers_enabled(&self) -> bool {
         self.sync_servers_enabled
+    }
+
+    /// Whether click-dragging scrollable content scrolls it.
+    pub fn drag_scroll_enabled(&self) -> bool {
+        self.drag_scroll_enabled
     }
 
     /// Whether `command_history.txt` is merged across instances.
@@ -1014,6 +1025,7 @@ impl Config {
             sync_command_history_enabled,
             sync_hotbars_enabled,
             sync_servers_to_all_instances_by_default,
+            drag_scroll_enabled,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
@@ -1095,6 +1107,10 @@ impl Config {
             ToggleSettingId::SyncServersToAllInstancesByDefault.spec(),
             sync_servers_to_all_instances_by_default,
         );
+        visit(
+            ToggleSettingId::DragScrollEnabled.spec(),
+            drag_scroll_enabled,
+        );
     }
 
     /// Visits each dropdown setting with mutable access to its backing value.
@@ -1153,6 +1169,7 @@ impl Config {
             sync_command_history_enabled: _,
             sync_hotbars_enabled: _,
             sync_servers_to_all_instances_by_default: _,
+            drag_scroll_enabled: _,
             frame_limit_fps: _,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
@@ -1224,6 +1241,7 @@ impl Config {
             sync_command_history_enabled: _,
             sync_hotbars_enabled: _,
             sync_servers_to_all_instances_by_default: _,
+            drag_scroll_enabled: _,
             frame_limit_fps: _,
             skin_preview_motion_blur_sample_count: _,
             default_instance_max_memory_mib: _,
@@ -1300,6 +1318,7 @@ impl Config {
             sync_command_history_enabled: _,
             sync_hotbars_enabled: _,
             sync_servers_to_all_instances_by_default: _,
+            drag_scroll_enabled: _,
             frame_limit_fps,
             skin_preview_motion_blur_sample_count,
             include_snapshots_and_betas: _,
@@ -1382,6 +1401,7 @@ impl Config {
             sync_command_history_enabled: _,
             sync_hotbars_enabled: _,
             sync_servers_to_all_instances_by_default: _,
+            drag_scroll_enabled: _,
             frame_limit_fps: _,
             include_snapshots_and_betas: _,
             include_alpha_versions: _,
@@ -1471,6 +1491,7 @@ impl Default for Config {
             sync_command_history_enabled: false,
             sync_hotbars_enabled: false,
             sync_servers_to_all_instances_by_default: false,
+            drag_scroll_enabled: true,
             frame_limit_fps: 120,
             ui_font_size: 18.0,
             ui_font_weight: 400,

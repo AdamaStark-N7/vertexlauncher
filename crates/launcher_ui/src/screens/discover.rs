@@ -333,6 +333,7 @@ fn render_discover_browse_content(
     let mut should_load_more = false;
     let results_height = ui.available_height().max(1.0);
     let scroll_output = egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("discover_results_scroll")
         .auto_shrink([false, false])
         .max_height(results_height)

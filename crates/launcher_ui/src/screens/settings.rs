@@ -62,6 +62,7 @@ pub fn render(
 ) {
     gamepad_scroll(
         egui::ScrollArea::vertical()
+            .scroll_source(modal_host::drag_scroll_source())
             .id_salt("settings_page_scroll")
             .auto_shrink([false, false]),
         ui,
@@ -135,6 +136,7 @@ fn render_settings_contents(
                     config::ToggleSettingId::NotificationExpiryBarsEmptyLeft,
                     config::ToggleSettingId::SkinPreviewFreshFormatEnabled,
                     config::ToggleSettingId::SkinPreview3dLayersEnabled,
+                    config::ToggleSettingId::DragScrollEnabled,
                 ],
             );
         },

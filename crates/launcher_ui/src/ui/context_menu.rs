@@ -359,6 +359,7 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                 ui.set_clip_rect(old_clip.intersect(clip_rect));
 
                 egui::ScrollArea::vertical()
+                    .scroll_source(modal_host::drag_scroll_source())
                     .id_salt(("app_context_menu_scroll", request.source_id))
                     .auto_shrink([false, false])
                     .max_height((current_height - MENU_PADDING * 2.0).max(MENU_ITEM_HEIGHT))

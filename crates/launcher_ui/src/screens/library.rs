@@ -161,6 +161,7 @@ pub fn render(
         user_type: auth.launch_auth.as_ref().map(|a| a.user_type.clone()),
     };
     egui::ScrollArea::both()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("library_instance_tiles_scroll")
         .auto_shrink([false, false])
         .max_height(tiles_height)
@@ -583,6 +584,7 @@ fn render_scroll_text_block(
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 egui::ScrollArea::vertical()
+                    .scroll_source(modal_host::drag_scroll_source())
                     .id_salt((id_source, "scroll"))
                     .auto_shrink([false, false])
                     .max_height(inner_height)

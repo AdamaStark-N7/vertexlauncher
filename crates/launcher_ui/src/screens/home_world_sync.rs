@@ -145,6 +145,7 @@ pub(super) fn render_world_sync_modal(
             ui.add_space(style::SPACE_LG);
 
             egui::ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt("world_sync_instances_scroll")
                 .max_height(280.0)
                 .auto_shrink([false, true])

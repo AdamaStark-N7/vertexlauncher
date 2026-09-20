@@ -67,6 +67,7 @@ fn render_instance_log_list(
     logs_snapshot: &[InstanceLogEntry],
 ) {
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("instance_logs_file_list")
         .auto_shrink([false, false])
         .show(ui, |ui| {

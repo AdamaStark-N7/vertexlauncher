@@ -240,6 +240,7 @@ pub(super) fn render_export_vtmpack_modal(
                             );
                         } else {
                             egui::ScrollArea::vertical()
+                                .scroll_source(modal_host::drag_scroll_source())
                                 .id_salt(("instance_export_vtmpack_entries_scroll", instance_id))
                                 .max_height(360.0)
                                 .auto_shrink([false, true])
@@ -864,6 +865,7 @@ pub(super) fn render_export_server_modal(
                         .entries;
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical()
+                        .scroll_source(modal_host::drag_scroll_source())
                         .id_salt(("instance_export_server_entries_scroll", instance_id))
                         .max_height(360.0)
                         .auto_shrink([false, false])

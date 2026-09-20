@@ -151,7 +151,7 @@ pub fn render(
             let heading_style = launcher_ui::ui::style::page_heading(ui);
             let body_style = launcher_ui::ui::style::muted(ui);
 
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical().scroll_source(ui_foundation::drag_scroll_source())
                 .auto_shrink([false, false])
                 .max_height((modal_max_height - footer_reserve).max(220.0))
                 .show(ui, |ui| {

@@ -8,6 +8,23 @@ const MODAL_SCRIM_ALPHA: u8 = 160;
 const MODAL_MIN_VIEWPORT_PADDING: f32 = 16.0;
 const MODAL_HOST_STATE_ID: &str = "modal_host_state";
 
+static DRAG_SCROLL_ENABLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);
+
+/// Sets whether scroll areas built with [`drag_scroll_source`] scroll when their contents are dragged.
+pub fn set_drag_scroll_enabled(enabled: bool) {
+    DRAG_SCROLL_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The scroll source scroll areas should use: the mouse wheel and scroll bars always work, and
+/// dragging the contents follows [`set_drag_scroll_enabled`].
+pub fn drag_scroll_source() -> egui::scroll_area::ScrollSource {
+    egui::scroll_area::ScrollSource {
+        drag: DRAG_SCROLL_ENABLED.load(std::sync::atomic::Ordering::Relaxed),
+        ..egui::scroll_area::ScrollSource::ALL
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ModalLayer {
     Base = 0,
@@ -409,6 +426,7 @@ fn show_modal_contents<R>(
             }
             let bar_width = content_ui.spacing().scroll.allocated_width();
             egui::ScrollArea::both()
+                .scroll_source(drag_scroll_source())
                 .id_salt((id, "modal_content_scroll"))
                 .auto_shrink([false, false])
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)

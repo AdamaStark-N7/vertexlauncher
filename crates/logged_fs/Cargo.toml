@@ -1,6 +1,6 @@
 [package]
 name = "logged_fs"
-version = "0.1.20-Alpha"
+version = "0.1.21-Alpha"
 edition = "2024"
 
 [dependencies]

@@ -183,7 +183,9 @@ pub fn render(
     schedule_skin_screen_repaint(&state, ui.ctx());
 
     gamepad_scroll(
-        egui::ScrollArea::vertical().auto_shrink([false, false]),
+        egui::ScrollArea::vertical()
+            .scroll_source(modal_host::drag_scroll_source())
+            .auto_shrink([false, false]),
         ui,
         |ui| render_skin_screen_contents(ui, text_ui, &mut state, streamer_mode),
     );

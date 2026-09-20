@@ -71,6 +71,7 @@ pub(super) fn render_instance_screenshot_gallery(
     let screenshots = &state.screenshots;
     let screenshot_images = &mut state.screenshot_images;
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("instance_screenshot_gallery_scroll")
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {

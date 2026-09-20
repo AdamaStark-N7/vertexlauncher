@@ -291,6 +291,7 @@ pub(super) fn render_results(
             ui.add_space(style::SPACE_MD);
         }
         egui::ScrollArea::vertical()
+            .scroll_source(modal_host::drag_scroll_source())
             .id_salt(("content_browser_results_scroll", instance_id))
             .max_height(max_height)
             .show(ui, |ui| {
@@ -658,6 +659,7 @@ fn render_result_tile(
                             .inner_margin(egui::Margin::same(6))
                             .show(ui, |ui| {
                                 egui::ScrollArea::vertical()
+                                    .scroll_source(modal_host::drag_scroll_source())
                                     .id_salt((id_source, "tile_summary_scroll"))
                                     .max_height(52.0)
                                     .show(ui, |ui| {
@@ -979,6 +981,7 @@ pub(super) fn render_detail_page(
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
+                        .scroll_source(modal_host::drag_scroll_source())
                         .id_salt((
                             "content_browser_detail_overview",
                             instance_id,
@@ -1129,6 +1132,7 @@ fn render_detail_versions_tab(
             }
 
             egui::ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt(("detail_versions_scroll", instance_id, &entry.dedupe_key))
                 .max_height(ui.available_height().max(180.0))
                 .show(ui, |ui| {

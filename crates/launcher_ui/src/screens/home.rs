@@ -453,6 +453,7 @@ fn render_instance_usage(
     let max_height = (ui.available_height() * (1.0 / 3.0)).clamp(140.0, 340.0);
     let now_ms = current_time_millis();
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("home_instances_scroll")
         .max_height(max_height)
         .show(ui, |ui| {
@@ -656,6 +657,7 @@ fn render_activity_feed(
     });
 
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("home_activity_scroll")
         .max_height(ui.available_height().max(180.0))
         .show_viewport(ui, |ui, viewport| {

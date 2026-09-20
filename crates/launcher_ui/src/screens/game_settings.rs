@@ -953,6 +953,7 @@ pub(super) fn render_modal(
             // Tabs: one row in its own horizontally scrolling strip, so a narrow dialog scrolls the
             // tabs instead of forcing the whole dialog to be as wide as the row.
             egui::ScrollArea::horizontal()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt("game_settings_tabs_scroll")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
@@ -1020,6 +1021,7 @@ pub(super) fn render_modal(
             // remaining height and pushes Close out of the window.
             let footer_height = style::SPACE_MD * 2.0 + style::CONTROL_HEIGHT;
             egui::ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt("game_settings_scroll")
                 .max_height((ui.available_height() - footer_height).max(80.0))
                 .auto_shrink([false, false])

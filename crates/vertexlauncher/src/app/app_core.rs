@@ -363,6 +363,7 @@ impl VertexApp {
             self.gamepad_calibration_state.start(device);
         }
         self.apply_frame_limiter(ctx);
+        ui_foundation::set_drag_scroll_enabled(self.config.drag_scroll_enabled());
         self.text_ui.set_graphics_config(build_text_graphics_config(
             &self.config,
             self.startup_graphics,

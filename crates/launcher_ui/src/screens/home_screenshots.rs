@@ -458,6 +458,7 @@ pub(super) fn render_screenshot_gallery(
     let mut should_load_more = false;
     let viewer_open = state.screenshot_viewer.is_some();
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("home_screenshots_scroll")
         .auto_shrink([false, false])
         .show_viewport(ui, |ui, viewport| {

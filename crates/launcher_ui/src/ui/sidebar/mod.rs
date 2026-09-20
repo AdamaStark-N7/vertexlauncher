@@ -256,6 +256,7 @@ fn render_segments(
                 ui.add_space(style::SPACE_LG);
                 let scroll_height = ui.available_height().max(1.0);
                 ScrollArea::vertical()
+                    .scroll_source(modal_host::drag_scroll_source())
                     .id_salt("profiles_scroll_v4")
                     .auto_shrink([false, false])
                     .max_height(scroll_height)

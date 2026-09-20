@@ -1562,6 +1562,7 @@ fn dropdown(
             let popup_height =
                 dropdown_popup_height_limit(max_popup_height, row_height, options.len());
             let scroll_output = egui::ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt(("settings_dropdown_scroll", open_id))
                 .max_height(popup_height)
                 .auto_shrink([false, false])
@@ -1817,6 +1818,7 @@ fn searchable_dropdown(
                 );
             } else {
                 let scroll_output = egui::ScrollArea::vertical()
+                    .scroll_source(modal_host::drag_scroll_source())
                     .id_salt(("settings_searchable_dropdown_scroll", open_id))
                     .max_height(dropdown_popup_height_limit(
                         max_popup_height,

@@ -27,6 +27,7 @@ pub enum ToggleSettingId {
     SyncCommandHistoryEnabled,
     SyncHotbarsEnabled,
     SyncServersToAllInstancesByDefault,
+    DragScrollEnabled,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -151,6 +152,13 @@ impl ToggleSettingId {
                 label: "Sync New Servers to All Instances",
                 info_tooltip: Some(
                     "Servers that have no sync options of their own are copied to every instance. Options you set on a specific server always override this. Needs Sync Multiplayer Servers to be on. Default: Off.",
+                ),
+            },
+            ToggleSettingId::DragScrollEnabled => ToggleSettingSpec {
+                id: ToggleSettingId::DragScrollEnabled,
+                label: "Click and Drag Scrolling",
+                info_tooltip: Some(
+                    "Lets you scroll lists and pages by clicking and dragging their contents. Turn off if dragging keeps scrolling when you meant to select text or drag something. The mouse wheel and scroll bars always work. Default: On.",
                 ),
             },
         }

@@ -351,6 +351,7 @@ pub(super) fn render_installed_content_section(
     let mut pending_toggle: Option<(PathBuf, String, bool)> = None;
     let scroll_height = ui.available_height().max(180.0);
     egui::ScrollArea::vertical()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt((
             "instance_installed_content_scroll",
             instance_id,

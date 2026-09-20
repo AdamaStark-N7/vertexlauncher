@@ -690,7 +690,7 @@ fn render_virtualized_log_lines(
     }
     let allow_stick_to_bottom = stick_to_bottom && viewer_state.follow_bottom && !selection_active;
 
-    let scroll_output = egui::ScrollArea::both()
+    let scroll_output = egui::ScrollArea::both().scroll_source(modal_host::drag_scroll_source())
         .id_salt((text_base_id, "virtual_log_scroll"))
         .auto_shrink([false, false])
         .stick_to_bottom(allow_stick_to_bottom)
@@ -1031,6 +1031,7 @@ fn render_virtualized_log_lines(
 fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::ConsoleSnapshot) {
     let want_tab_focus = take_console_tab_focus_request(ui.ctx());
     egui::ScrollArea::horizontal()
+        .scroll_source(modal_host::drag_scroll_source())
         .id_salt("console_tabs")
         .auto_shrink([false, true])
         .show(ui, |ui| {

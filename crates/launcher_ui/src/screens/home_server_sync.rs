@@ -149,6 +149,7 @@ pub(super) fn render_server_sync_modal(
             if state.choice == ScopeChoice::Selected {
                 ui.add_space(style::SPACE_MD);
                 egui::ScrollArea::vertical()
+                    .scroll_source(modal_host::drag_scroll_source())
                     .id_salt("server_sync_instances_scroll")
                     .max_height(260.0)
                     .auto_shrink([false, true])

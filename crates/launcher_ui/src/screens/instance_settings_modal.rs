@@ -248,7 +248,7 @@ pub(super) fn render_instance_settings_modal(
             let refresh_style = style::neutral_button_with_min_size(ui, egui::vec2(190.0, 30.0));
             let reinstall_button_style =
                 style::neutral_button_with_min_size(ui, egui::vec2(220.0, 34.0));
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::vertical().scroll_source(modal_host::drag_scroll_source())
                 .id_salt(("instance_settings_modal_scroll", instance_id))
                 .scroll_source(ScrollSource {
                     scroll_bar: true,

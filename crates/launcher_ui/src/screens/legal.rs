@@ -67,6 +67,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
 
             let notices_height = ui.available_height().max(0.0);
             ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
                 .id_salt("legal_notice_accordion")
                 .max_height(notices_height)
                 .show(ui, |ui| {
@@ -195,6 +196,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                                     };
                                     if openness >= 0.98 {
                                         ScrollArea::vertical()
+                                            .scroll_source(modal_host::drag_scroll_source())
                                             .id_salt(format!("legal_notice_text_{index}"))
                                             .max_height(text_height)
                                             .auto_shrink([false, false])

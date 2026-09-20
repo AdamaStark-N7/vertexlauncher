@@ -541,6 +541,7 @@ pub(super) fn render_curseforge_manual_download_modal(
             });
             ui.add_space(ui::style::SPACE_SM);
             egui::ScrollArea::vertical()
+                .scroll_source(ui_foundation::drag_scroll_source())
                 .auto_shrink([false, false])
                 .max_height((modal_max_height - 210.0).max(140.0))
                 .show(ui, |ui| {
