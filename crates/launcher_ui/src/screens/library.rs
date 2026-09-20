@@ -795,12 +795,12 @@ fn render_delete_instance_button(
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(rect.intersect(ui.clip_rect()));
         ui.with_layout(
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+            egui::Layout::centered_and_justified(egui::Direction::TopDown),
             |ui| {
                 let _ = text_ui.label(
                     ui,
                     ("library_delete_instance_button_label", instance_id),
-                    "Delete Instance",
+                    "Delete This Instance",
                     &label_style,
                 );
             },
