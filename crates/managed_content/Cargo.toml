@@ -1,9 +1,10 @@
 [package]
 name = "managed_content"
-version = "0.1.19-Alpha"
+version = "0.1.20-Alpha"
 edition = "2024"
 
 [dependencies]
+logged_fs.workspace = true
 serde.workspace = true
 toml.workspace = true
 modprovider.workspace = true

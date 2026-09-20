@@ -108,7 +108,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\build-release-artifacts.ps1
 
 Linux users who want a sandboxed portable package can use the Flatpak bundle. Vertex now packages Flatpak around the same CentOS 7-built Linux AppDir used for AppImage, so the launcher ELF staged into the bundle is checked against a `GLIBC_2.17` ceiling before Flatpak export. The Flatpak still runs against its selected runtime at launch time, but the packaged launcher binary itself stays aligned with the Linux `glibc 2.17+` target.
 
-The Flatpak manifest grants home-directory filesystem access so the launcher can detect and import existing Minecraft / Modrinth / launcher install folders by path instead of being limited to its sandbox-private storage. It also explicitly grants access to the native Linux Vertex storage roots used in code: `~/.config/vertexlauncher`, `~/.local/share/vertexlauncher`, `~/.cache/vertexlauncher`, plus the legacy config root `~/.config/vertex-launcher`. It also exposes both Wayland and X11 sockets and sets `GDK_BACKEND=wayland,x11`, so the launcher prefers Wayland when available while still allowing Minecraft clients and Java mods to fall back to X11 when needed.
+The Flatpak manifest grants home-directory filesystem access so the launcher can detect and import existing Minecraft / Modrinth / launcher install folders by path instead of being limited to its sandbox-private storage. It also explicitly grants access to the native Linux Vertex storage roots used in code: `~/.config/vertexlauncher`, `~/.local/share/vertexlauncher`, `~/.cache/vertexlauncher`, plus the legacy config root `~/.config/vertex-launcher`. It also exposes both Wayland and X11 sockets and sets `GDK_BACKEND=wayland,x11`, so the launcher prefers Wayland when available while still allowing Minecraft clients and Java mods to fall back to X11 when needed. For GPU compute, the manifest keeps the existing device permissions and adds Flatpak GL driver extension wiring, explicit OpenCL ICD library discovery for ROCm/NVIDIA/Mesa, read-only host OS driver-library access, read-only ROCm (`/opt/rocm`) and CUDA (`/opt/cuda`) toolkit access, plus udev metadata for OpenCL, HIP/ROCm, and CUDA-capable Java mods or native libraries.
 
 To build the Flatpak bundle automatically:
 
@@ -142,7 +142,7 @@ If you only have an x86-64 Linux builder but want an ARM64 Flatpak, set `VERTEX_
 
 ## AppImage
 
-Linux users who want a single-file portable launcher can also build an AppImage. Vertex now assembles AppImages around a CentOS 7-built AppDir so the launcher and bundled GTK/WebKit stack stay aligned with the `glibc 2.17+` target instead of inheriting a newer host distro baseline.
+Linux users who want a single-file portable launcher can also build an AppImage. Vertex AppImages bundle the launcher-adjacent GTK/WebKit support files, but intentionally do **not** bundle glibc or the dynamic loader; those are provided by the host because glibc private ABI mismatches can prevent AppImages from starting.
 
 When Vertex runs from an AppImage, it now defaults to portable storage beside the AppImage itself unless `VERTEX_CONFIG_LOCATION` is already set. For example, running `VertexLauncher-x86_64.AppImage` will use `VertexLauncher-x86_64.AppImage.data/` for config, instances, cache, logs, and themes.
 
@@ -172,13 +172,13 @@ The staged AppImage artifact is written to `target/release` as one of:
 - `vertexlauncher-linuxx86-64.AppImage`
 - `vertexlauncher-linuxarm64.AppImage`
 
-On Linux x86-64, the AppImage helper now prefers packaging inside a CentOS 7 container when `podman` is available. That keeps the bundled GTK/WebKit runtime aligned with the `glibc 2.17` baseline instead of inheriting a newer host stack. Set `VERTEX_APPIMAGE_USE_CONTAINER=0` if you need to force host packaging.
+On Linux x86-64, the AppImage helper now prefers packaging inside the project’s Linux container when `podman` is available. Set `VERTEX_APPIMAGE_USE_CONTAINER=0` if you need to force host packaging.
 
-During staging, the AppImage helper now also copies the WebKitGTK helper binaries, injected bundle, GTK IM modules, GDK Pixbuf loaders, schemas, and default theme assets into the AppDir, then patches the bundled WebKitGTK library to resolve those helper paths from inside the AppImage instead of the original CentOS system locations.
+During staging, the AppImage helper now also copies the WebKitGTK helper binaries, injected bundle, GTK IM modules, GDK Pixbuf loaders, schemas, and default theme assets into the AppDir, then patches the bundled WebKitGTK library to resolve those helper paths from inside the AppImage instead of the original system locations.
 
-If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper now cross-compiles the ARM64 launcher on the host against a cached CentOS 7 ARM64 sysroot, then runs only the final AppImage packaging step inside an emulated ARM64 Podman container. It will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
+If you only have an x86-64 Linux builder but want an ARM64 AppImage, set `VERTEX_APPIMAGE_ARCH=aarch64`. The helper cross-compiles the ARM64 launcher on the host against a cached ARM64 sysroot, then runs only the final AppImage packaging step inside an emulated ARM64 Podman container. It will reuse or download ARM64-compatible `linuxdeploy` / `appimagetool` automatically.
 
-The CentOS 7 AppImage/Linux helpers now also reuse a shared cached Rust toolchain under `.cache/linux-x86_64-toolchain/`, so rebuilding x86-64 artifacts no longer has to bootstrap rustup inside the container every time.
+The AppImage/Linux helpers reuse a shared cached Rust toolchain under `.cache/linux-x86_64-toolchain/`, so rebuilding x86-64 artifacts no longer has to bootstrap rustup inside the container every time.
 
 The release scripts now default to building both `vertexlauncher-linuxx86-64.AppImage` and `vertexlauncher-linuxarm64.AppImage` on Linux x86-64. Override that with `VERTEX_RELEASE_APPIMAGE_ARCHES=<comma-separated arches>` or the legacy single-arch `VERTEX_RELEASE_APPIMAGE_ARCH`.
 

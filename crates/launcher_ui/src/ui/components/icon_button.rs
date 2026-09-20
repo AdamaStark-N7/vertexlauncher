@@ -20,7 +20,7 @@ pub fn svg(
     {
         Image::new((texture.id(), vec2(icon_size, icon_size)))
     } else {
-        let themed_svg = apply_text_color(svg_bytes, text_color);
+        let themed_svg = crate::ui::svg_tint::tint_svg(svg_bytes, text_color);
         let uri = format!(
             "bytes://vertex-icons/{icon_id}-{:02x}{:02x}{:02x}.svg",
             text_color.r(),
@@ -120,7 +120,7 @@ fn rasterized_svg_texture_handle(
         text_color.b(),
         aa_mode
     );
-    let themed_svg = apply_text_color(svg_bytes, text_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(svg_bytes, text_color);
     let texture = rasterize_svg_texture(ui, &texture_name, &themed_svg, edge, aa_mode)?;
     ui.ctx()
         .data_mut(|d| d.insert_temp(cache_id, texture.clone()));
@@ -160,10 +160,4 @@ fn rasterize_svg_texture(
         color_image,
         egui::TextureOptions::LINEAR,
     ))
-}
-
-fn apply_text_color(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
-    svg.into_bytes()
 }

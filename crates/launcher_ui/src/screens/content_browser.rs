@@ -326,28 +326,12 @@ pub fn render(
     output
 }
 
-fn ensure_manifest_load_channel(state: &mut ContentBrowserState) {
-    if state.manifest_load_tx.is_some() && state.manifest_load_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Arc<ContentInstallManifest>>();
-    state.manifest_load_tx = Some(tx);
-    state.manifest_load_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn poll_manifest_load(state: &mut ContentBrowserState) {
-    let Some(rx) = state.manifest_load_rx.as_ref() else {
-        return;
-    };
-    let Ok(guard) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/content_browser",
-            "Content manifest load receiver mutex was poisoned."
-        );
-        return;
-    };
-
-    while let Ok(manifest) = guard.try_recv() {
+    let drained = state.manifest_load.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/content_browser", "manifest_load receiver was poisoned; channel reset.");
+    }
+    for manifest in drained.items {
         state.cached_manifest = Some(manifest);
         state.manifest_dirty = false;
         state.manifest_load_in_flight = false;
@@ -360,8 +344,8 @@ fn cached_manifest_for_instance(
 ) -> Arc<ContentInstallManifest> {
     if state.manifest_dirty || state.cached_manifest.is_none() {
         if !state.manifest_load_in_flight {
-            ensure_manifest_load_channel(state);
-            if let Some(tx) = state.manifest_load_tx.as_ref().cloned() {
+            {
+                let tx = state.manifest_load.sender();
                 let instance_root = instance_root.to_path_buf();
                 state.manifest_load_in_flight = true;
                 let _ = tokio_runtime::spawn_detached(async move {

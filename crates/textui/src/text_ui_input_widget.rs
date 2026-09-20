@@ -623,6 +623,7 @@ impl TextUi {
                     .unwrap_or_else(|| options.text_color.gamma_multiply(0.5)),
                 wrap: multiline,
                 monospace: options.monospace,
+                weight: options.weight,
                 fundamentals: options.fundamentals.clone(),
                 ..LabelOptions::default()
             };
@@ -1356,7 +1357,12 @@ impl TextUi {
     ) -> AttrsOwned {
         let mut attrs = Attrs::new()
             .color(to_cosmic_text_color(style.color))
-            .weight(Weight(self.effective_weight(style.weight)))
+            // Spans at the default weight take the input's own weight; styled spans keep theirs.
+            .weight(Weight(self.effective_weight(if style.weight == 400 {
+                options.weight
+            } else {
+                style.weight
+            })))
             .metrics(Metrics::new(
                 (self.effective_font_size(options.font_size) * scale).max(1.0),
                 (self.effective_line_height(options.line_height) * scale).max(1.0),
@@ -1364,7 +1370,12 @@ impl TextUi {
 
         if style.monospace {
             attrs = attrs.family(Family::Monospace);
-        } else if let Some(family) = self.ui_font_family.as_deref() {
+        } else if let Some(family) = options
+            .fundamentals
+            .font_family
+            .as_deref()
+            .or(self.ui_font_family.as_deref())
+        {
             attrs = attrs.family(Family::Name(family));
         }
         if style.italic {
@@ -1390,6 +1401,7 @@ impl TextUi {
         "rich_viewer_attrs".hash(&mut hasher);
         options.font_size.to_bits().hash(&mut hasher);
         options.line_height.to_bits().hash(&mut hasher);
+        options.weight.hash(&mut hasher);
         scale.to_bits().hash(&mut hasher);
         wrap.hash(&mut hasher);
         hash_text_fundamentals(&options.fundamentals, &mut hasher);
@@ -1415,11 +1427,16 @@ impl TextUi {
                 (self.effective_font_size(options.font_size) * scale).max(1.0),
                 (self.effective_line_height(options.line_height) * scale).max(1.0),
             ))
-            .weight(Weight(self.effective_weight(400)));
+            .weight(Weight(self.effective_weight(options.weight)));
 
         if options.monospace {
             attrs = attrs.family(Family::Monospace);
-        } else if let Some(family) = self.ui_font_family.as_deref() {
+        } else if let Some(family) = options
+            .fundamentals
+            .font_family
+            .as_deref()
+            .or(self.ui_font_family.as_deref())
+        {
             attrs = attrs.family(Family::Name(family));
         }
         if let Some(features) =
@@ -1438,6 +1455,7 @@ impl TextUi {
         options.line_height.to_bits().hash(&mut hasher);
         options.text_color.hash(&mut hasher);
         options.monospace.hash(&mut hasher);
+        options.weight.hash(&mut hasher);
         hash_text_fundamentals(&options.fundamentals, &mut hasher);
         scale.to_bits().hash(&mut hasher);
         self.ui_font_family.hash(&mut hasher);

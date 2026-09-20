@@ -61,7 +61,7 @@ pub(super) fn collect_servers_from_request(request: &HomeActivityScanRequest) ->
             servers.push(ServerEntry {
                 instance_id: instance.instance_id.clone(),
                 server_name: server.name,
-                address: server.ip,
+                address: server.ip.clone(),
                 favorite_id: favorite_id.clone(),
                 icon_png: decode_server_icon(server.icon.as_deref()),
                 last_used_at_ms,
@@ -69,6 +69,15 @@ pub(super) fn collect_servers_from_request(request: &HomeActivityScanRequest) ->
                     .favorite_server_ids
                     .iter()
                     .any(|id| id == &favorite_id),
+                instances: vec![EntryInstance {
+                    instance_id: instance.instance_id.clone(),
+                    instance_name: instance.instance_name.clone(),
+                    target: server.ip.clone(),
+                    favorite: instance
+                        .favorite_server_ids
+                        .iter()
+                        .any(|id| id == &favorite_id),
+                }],
             });
         }
     }
@@ -78,7 +87,7 @@ pub(super) fn collect_servers_from_request(request: &HomeActivityScanRequest) ->
             .cmp(&a.last_used_at_ms.unwrap_or(0))
             .then_with(|| a.server_name.cmp(&b.server_name))
     });
-    servers
+    home_grouping::collapse_servers(servers)
 }
 
 pub(super) fn retain_known_server_pings(state: &mut HomeState) {
@@ -145,7 +154,7 @@ pub(super) fn queue_server_pings(state: &mut HomeState) {
 }
 
 pub(super) fn normalize_server_address(address: &str) -> String {
-    address.trim().to_ascii_lowercase()
+    instances::normalize_server_key(address)
 }
 
 fn split_server_address(address: &str) -> (String, u16) {
@@ -448,7 +457,7 @@ fn collapse_motd_for_meta_line(motd: &str) -> String {
 pub(super) fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnapshot>) {
     let (icon, color, tip) =
         ping_icon_for_status(ui.visuals(), ping.map(|snapshot| snapshot.status));
-    let themed_svg = apply_color_to_svg(icon, color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(icon, color);
     let uri = format!(
         "bytes://home/server-ping/{:?}-{:02x}{:02x}{:02x}.svg",
         ping.map(|value| value.status),
@@ -456,12 +465,12 @@ pub(super) fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnaps
         color.g(),
         color.b()
     );
-    ui.add(
+    let response = ui.add(
         egui::Image::from_bytes(uri, themed_svg)
             .fit_to_exact_size(egui::vec2(SERVER_PING_ICON_SIZE, SERVER_PING_ICON_SIZE))
             .sense(egui::Sense::hover()),
-    )
-    .on_hover_text(tip);
+    );
+    crate::ui::style::hover_tip(ui, response, tip);
 }
 
 fn ping_icon_for_status(

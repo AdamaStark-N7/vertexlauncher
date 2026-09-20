@@ -6,16 +6,12 @@ use std::{
 };
 
 use ansi_escapers::{
-    interpreter::{AnsiSpan, parse_ansi_annotated},
+    interpreter::parse_ansi_annotated,
     types::{Color as AnsiColor, SgrAttribute},
 };
-use egui::{
-    Color32, CornerRadius, FontId, Margin, Stroke, Ui, pos2,
-    text::{LayoutJob, TextFormat},
-    vec2,
-};
+use egui::{Color32, CornerRadius, Margin, Stroke, Ui, pos2, vec2};
 use textui::TextUi;
-use textui_egui::{make_gamepad_scrollable, prelude::*};
+use textui_egui::{RichTextSpan, RichTextStyle, make_gamepad_scrollable, prelude::*};
 
 use crate::{
     assets, console,
@@ -26,6 +22,8 @@ use crate::{
 mod cached_console_line_layout;
 #[path = "console/cached_console_log_parse.rs"]
 mod cached_console_log_parse;
+#[path = "console/console_line_layout.rs"]
+mod console_line_layout;
 #[path = "console/console_line_layout_cache_state.rs"]
 mod console_line_layout_cache_state;
 #[path = "console/console_log_parse_cache_state.rs"]
@@ -45,6 +43,7 @@ mod visible_log_row_hit;
 
 use self::cached_console_line_layout::CachedConsoleLineLayout;
 use self::cached_console_log_parse::CachedConsoleLogParse;
+use self::console_line_layout::ConsoleLineLayout;
 use self::console_line_layout_cache_state::ConsoleLineLayoutCacheState;
 use self::console_log_parse_cache_state::ConsoleLogParseCacheState;
 use self::log_level::LogLevel;
@@ -190,14 +189,11 @@ type ConsoleLineLayoutCache = Arc<Mutex<ConsoleLineLayoutCacheState>>;
 type ConsoleLogParseCache = Arc<Mutex<ConsoleLogParseCacheState>>;
 
 fn virtual_log_line_options(ui: &Ui, level: Option<LogLevel>) -> LabelOptions {
-    let mut options = style::body(ui);
-    options.wrap = false;
+    let mut options = style::code(ui);
     options.color = color_for_level(ui, level);
-    options.weight = if matches!(level, Some(LogLevel::Error | LogLevel::Fatal)) {
-        700
-    } else {
-        400
-    };
+    if matches!(level, Some(LogLevel::Error | LogLevel::Fatal)) {
+        options.weight = options.weight.max(700);
+    }
     options
 }
 
@@ -316,49 +312,6 @@ fn ansi_256_to_egui(idx: u8) -> Color32 {
     }
 }
 
-/// Derive the effective `TextFormat` for an ANSI span, falling back to the
-/// line-level `default_color` for any attribute not set by the span's codes.
-fn ansi_span_text_format(
-    codes: &[SgrAttribute],
-    default_color: Color32,
-    font_id: FontId,
-    default_italic: bool,
-) -> TextFormat {
-    let mut color = default_color;
-    let mut background = Color32::TRANSPARENT;
-    let mut italic = default_italic;
-    let mut underline = Stroke::NONE;
-    let mut strikethrough = Stroke::NONE;
-
-    for code in codes {
-        match code {
-            SgrAttribute::Foreground(c) => color = ansi_color_to_egui(c),
-            SgrAttribute::Background(c) => background = ansi_color_to_egui(c),
-            SgrAttribute::Italic => italic = true,
-            SgrAttribute::Underline => underline = Stroke::new(1.0, color),
-            SgrAttribute::CrossedOut => strikethrough = Stroke::new(1.0, color),
-            SgrAttribute::Reset => {
-                color = default_color;
-                background = Color32::TRANSPARENT;
-                italic = default_italic;
-                underline = Stroke::NONE;
-                strikethrough = Stroke::NONE;
-            }
-            _ => {}
-        }
-    }
-
-    TextFormat {
-        font_id,
-        color,
-        background,
-        italics: italic,
-        underline,
-        strikethrough,
-        ..Default::default()
-    }
-}
-
 fn selected_log_text(lines: &[String], selection: &LogSelectionState) -> Option<String> {
     let (start, end) = selection.normalized()?;
     if start == end {
@@ -400,103 +353,6 @@ fn selection_fill_color(ui: &Ui) -> egui::Color32 {
     ui.visuals().selection.bg_fill.linear_multiply(0.55)
 }
 
-/// Build a galley for one console line.
-///
-/// Returns `(galley, display_char_count)` where `display_char_count` is the
-/// character count of the text that was actually laid out (which may be shorter
-/// than `line` when ANSI escape codes are stripped).
-fn layout_console_line_galley(
-    ui: &Ui,
-    line: &str,
-    options: &LabelOptions,
-) -> (Arc<egui::Galley>, usize) {
-    let font_id = FontId {
-        size: options.font_size,
-        family: if options.monospace {
-            egui::FontFamily::Monospace
-        } else {
-            egui::FontFamily::Proportional
-        },
-    };
-
-    if line.contains('\x1b') {
-        let parsed = parse_ansi_annotated(line);
-        let display_text = &parsed.text;
-        let galley = layout_ansi_galley(ui, display_text, &parsed.spans, options, font_id);
-        let char_count = display_text.chars().count();
-        return (galley, char_count);
-    }
-
-    // No ANSI — single uniform span, same as before.
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
-    job.append(
-        line,
-        0.0,
-        TextFormat {
-            font_id,
-            color: options.color,
-            italics: options.italic,
-            ..Default::default()
-        },
-    );
-    (ui.painter().layout_job(job), line.chars().count())
-}
-
-/// Build a multi-span galley from pre-parsed ANSI data.
-fn layout_ansi_galley(
-    ui: &Ui,
-    display_text: &str,
-    spans: &[AnsiSpan],
-    options: &LabelOptions,
-    font_id: FontId,
-) -> Arc<egui::Galley> {
-    let mut job = LayoutJob::default();
-    job.wrap.max_width = f32::INFINITY;
-
-    let default_format = || TextFormat {
-        font_id: font_id.clone(),
-        color: options.color,
-        italics: options.italic,
-        ..Default::default()
-    };
-
-    if spans.is_empty() {
-        job.append(display_text, 0.0, default_format());
-        return ui.painter().layout_job(job);
-    }
-
-    let mut cursor: usize = 0;
-    for span in spans {
-        let start = span.start.min(display_text.len());
-        let end = span.end.min(display_text.len());
-
-        // Any gap before this span gets the default line color.
-        if start > cursor {
-            job.append(&display_text[cursor..start], 0.0, default_format());
-        }
-
-        if end > start {
-            let fmt = ansi_span_text_format(
-                &span.codes,
-                options.color,
-                font_id.clone(),
-                options.italic,
-            );
-            job.append(&display_text[start..end], 0.0, fmt);
-        }
-
-        cursor = end;
-    }
-
-    // Trailing text after the last span.
-    if cursor < display_text.len() {
-        job.append(&display_text[cursor..], 0.0, default_format());
-    }
-
-    ui.painter().layout_job(job)
-}
-
 fn hash_console_line_layout_request(
     line: &str,
     options: &LabelOptions,
@@ -506,6 +362,9 @@ fn hash_console_line_layout_request(
     "console_line_layout".hash(&mut hasher);
     line.hash(&mut hasher);
     options.font_size.to_bits().hash(&mut hasher);
+    options.line_height.to_bits().hash(&mut hasher);
+    options.weight.hash(&mut hasher);
+    options.fundamentals.font_family.hash(&mut hasher);
     options.color.hash(&mut hasher);
     options.monospace.hash(&mut hasher);
     options.italic.hash(&mut hasher);
@@ -528,11 +387,12 @@ fn console_line_layout_cache(ui: &Ui) -> ConsoleLineLayoutCache {
 
 fn cached_console_line_layout(
     ui: &Ui,
+    text_ui: &mut TextUi,
     cache_id: egui::Id,
     line: &str,
     options: &LabelOptions,
     text_redraw_generation: u64,
-) -> (Arc<egui::Galley>, usize) {
+) -> Arc<ConsoleLineLayout> {
     let current_frame = ui.ctx().cumulative_frame_nr();
     let fingerprint = hash_console_line_layout_request(line, options, text_redraw_generation);
     let cache = console_line_layout_cache(ui);
@@ -550,22 +410,21 @@ fn cached_console_line_layout(
             && entry.fingerprint == fingerprint
         {
             entry.last_used_frame = current_frame;
-            return (Arc::clone(&entry.galley), entry.line_len_chars);
+            return Arc::clone(&entry.layout);
         }
     }
 
-    let (galley, line_len_chars) = layout_console_line_galley(ui, line, options);
+    let layout = Arc::new(ConsoleLineLayout::build(text_ui, ui.ctx(), line, options));
     let mut cache_guard = cache.lock().expect("console line layout cache poisoned");
     cache_guard.entries.insert(
         cache_id,
         CachedConsoleLineLayout {
             fingerprint,
-            galley: Arc::clone(&galley),
-            line_len_chars,
+            layout: Arc::clone(&layout),
             last_used_frame: current_frame,
         },
     );
-    (galley, line_len_chars)
+    layout
 }
 
 fn hash_console_log_parse_request(line: &str, context: &LogParseContext) -> u64 {
@@ -632,20 +491,28 @@ fn cached_resolve_log_level(
 }
 
 fn row_contains_text(row: &VisibleLogRowHit, pointer_pos: egui::Pos2) -> bool {
-    row.line_len_chars > 0 && row.text_rect.contains(pointer_pos)
+    row.layout.char_count > 0 && row.text_rect.contains(pointer_pos)
 }
 
-fn clamp_log_cursor_to_row(row: &VisibleLogRowHit, pointer_pos: egui::Pos2) -> LogSelectionCursor {
+fn clamp_log_cursor_to_row(
+    text_ui: &mut TextUi,
+    ctx: &egui::Context,
+    row: &VisibleLogRowHit,
+    pointer_pos: egui::Pos2,
+) -> LogSelectionCursor {
     let local_x = (pointer_pos.x - row.rect.min.x).clamp(0.0, row.rect.width().max(0.0));
-    let local_y = (pointer_pos.y - row.rect.min.y).clamp(0.0, row.rect.height().max(0.0));
-    let cursor = row.galley.cursor_from_pos(vec2(local_x, local_y));
     LogSelectionCursor {
         line: row.line_index,
-        char_index: cursor.index.min(row.line_len_chars),
+        char_index: row
+            .layout
+            .char_at_x(text_ui, ctx, local_x)
+            .min(row.layout.char_count),
     }
 }
 
 fn cursor_from_visible_rows(
+    text_ui: &mut TextUi,
+    ctx: &egui::Context,
     rows: &[VisibleLogRowHit],
     pointer_pos: egui::Pos2,
 ) -> Option<LogSelectionCursor> {
@@ -653,11 +520,13 @@ fn cursor_from_visible_rows(
     let last = rows.last()?;
 
     if let Some(row) = rows.iter().find(|row| row.rect.contains(pointer_pos)) {
-        return Some(clamp_log_cursor_to_row(row, pointer_pos));
+        return Some(clamp_log_cursor_to_row(text_ui, ctx, row, pointer_pos));
     }
 
     if pointer_pos.y <= first.rect.min.y {
         return Some(clamp_log_cursor_to_row(
+            text_ui,
+            ctx,
             first,
             pos2(pointer_pos.x, first.rect.center().y),
         ));
@@ -665,6 +534,8 @@ fn cursor_from_visible_rows(
 
     if pointer_pos.y >= last.rect.max.y {
         return Some(clamp_log_cursor_to_row(
+            text_ui,
+            ctx,
             last,
             pos2(pointer_pos.x, last.rect.center().y),
         ));
@@ -676,14 +547,14 @@ fn cursor_from_visible_rows(
         da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
     })?;
 
-    Some(clamp_log_cursor_to_row(nearest, pointer_pos))
+    Some(clamp_log_cursor_to_row(text_ui, ctx, nearest, pointer_pos))
 }
 
 fn paint_log_selection_for_line(
     ui: &Ui,
+    text_ui: &mut TextUi,
     rect: egui::Rect,
-    galley: &egui::Galley,
-    line_text: &str,
+    layout: &ConsoleLineLayout,
     line_index: usize,
     selection: &LogSelectionState,
 ) {
@@ -695,8 +566,7 @@ fn paint_log_selection_for_line(
         return;
     }
 
-    let display = strip_ansi(line_text);
-    let line_chars = log_char_count(&display);
+    let line_chars = layout.char_count;
     let from = if line_index == start.line {
         start.char_index.min(line_chars)
     } else {
@@ -712,13 +582,8 @@ fn paint_log_selection_for_line(
         return;
     }
 
-    let start_cursor = egui::text::CCursor::new(from);
-    let end_cursor = egui::text::CCursor::new(to);
-    let start_pos = galley.pos_from_cursor(start_cursor);
-    let end_pos = galley.pos_from_cursor(end_cursor);
-
-    let min_x = rect.min.x + start_pos.min.x.min(end_pos.min.x);
-    let max_x = rect.min.x + start_pos.max.x.max(end_pos.max.x);
+    let min_x = rect.min.x + layout.x_at_char(text_ui, ui.ctx(), from);
+    let max_x = rect.min.x + layout.x_at_char(text_ui, ui.ctx(), to);
 
     let selection_rect = egui::Rect::from_min_max(
         pos2(min_x, rect.min.y),
@@ -729,15 +594,45 @@ fn paint_log_selection_for_line(
         .rect_filled(selection_rect, 0.0, selection_fill_color(ui));
 }
 
+/// Paints ANSI backgrounds, underlines and strikethroughs, which textui spans don't carry.
+fn paint_line_decorations(
+    ui: &Ui,
+    text_ui: &mut TextUi,
+    text_rect: egui::Rect,
+    layout: &ConsoleLineLayout,
+) {
+    for decoration in &layout.decorations {
+        let x0 = text_rect.min.x + layout.x_at_char(text_ui, ui.ctx(), decoration.start_char);
+        let x1 = text_rect.min.x + layout.x_at_char(text_ui, ui.ctx(), decoration.end_char);
+        if decoration.background != Color32::TRANSPARENT {
+            ui.painter().rect_filled(
+                egui::Rect::from_min_max(pos2(x0, text_rect.min.y), pos2(x1, text_rect.max.y)),
+                0.0,
+                decoration.background,
+            );
+        }
+        if let Some(color) = decoration.underline {
+            let y = text_rect.max.y - 2.0;
+            ui.painter()
+                .line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, color));
+        }
+        if let Some(color) = decoration.strikethrough {
+            let y = text_rect.center().y;
+            ui.painter()
+                .line_segment([pos2(x0, y), pos2(x1, y)], Stroke::new(1.0, color));
+        }
+    }
+}
+
 fn render_virtualized_log_lines(
     ui: &mut Ui,
-    _text_ui: &mut TextUi,
+    text_ui: &mut TextUi,
     text_base_id: egui::Id,
     lines: &[String],
     stick_to_bottom: bool,
     text_redraw_generation: u64,
 ) {
-    let body_style = style::body(ui);
+    let body_style = style::code(ui);
     let row_height = body_style.line_height.max(1.0);
     let state_id = ui.make_persistent_id((text_base_id, "virtual_log_state"));
     let selection_id = ui.make_persistent_id((text_base_id, "virtual_log_selection"));
@@ -844,17 +739,18 @@ fn render_virtualized_log_lines(
                     &mut parse_context,
                 );
                 let options = virtual_log_line_options(ui, level);
-                let (galley, line_len_chars) = cached_console_line_layout(
+                let layout = cached_console_line_layout(
                     ui,
+                    text_ui,
                     ui.make_persistent_id((text_base_id, "virtual_line_layout", line_index)),
                     line,
                     &options,
                     text_redraw_generation,
                 );
-                let galley_size = galley.size();
+                let layout_size = layout.size;
                 viewer_state.max_line_width = viewer_state
                     .max_line_width
-                    .max(galley_size.x.ceil().max(1.0));
+                    .max(layout_size.x.ceil().max(1.0));
 
                 let desired_width = viewer_state.max_line_width.max(viewport.width()).max(1.0);
                 let desired_height = row_height;
@@ -864,19 +760,30 @@ fn render_virtualized_log_lines(
                     egui::Sense::hover(),
                 );
 
-                let text_rect = egui::Rect::from_min_size(rect.min, galley_size);
+                let text_rect = egui::Rect::from_min_size(rect.min, layout_size);
 
                 row_hits.push(VisibleLogRowHit {
                     line_index,
                     rect,
                     text_rect,
-                    galley: Arc::clone(&galley),
-                    line_len_chars,
+                    layout: Arc::clone(&layout),
                 });
 
-                paint_log_selection_for_line(ui, rect, &galley, line, line_index, &selection_state);
-                ui.painter()
-                    .galley(text_rect.min, Arc::clone(&galley), options.color);
+                paint_log_selection_for_line(ui, text_ui, rect, &layout, line_index, &selection_state);
+                if ui.is_rect_visible(rect) {
+                    paint_line_decorations(ui, text_ui, text_rect, &layout);
+                    if !layout.rich_spans.is_empty() {
+                        let painter = ui.painter().clone();
+                        text_ui.paint_rich_line(
+                            ui,
+                            &painter,
+                            (text_base_id, "virtual_line_text", line_index),
+                            text_rect.min,
+                            &layout.rich_spans,
+                            &layout.options,
+                        );
+                    }
+                }
             }
 
             let mut current_hovered_line: Option<usize> = None;
@@ -1004,7 +911,7 @@ fn render_virtualized_log_lines(
                 viewport_response.request_focus();
                 viewport_has_focus = true;
                 if let Some(pointer_pos) = viewport_response.interact_pointer_pos() {
-                    if let Some(cursor) = cursor_from_visible_rows(&row_hits, pointer_pos) {
+                    if let Some(cursor) = cursor_from_visible_rows(text_ui, ui.ctx(), &row_hits, pointer_pos) {
                         selection_state.anchor = Some(cursor);
                         selection_state.head = Some(cursor);
                         selection_state.dragging = false;
@@ -1020,7 +927,7 @@ fn render_virtualized_log_lines(
                 viewport_response.request_focus();
                 viewport_has_focus = true;
                 if let Some(pointer_pos) = ui.input(|i| i.pointer.interact_pos()) {
-                    if let Some(cursor) = cursor_from_visible_rows(&row_hits, pointer_pos) {
+                    if let Some(cursor) = cursor_from_visible_rows(text_ui, ui.ctx(), &row_hits, pointer_pos) {
                         selection_state.anchor = Some(cursor);
                         selection_state.head = Some(cursor);
                         selection_state.dragging = true;
@@ -1032,7 +939,7 @@ fn render_virtualized_log_lines(
                 if let Some(pointer_pos) =
                     ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()))
                 {
-                    if let Some(cursor) = cursor_from_visible_rows(&row_hits, pointer_pos) {
+                    if let Some(cursor) = cursor_from_visible_rows(text_ui, ui.ctx(), &row_hits, pointer_pos) {
                         selection_state.head = Some(cursor);
                     }
                     let vertical_margin =
@@ -1176,8 +1083,7 @@ fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::Consol
                                         fill_active: ui.visuals().widgets.active.weak_bg_fill,
                                         fill_selected: ui.visuals().widgets.open.weak_bg_fill,
                                         stroke: ui.visuals().widgets.inactive.bg_stroke,
-                                        font_size: 20.0,
-                                        line_height: 20.0,
+                                        ..ButtonOptions::default()
                                     };
                                     let close_response = text_ui.button(
                                         ui,

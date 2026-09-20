@@ -14,6 +14,7 @@ mod app_screen;
 mod console;
 mod content_browser;
 mod discover;
+mod game_settings;
 mod home;
 mod instance;
 #[path = "screens/launch_auth_context.rs"]
@@ -71,6 +72,7 @@ pub use settings::request_theme_focus as request_settings_theme_focus;
 pub use settings_info::{SettingsGraphicsAdapterInfo, SettingsInfo};
 pub use skins::classic_model_button_id as skins_classic_model_button_id;
 pub use skins::purge_inactive_state as purge_inactive_skins_state;
+pub use skins::release_gpu_resources as release_skins_gpu_resources;
 pub use skins::request_model_focus as request_skins_model_focus;
 pub use skins::request_motion_focus as request_skins_motion_focus;
 pub use skins::set_gamepad_orbit_input as set_skins_gamepad_orbit_input;

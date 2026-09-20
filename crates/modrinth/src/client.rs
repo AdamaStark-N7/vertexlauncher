@@ -546,7 +546,10 @@ impl Client {
                 body_len = raw.len(),
                 "Modrinth returned non-success status"
             );
-            return Err(ModrinthError::HttpStatus { status, body: raw });
+            return Err(ModrinthError::HttpStatus {
+                status,
+                body: http_status_error_body(path, status, raw.as_str()),
+            });
         }
 
         serde_json::from_str(&raw).map_err(|err| {
@@ -699,6 +702,18 @@ fn rate_limit_wait_from_budget(reset_secs: u64, remaining: u64) -> Duration {
     Duration::from_millis(per_request_millis.max(min_spacing_millis) as u64)
 }
 
+fn http_status_error_body(path: &str, status: u16, raw: &str) -> String {
+    if status >= 500 {
+        if path == "/search" {
+            "Modrinth search service is temporarily unavailable; try again later".to_owned()
+        } else {
+            "Modrinth API is temporarily unavailable; try again later".to_owned()
+        }
+    } else {
+        raw.trim().to_owned()
+    }
+}
+
 fn normalize_hash_algorithm(value: &str) -> Result<&'static str, ModrinthError> {
     match value.trim().to_ascii_lowercase().as_str() {
         "sha1" => Ok("sha1"),
@@ -756,5 +771,31 @@ mod tests {
     fn rate_limit_budget_uses_reset_window_for_empty_budget() {
         let wait = rate_limit_wait_from_budget(17, 0);
         assert_eq!(wait, Duration::from_secs(17));
+    }
+
+    #[test]
+    fn http_status_error_body_hides_search_backend_internals() {
+        let raw = r#"{"error":"internal_error","description":"Typesense search failed: {\"message\":\"Forbidden - a valid `x-typesense-api-key` header must be sent.\"}"}"#;
+
+        assert_eq!(
+            http_status_error_body("/search", 500, raw),
+            "Modrinth search service is temporarily unavailable; try again later"
+        );
+    }
+
+    #[test]
+    fn http_status_error_body_hides_generic_server_errors() {
+        assert_eq!(
+            http_status_error_body("/project/example", 503, "upstream details"),
+            "Modrinth API is temporarily unavailable; try again later"
+        );
+    }
+
+    #[test]
+    fn http_status_error_body_keeps_client_error_details() {
+        assert_eq!(
+            http_status_error_body("/project/example", 404, " not found "),
+            "not found"
+        );
     }
 }

@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::Arc;
 
 use content_resolver::{InstalledContentFile, InstalledContentKind};
 use managed_content::InstalledContentIdentity;
@@ -18,8 +18,7 @@ pub(super) struct InstalledContentCache {
     pub(super) files_by_tab: HashMap<InstalledContentKind, Arc<[InstalledContentFile]>>,
     pub(super) scan_generation: u64,
     pub(super) scans_in_flight: HashSet<InstalledContentKind>,
-    pub(super) scan_results_tx: Option<mpsc::Sender<InstalledContentScanResult>>,
-    pub(super) scan_results_rx: Option<Arc<Mutex<mpsc::Receiver<InstalledContentScanResult>>>>,
+    pub(super) scan_results: launcher_runtime::WorkerChannel<InstalledContentScanResult>,
 }
 
 impl InstalledContentCache {

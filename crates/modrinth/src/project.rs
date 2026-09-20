@@ -1,4 +1,6 @@
 /// Detailed project metadata.
+use crate::Environment;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Project {
     pub project_id: String,
@@ -8,6 +10,7 @@ pub struct Project {
     pub project_type: String,
     pub icon_url: Option<String>,
     pub project_url: String,
+    pub environment: Environment,
 }
 
 pub(crate) fn build_project_url(

@@ -73,8 +73,7 @@ pub fn selectable_row_button(
     let text_rect = rect.shrink2(egui::vec2(10.0, 4.0));
     let label_options = LabelOptions {
         color: text_color,
-        wrap: true,
-        ..LabelOptions::default()
+        ..crate::typography::role(ui, config::TextRole::Body, true)
     };
     ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
         ui.set_clip_rect(text_rect.intersect(ui.clip_rect()));

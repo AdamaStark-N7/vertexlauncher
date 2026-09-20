@@ -1,20 +1,25 @@
 [package]
 name = "launcher_ui"
-version = "0.1.19-Alpha"
+version = "0.1.20-Alpha"
 edition = "2024"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [dependencies]
+log_redaction.workspace = true
 app_paths.workspace = true
 eframe.workspace = true
 egui.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 directories.workspace = true
 content_resolver.workspace = true
 config.workspace = true
+instance_sync.workspace = true
+mc_options.workspace = true
 instances.workspace = true
 installation.workspace = true
 managed_content.workspace = true

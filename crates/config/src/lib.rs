@@ -4,12 +4,18 @@ mod gamepad_calibration;
 mod graphics_adapter_preference;
 mod graphics_api_preference;
 mod java_runtime_version;
+mod linux_blur_protocol;
+mod macos_visual_effect_blending_mode;
+mod macos_visual_effect_material;
+mod macos_visual_effect_state;
 mod setting_specs;
 mod skin_preview_aa_mode;
 mod skin_preview_texel_aa_mode;
 mod svg_aa_mode;
 mod text_rendering_path;
+mod typography;
 mod ui_fonts;
+mod window_transparency;
 mod windows_backdrop_type;
 mod windows_transparency_level;
 
@@ -18,6 +24,10 @@ pub use gamepad_calibration::GamepadCalibration;
 pub use graphics_adapter_preference::{GraphicsAdapterPreferenceType, GraphicsAdapterProfile};
 pub use graphics_api_preference::GraphicsApiPreference;
 pub use java_runtime_version::JavaRuntimeVersion;
+pub use linux_blur_protocol::LinuxBlurProtocol;
+pub use macos_visual_effect_blending_mode::MacosVisualEffectBlendingMode;
+pub use macos_visual_effect_material::MacosVisualEffectMaterial;
+pub use macos_visual_effect_state::MacosVisualEffectState;
 pub use setting_specs::{
     DropdownSettingId, DropdownSettingSpec, FloatSettingId, FloatSettingSpec, IntSettingId,
     IntSettingSpec, TextSettingId, TextSettingSpec, ToggleSettingId, ToggleSettingSpec,
@@ -26,7 +36,12 @@ pub use skin_preview_aa_mode::SkinPreviewAaMode;
 pub use skin_preview_texel_aa_mode::SkinPreviewTexelAaMode;
 pub use svg_aa_mode::SvgAaMode;
 pub use text_rendering_path::TextRenderingPath;
+pub use typography::{
+    ROLE_FONT_SIZE_MAX, ROLE_FONT_SIZE_MIN, ROLE_FONT_SIZE_STEP, ResolvedTypography, RoleDefaults,
+    RoleOverride, TextRole, TypographySettings,
+};
 pub use ui_fonts::{UiEmojiFontFamily, UiFontFamily};
+pub use window_transparency::WindowTransparency;
 pub use windows_backdrop_type::WindowsBackdropType;
 pub use windows_transparency_level::WindowsTransparencyLevel;
 
@@ -67,8 +82,28 @@ pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN: i32 = 2;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX: i32 = 16;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP: i32 = 1;
 
+const fn default_window_transparency() -> WindowTransparency {
+    WindowTransparency::Opaque
+}
+
 const fn default_windows_backdrop_type() -> WindowsBackdropType {
     WindowsBackdropType::Auto
+}
+
+const fn default_linux_blur_protocol() -> LinuxBlurProtocol {
+    LinuxBlurProtocol::Auto
+}
+
+const fn default_macos_visual_effect_material() -> MacosVisualEffectMaterial {
+    MacosVisualEffectMaterial::UnderWindowBackground
+}
+
+const fn default_macos_visual_effect_blending_mode() -> MacosVisualEffectBlendingMode {
+    MacosVisualEffectBlendingMode::BehindWindow
+}
+
+const fn default_macos_visual_effect_state() -> MacosVisualEffectState {
+    MacosVisualEffectState::Active
 }
 
 const fn default_ui_opacity_percent() -> u8 {
@@ -166,9 +201,21 @@ pub struct Config {
     graphics_adapter_explicit_hash: Option<u64>,
     graphics_api_preference: GraphicsApiPreference,
     streamer_mode_enabled: bool,
-    window_blur_enabled: bool,
+    #[serde(default = "default_window_transparency")]
+    window_transparency: WindowTransparency,
+    #[serde(default, rename = "window_blur_enabled", skip_serializing)]
+    legacy_window_blur_enabled: Option<bool>,
     #[serde(default = "default_windows_backdrop_type")]
     windows_backdrop_type: WindowsBackdropType,
+    #[serde(default = "default_linux_blur_protocol")]
+    linux_blur_protocol: LinuxBlurProtocol,
+    #[serde(default = "default_macos_visual_effect_material")]
+    macos_visual_effect_material: MacosVisualEffectMaterial,
+    #[serde(default = "default_macos_visual_effect_blending_mode")]
+    macos_visual_effect_blending_mode: MacosVisualEffectBlendingMode,
+    #[serde(default = "default_macos_visual_effect_state")]
+    macos_visual_effect_state: MacosVisualEffectState,
+    macos_visual_effect_emphasized: bool,
     #[serde(default = "default_ui_opacity_percent")]
     ui_opacity_percent: u8,
     #[serde(default, rename = "windows_transparency_level", skip_serializing)]
@@ -195,9 +242,19 @@ pub struct Config {
     hdr_when_available: bool,
     frame_limiter_enabled: bool,
     discord_rich_presence_enabled: bool,
+    #[serde(default)]
+    sync_servers_enabled: bool,
+    #[serde(default)]
+    sync_command_history_enabled: bool,
+    #[serde(default)]
+    sync_hotbars_enabled: bool,
+    #[serde(default)]
+    sync_servers_to_all_instances_by_default: bool,
     frame_limit_fps: i32,
     ui_font_size: f32,
     ui_font_weight: i32,
+    #[serde(default)]
+    typography: TypographySettings,
     include_snapshots_and_betas: bool,
     include_alpha_versions: bool,
     include_experimental_versions: bool,
@@ -266,6 +323,57 @@ impl Config {
     }
 
     /// Returns whether launcher-owned Discord Rich Presence is enabled.
+    /// Java major version `game_version` needs, honoring the "force Java 21 minimum" setting.
+    pub fn effective_required_java_major(&self, game_version: &str) -> Option<u8> {
+        let required = JavaRuntimeVersion::required_major_for_game(game_version)?;
+        Some(if self.force_java_21_minimum() && required < 21 {
+            21
+        } else {
+            required
+        })
+    }
+
+    /// Path of the configured Java to launch with: the per-instance override if it is enabled
+    /// and available, else the runtime `required_major` needs. `None` means "let the launcher
+    /// provision one".
+    pub fn choose_java_executable(
+        &self,
+        override_enabled: bool,
+        override_major: Option<u8>,
+        required_major: Option<u8>,
+    ) -> Option<String> {
+        let existing = |major: u8| {
+            let runtime = JavaRuntimeVersion::from_major(major)?;
+            let path = self.java_runtime_path_ref(runtime)?;
+            let text = path.as_os_str().to_string_lossy().trim().to_owned();
+            (!text.is_empty() && path.exists()).then_some(text)
+        };
+        override_major
+            .filter(|_| override_enabled)
+            .and_then(existing)
+            .or_else(|| required_major.and_then(existing))
+    }
+
+    /// Whether multiplayer servers are copied between instances.
+    pub fn sync_servers_enabled(&self) -> bool {
+        self.sync_servers_enabled
+    }
+
+    /// Whether `command_history.txt` is merged across instances.
+    pub fn sync_command_history_enabled(&self) -> bool {
+        self.sync_command_history_enabled
+    }
+
+    /// Whether creative hotbars (`hotbar.nbt`) are shared across compatible instances.
+    pub fn sync_hotbars_enabled(&self) -> bool {
+        self.sync_hotbars_enabled
+    }
+
+    /// Whether servers without an explicit scope are copied to every instance.
+    pub fn sync_servers_to_all_instances_by_default(&self) -> bool {
+        self.sync_servers_to_all_instances_by_default
+    }
+
     pub fn discord_rich_presence_enabled(&self) -> bool {
         self.discord_rich_presence_enabled
     }
@@ -410,14 +518,28 @@ impl Config {
         self.frame_limit_fps = fps.clamp(FRAME_LIMIT_FPS_MIN, FRAME_LIMIT_FPS_MAX);
     }
 
-    /// Returns whether platform blur effects are enabled.
-    pub fn window_blur_enabled(&self) -> bool {
-        self.window_blur_enabled
+    /// Returns the app-wide window transparency mode.
+    pub fn window_transparency(&self) -> WindowTransparency {
+        self.window_transparency
     }
 
-    /// Enables or disables platform blur effects.
+    /// Sets the app-wide window transparency mode.
+    pub fn set_window_transparency(&mut self, value: WindowTransparency) {
+        self.window_transparency = value;
+    }
+
+    /// Returns whether native platform blur/backdrop effects are requested.
+    pub fn window_blur_enabled(&self) -> bool {
+        self.window_transparency.uses_native_blur()
+    }
+
+    /// Compatibility helper for legacy call sites; prefer [`Self::set_window_transparency`].
     pub fn set_window_blur_enabled(&mut self, enabled: bool) {
-        self.window_blur_enabled = enabled;
+        self.window_transparency = if enabled {
+            WindowTransparency::Blurred
+        } else {
+            WindowTransparency::Opaque
+        };
     }
 
     pub fn windows_backdrop_type(&self) -> WindowsBackdropType {
@@ -426,6 +548,46 @@ impl Config {
 
     pub fn set_windows_backdrop_type(&mut self, value: WindowsBackdropType) {
         self.windows_backdrop_type = value;
+    }
+
+    pub fn linux_blur_protocol(&self) -> LinuxBlurProtocol {
+        self.linux_blur_protocol
+    }
+
+    pub fn set_linux_blur_protocol(&mut self, value: LinuxBlurProtocol) {
+        self.linux_blur_protocol = value;
+    }
+
+    pub fn macos_visual_effect_material(&self) -> MacosVisualEffectMaterial {
+        self.macos_visual_effect_material
+    }
+
+    pub fn set_macos_visual_effect_material(&mut self, value: MacosVisualEffectMaterial) {
+        self.macos_visual_effect_material = value;
+    }
+
+    pub fn macos_visual_effect_blending_mode(&self) -> MacosVisualEffectBlendingMode {
+        self.macos_visual_effect_blending_mode
+    }
+
+    pub fn set_macos_visual_effect_blending_mode(&mut self, value: MacosVisualEffectBlendingMode) {
+        self.macos_visual_effect_blending_mode = value;
+    }
+
+    pub fn macos_visual_effect_state(&self) -> MacosVisualEffectState {
+        self.macos_visual_effect_state
+    }
+
+    pub fn set_macos_visual_effect_state(&mut self, value: MacosVisualEffectState) {
+        self.macos_visual_effect_state = value;
+    }
+
+    pub fn macos_visual_effect_emphasized(&self) -> bool {
+        self.macos_visual_effect_emphasized
+    }
+
+    pub fn set_macos_visual_effect_emphasized(&mut self, value: bool) {
+        self.macos_visual_effect_emphasized = value;
     }
 
     pub fn ui_opacity_percent(&self) -> u8 {
@@ -486,6 +648,15 @@ impl Config {
     }
 
     /// Returns configured UI font weight (CSS-like 100..900).
+    /// Per-role font size, weight and family overrides.
+    pub fn typography(&self) -> &TypographySettings {
+        &self.typography
+    }
+
+    pub fn typography_mut(&mut self) -> &mut TypographySettings {
+        &mut self.typography
+    }
+
     pub fn ui_font_weight(&self) -> i32 {
         self.ui_font_weight
     }
@@ -673,8 +844,32 @@ impl Config {
 
     /// Normalizes all config values into launcher-supported ranges/defaults.
     pub fn normalize(&mut self) {
+        if let Some(legacy_blur_enabled) = self.legacy_window_blur_enabled.take() {
+            if self.window_transparency == default_window_transparency() {
+                self.window_transparency = if legacy_blur_enabled {
+                    WindowTransparency::Blurred
+                } else {
+                    WindowTransparency::Opaque
+                };
+            }
+        }
+        if !WindowTransparency::ALL.contains(&self.window_transparency) {
+            self.window_transparency = default_window_transparency();
+        }
         if !WindowsBackdropType::ALL.contains(&self.windows_backdrop_type) {
             self.windows_backdrop_type = default_windows_backdrop_type();
+        }
+        if !LinuxBlurProtocol::ALL.contains(&self.linux_blur_protocol) {
+            self.linux_blur_protocol = default_linux_blur_protocol();
+        }
+        if !MacosVisualEffectMaterial::ALL.contains(&self.macos_visual_effect_material) {
+            self.macos_visual_effect_material = default_macos_visual_effect_material();
+        }
+        if !MacosVisualEffectBlendingMode::ALL.contains(&self.macos_visual_effect_blending_mode) {
+            self.macos_visual_effect_blending_mode = default_macos_visual_effect_blending_mode();
+        }
+        if !MacosVisualEffectState::ALL.contains(&self.macos_visual_effect_state) {
+            self.macos_visual_effect_state = default_macos_visual_effect_state();
         }
         if let Some(level) = self.legacy_windows_transparency_level.take() {
             if self.ui_opacity_percent == default_ui_opacity_percent() {
@@ -690,6 +885,7 @@ impl Config {
             .ui_opacity_percent
             .clamp(UI_OPACITY_PERCENT_MIN, UI_OPACITY_PERCENT_MAX);
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+        self.typography.normalize();
         self.skin_preview_motion_blur_amount = self.skin_preview_motion_blur_amount.clamp(
             SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
             SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX,
@@ -757,6 +953,12 @@ impl Config {
         if !GraphicsApiPreference::ALL.contains(&self.graphics_api_preference) {
             self.graphics_api_preference = GraphicsApiPreference::Auto;
         }
+        #[cfg(target_os = "windows")]
+        if self.window_transparency.is_translucent()
+            && matches!(self.graphics_api_preference, GraphicsApiPreference::Vulkan)
+        {
+            self.graphics_api_preference = GraphicsApiPreference::Dx12;
+        }
     }
 
     /// Visits each toggle setting with mutable access to its backing value.
@@ -769,8 +971,14 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled,
-            window_blur_enabled,
+            window_transparency: _,
+            legacy_window_blur_enabled: _,
             windows_backdrop_type: _,
+            linux_blur_protocol: _,
+            macos_visual_effect_material: _,
+            macos_visual_effect_blending_mode: _,
+            macos_visual_effect_state: _,
+            macos_visual_effect_emphasized: _,
             ui_opacity_percent: _,
             legacy_windows_transparency_level: _,
             linux_set_opengl_driver: _,
@@ -795,12 +1003,17 @@ impl Config {
             hdr_when_available: _,
             ui_font_size: _,
             ui_font_weight: _,
+            typography: _,
             include_snapshots_and_betas,
             include_alpha_versions,
             include_experimental_versions,
             force_java_21_minimum,
             frame_limiter_enabled,
             discord_rich_presence_enabled,
+            sync_servers_enabled,
+            sync_command_history_enabled,
+            sync_hotbars_enabled,
+            sync_servers_to_all_instances_by_default,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
             minecraft_installations_root: _,
@@ -825,10 +1038,7 @@ impl Config {
             ToggleSettingId::StreamerModeEnabled.spec(),
             streamer_mode_enabled,
         );
-        visit(
-            ToggleSettingId::WindowBlurEnabled.spec(),
-            window_blur_enabled,
-        );
+
         visit(
             ToggleSettingId::OpenTypeFeaturesEnabled.spec(),
             open_type_features_enabled,
@@ -869,6 +1079,22 @@ impl Config {
             ToggleSettingId::DiscordRichPresenceEnabled.spec(),
             discord_rich_presence_enabled,
         );
+        visit(
+            ToggleSettingId::SyncServersEnabled.spec(),
+            sync_servers_enabled,
+        );
+        visit(
+            ToggleSettingId::SyncCommandHistoryEnabled.spec(),
+            sync_command_history_enabled,
+        );
+        visit(
+            ToggleSettingId::SyncHotbarsEnabled.spec(),
+            sync_hotbars_enabled,
+        );
+        visit(
+            ToggleSettingId::SyncServersToAllInstancesByDefault.spec(),
+            sync_servers_to_all_instances_by_default,
+        );
     }
 
     /// Visits each dropdown setting with mutable access to its backing value.
@@ -884,8 +1110,14 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled: _,
-            window_blur_enabled: _,
+            window_transparency: _,
+            legacy_window_blur_enabled: _,
             windows_backdrop_type: _,
+            linux_blur_protocol: _,
+            macos_visual_effect_material: _,
+            macos_visual_effect_blending_mode: _,
+            macos_visual_effect_state: _,
+            macos_visual_effect_emphasized: _,
             ui_opacity_percent: _,
             legacy_windows_transparency_level: _,
             linux_set_opengl_driver: _,
@@ -910,12 +1142,17 @@ impl Config {
             hdr_when_available: _,
             ui_font_size: _,
             ui_font_weight: _,
+            typography: _,
             include_snapshots_and_betas: _,
             include_alpha_versions: _,
             include_experimental_versions: _,
             force_java_21_minimum: _,
             frame_limiter_enabled: _,
             discord_rich_presence_enabled: _,
+            sync_servers_enabled: _,
+            sync_command_history_enabled: _,
+            sync_hotbars_enabled: _,
+            sync_servers_to_all_instances_by_default: _,
             frame_limit_fps: _,
             default_instance_max_memory_mib: _,
             default_instance_cli_args: _,
@@ -945,8 +1182,14 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled: _,
-            window_blur_enabled: _,
+            window_transparency: _,
+            legacy_window_blur_enabled: _,
             windows_backdrop_type: _,
+            linux_blur_protocol: _,
+            macos_visual_effect_material: _,
+            macos_visual_effect_blending_mode: _,
+            macos_visual_effect_state: _,
+            macos_visual_effect_emphasized: _,
             ui_opacity_percent: _,
             legacy_windows_transparency_level: _,
             linux_set_opengl_driver: _,
@@ -970,12 +1213,17 @@ impl Config {
             hdr_when_available: _,
             ui_font_size,
             ui_font_weight: _,
+            typography: _,
             include_snapshots_and_betas: _,
             include_alpha_versions: _,
             include_experimental_versions: _,
             force_java_21_minimum: _,
             frame_limiter_enabled: _,
             discord_rich_presence_enabled: _,
+            sync_servers_enabled: _,
+            sync_command_history_enabled: _,
+            sync_hotbars_enabled: _,
+            sync_servers_to_all_instances_by_default: _,
             frame_limit_fps: _,
             skin_preview_motion_blur_sample_count: _,
             default_instance_max_memory_mib: _,
@@ -1014,8 +1262,14 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled: _,
-            window_blur_enabled: _,
+            window_transparency: _,
+            legacy_window_blur_enabled: _,
             windows_backdrop_type: _,
+            linux_blur_protocol: _,
+            macos_visual_effect_material: _,
+            macos_visual_effect_blending_mode: _,
+            macos_visual_effect_state: _,
+            macos_visual_effect_emphasized: _,
             ui_opacity_percent: _,
             legacy_windows_transparency_level: _,
             linux_set_opengl_driver: _,
@@ -1039,8 +1293,13 @@ impl Config {
             hdr_when_available: _,
             ui_font_size: _,
             ui_font_weight,
+            typography: _,
             frame_limiter_enabled: _,
             discord_rich_presence_enabled: _,
+            sync_servers_enabled: _,
+            sync_command_history_enabled: _,
+            sync_hotbars_enabled: _,
+            sync_servers_to_all_instances_by_default: _,
             frame_limit_fps,
             skin_preview_motion_blur_sample_count,
             include_snapshots_and_betas: _,
@@ -1084,8 +1343,14 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled: _,
-            window_blur_enabled: _,
+            window_transparency: _,
+            legacy_window_blur_enabled: _,
             windows_backdrop_type: _,
+            linux_blur_protocol: _,
+            macos_visual_effect_material: _,
+            macos_visual_effect_blending_mode: _,
+            macos_visual_effect_state: _,
+            macos_visual_effect_emphasized: _,
             ui_opacity_percent: _,
             legacy_windows_transparency_level: _,
             linux_set_opengl_driver: _,
@@ -1110,8 +1375,13 @@ impl Config {
             hdr_when_available: _,
             ui_font_size: _,
             ui_font_weight: _,
+            typography: _,
             frame_limiter_enabled: _,
             discord_rich_presence_enabled: _,
+            sync_servers_enabled: _,
+            sync_command_history_enabled: _,
+            sync_hotbars_enabled: _,
+            sync_servers_to_all_instances_by_default: _,
             frame_limit_fps: _,
             include_snapshots_and_betas: _,
             include_alpha_versions: _,
@@ -1165,8 +1435,14 @@ impl Default for Config {
             graphics_adapter_explicit_hash: None,
             graphics_api_preference: GraphicsApiPreference::Auto,
             streamer_mode_enabled: false,
-            window_blur_enabled: !cfg!(target_os = "macos"),
+            window_transparency: default_window_transparency(),
+            legacy_window_blur_enabled: None,
             windows_backdrop_type: default_windows_backdrop_type(),
+            linux_blur_protocol: default_linux_blur_protocol(),
+            macos_visual_effect_material: default_macos_visual_effect_material(),
+            macos_visual_effect_blending_mode: default_macos_visual_effect_blending_mode(),
+            macos_visual_effect_state: default_macos_visual_effect_state(),
+            macos_visual_effect_emphasized: false,
             ui_opacity_percent: default_ui_opacity_percent(),
             legacy_windows_transparency_level: None,
             linux_set_opengl_driver: false,
@@ -1191,9 +1467,14 @@ impl Default for Config {
             hdr_when_available: false,
             frame_limiter_enabled: false,
             discord_rich_presence_enabled: true,
+            sync_servers_enabled: false,
+            sync_command_history_enabled: false,
+            sync_hotbars_enabled: false,
+            sync_servers_to_all_instances_by_default: false,
             frame_limit_fps: 120,
             ui_font_size: 18.0,
             ui_font_weight: 400,
+            typography: TypographySettings::default(),
             include_snapshots_and_betas: false,
             include_alpha_versions: false,
             include_experimental_versions: false,

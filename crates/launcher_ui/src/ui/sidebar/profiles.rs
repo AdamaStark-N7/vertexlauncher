@@ -151,7 +151,8 @@ fn render_profile_icon(
         if let image_textures::ManagedTextureStatus::Ready(texture) =
             image_textures::request_texture(ui.ctx(), uri, bytes, egui::TextureOptions::LINEAR)
         {
-            let image = egui::Image::from_texture(&texture)
+            let image = texture
+                .image()
                 .fit_to_exact_size(egui::vec2(icon_size, icon_size));
             return ui.add_sized(
                 [button_size, button_size],

@@ -991,10 +991,23 @@ pub(crate) fn catalog_has_loader_version_data(catalog: &VersionCatalog) -> bool 
     })
 }
 
+/// Orders game versions newest first by Mojang's release time.
+///
+/// Version ids can't be compared as text: `26.3-snapshot-10` and `26.3-pre1` would rank above
+/// `26.3` (more tokens), and weekly snapshots like `24w14a` above every `1.x` release. Release
+/// time is what the manifest itself is ordered by. The sort is stable, so entries without a
+/// time (from older cached catalogs, which were already stored in release-time order) keep
+/// their relative position.
+pub(crate) fn sort_game_versions_newest_first(
+    versions: &mut [crate::installation_core::MinecraftVersionEntry],
+) {
+    if versions.iter().all(|entry| entry.release_time.is_some()) {
+        versions.sort_by(|left, right| right.release_time.cmp(&left.release_time));
+    }
+}
+
 pub(crate) fn normalize_version_catalog_ordering(catalog: &mut VersionCatalog) {
-    catalog
-        .game_versions
-        .sort_by(|left, right| compare_version_like_desc(left.id.as_str(), right.id.as_str()));
+    sort_game_versions_newest_first(&mut catalog.game_versions);
     catalog.loader_versions.sort_desc();
 }
 

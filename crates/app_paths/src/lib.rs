@@ -85,6 +85,18 @@ pub fn installations_root() -> PathBuf {
     fallback_root().join(INSTANCES_DIR_NAME)
 }
 
+/// Where worlds shared between instances are stored. Each member instance links to a
+/// folder here instead of holding its own copy.
+pub fn synced_worlds_root() -> PathBuf {
+    if let Some(root) = portable_root() {
+        return root.join("synced_worlds");
+    }
+    if let Some(project_dirs) = project_dirs() {
+        return project_dirs.data_local_dir().join("synced_worlds");
+    }
+    fallback_root().join("synced_worlds")
+}
+
 pub fn cache_root() -> PathBuf {
     if let Some(root) = portable_root() {
         return root.join(CACHE_DIR_NAME);

@@ -99,6 +99,11 @@ impl DiscordPresenceManager {
         let mut first_eligible = None;
         let mut launcher_presence_blocked_by_mod = false;
         for instance in &instances.instances {
+            // Nothing is running, so nothing can match: skip the per-instance canonicalize
+            // (a filesystem call) that this per-frame path would otherwise make for every instance.
+            if running_set.is_empty() {
+                break;
+            }
             let instance_root = instance_root_path(installations_root, instance);
             let instance_key = fs::canonicalize(instance_root.as_path())
                 .map(|path| display_user_path(path.as_path()))

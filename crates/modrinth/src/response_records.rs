@@ -2,8 +2,11 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 
+use crate::environment::deserialize_environment;
 use crate::project::build_project_url;
-use crate::{Project, ProjectDependency, ProjectVersion, ProjectVersionFile, SearchProject};
+use crate::{
+    Environment, Project, ProjectDependency, ProjectVersion, ProjectVersionFile, SearchProject,
+};
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct SearchResponse {
@@ -24,6 +27,8 @@ pub(crate) struct SearchHit {
     #[serde(default)]
     pub(crate) downloads: u64,
     pub(crate) date_modified: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_environment")]
+    pub(crate) environment: Environment,
 }
 
 impl SearchHit {
@@ -45,6 +50,7 @@ impl SearchHit {
             project_url,
             downloads: self.downloads,
             date_modified: self.date_modified,
+            environment: self.environment,
         }
     }
 }
@@ -58,6 +64,8 @@ pub(crate) struct ProjectRecord {
     pub(crate) description: String,
     pub(crate) project_type: String,
     pub(crate) icon_url: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_environment")]
+    pub(crate) environment: Environment,
 }
 
 impl ProjectRecord {
@@ -76,6 +84,7 @@ impl ProjectRecord {
             project_type: self.project_type,
             icon_url: self.icon_url,
             project_url,
+            environment: self.environment,
         }
     }
 }
@@ -99,6 +108,8 @@ pub(crate) struct ProjectVersionRecord {
     pub(crate) dependencies: Vec<ProjectDependencyRecord>,
     #[serde(default)]
     pub(crate) files: Vec<ProjectVersionFileRecord>,
+    #[serde(default, deserialize_with = "deserialize_environment")]
+    pub(crate) environment: Environment,
 }
 
 impl ProjectVersionRecord {
@@ -126,6 +137,7 @@ impl ProjectVersionRecord {
                     hashes: file.hashes,
                 })
                 .collect(),
+            environment: self.environment,
         }
     }
 }

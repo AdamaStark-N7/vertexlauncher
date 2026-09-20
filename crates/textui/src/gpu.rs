@@ -294,6 +294,16 @@ pub(super) fn default_gpu_scene_page_side(graphics_config: ResolvedTextGraphicsC
     graphics_config.atlas_page_target_px.max(256)
 }
 
+/// Page side for a scene whose glyphs need `total_area` pixels in total, the largest being
+/// `max_dim` wide or tall: about twice the area (packing is never perfect), never above `cap`
+/// unless one glyph is bigger than that. Powers of two keep pooled pages reusable.
+pub(super) fn fit_scene_page_side(total_area: usize, max_dim: usize, cap: usize) -> usize {
+    let wanted = ((total_area as f64 * 2.0).sqrt().ceil() as usize)
+        .max(max_dim)
+        .max(64);
+    wanted.next_power_of_two().min(cap.max(max_dim))
+}
+
 pub(super) fn gpu_scene_approx_bytes(scene: &TextGpuScene) -> usize {
     scene
         .atlas_pages
@@ -446,4 +456,20 @@ pub(super) fn rect_from_points(points: [Pos2; 4]) -> Rect {
         max.y = max.y.max(point.y);
     }
     Rect::from_min_max(min, max)
+}
+
+#[cfg(test)]
+mod scene_page_side_tests {
+    use super::fit_scene_page_side;
+
+    #[test]
+    fn small_text_gets_a_small_page_and_big_text_is_capped() {
+        // A short label: a few dozen glyphs of ~14x18 px.
+        let small = fit_scene_page_side(40 * 14 * 18, 18, 1024);
+        assert!((64..=256).contains(&small), "{small}");
+        // Huge text stays within the configured page size.
+        assert_eq!(fit_scene_page_side(50_000_000, 40, 1024), 1024);
+        // A glyph bigger than the cap still fits.
+        assert!(fit_scene_page_side(10, 2000, 1024) >= 2000);
+    }
 }

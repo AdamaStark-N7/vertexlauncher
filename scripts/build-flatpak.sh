@@ -200,6 +200,18 @@ sdk: ${SDK}
 command: vertexlauncher
 branch: ${BRANCH}
 separate-locales: false
+add-extensions:
+  org.freedesktop.Platform.GL:
+    directory: lib/GL
+    versions: "1.4;${RUST_EXT_TAG};${RUST_EXT_TAG}-extra"
+    subdirectories: true
+    no-autodownload: true
+    autodelete: false
+    add-ld-path: lib:default/lib
+    merge-dirs: vulkan/icd.d;glvnd/egl_vendor.d;lib/dri;lib/OpenCL
+    download-if: active-gl-driver
+    enable-if: active-gl-driver
+    autoprune-unless: active-gl-driver
 
 finish-args:
   # Network
@@ -216,6 +228,13 @@ finish-args:
 
   # Full host filesystem
   - --filesystem=host
+
+  # GPU compute runtimes: ROCm/CUDA from the host, host OS driver libraries,
+  # udev metadata for OpenCL/HIP discovery, and Flatpak GL driver extension ICDs.
+  - --filesystem=host-os:ro
+  - --filesystem=/opt/rocm:ro
+  - --filesystem=/opt/cuda:ro
+  - --filesystem=/run/udev:ro
 
   # Runtime sockets not covered by --filesystem=host
   - --filesystem=xdg-run/gvfs
@@ -242,6 +261,16 @@ finish-args:
 
   - --env=GDK_BACKEND=wayland,x11
   - --env=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+  - --env=OCL_ICD_VENDORS=
+  - --env=OPENCL_VENDOR_PATH=/app/lib/GL/lib/OpenCL/vendors
+  - --env=OCL_ICD_FILENAMES=/opt/rocm/lib/libamdocl64.so:libnvidia-opencl.so.1
+  - --env=ROCM_PATH=/opt/rocm
+  - --env=HIP_PATH=/opt/rocm
+  - --env=CUDA_PATH=/opt/cuda
+  - --env=CUDA_HOME=/opt/cuda
+  - --env=LD_LIBRARY_PATH=/app/lib:/app/lib/GL/default/lib:/app/lib/GL/lib:/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:/opt/cuda/lib64:/run/host/usr/lib:/run/host/usr/lib64:/run/host/usr/lib/x86_64-linux-gnu:/run/host/usr/lib/aarch64-linux-gnu:/run/host/usr/local/cuda/lib64:/run/host/lib:/run/host/lib64
+cleanup-commands:
+  - mkdir -p /app/lib/GL
 
 modules:
   - name: vertexlauncher
@@ -281,6 +310,18 @@ sdk-extensions:
 command: vertexlauncher
 branch: ${BRANCH}
 separate-locales: false
+add-extensions:
+  org.freedesktop.Platform.GL:
+    directory: lib/GL
+    versions: "1.4;${RUST_EXT_TAG};${RUST_EXT_TAG}-extra"
+    subdirectories: true
+    no-autodownload: true
+    autodelete: false
+    add-ld-path: lib:default/lib
+    merge-dirs: vulkan/icd.d;glvnd/egl_vendor.d;lib/dri;lib/OpenCL
+    download-if: active-gl-driver
+    enable-if: active-gl-driver
+    autoprune-unless: active-gl-driver
 
 finish-args:
   # Network
@@ -298,6 +339,13 @@ finish-args:
   # Full host filesystem — launcher installs and manages game instances
   # anywhere on disk, including external drives
   - --filesystem=host
+
+  # GPU compute runtimes: ROCm/CUDA from the host, host OS driver libraries,
+  # udev metadata for OpenCL/HIP discovery, and Flatpak GL driver extension ICDs.
+  - --filesystem=host-os:ro
+  - --filesystem=/opt/rocm:ro
+  - --filesystem=/opt/cuda:ro
+  - --filesystem=/run/udev:ro
 
   # Runtime sockets not covered by --filesystem=host
   - --filesystem=xdg-run/gvfs
@@ -328,6 +376,16 @@ finish-args:
   # WebKitGTK (wry) spawns sub-processes that try to create their own
   # sandbox; that conflicts with Flatpak's sandbox, so we disable it.
   - --env=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+  - --env=OCL_ICD_VENDORS=
+  - --env=OPENCL_VENDOR_PATH=/app/lib/GL/lib/OpenCL/vendors
+  - --env=OCL_ICD_FILENAMES=/opt/rocm/lib/libamdocl64.so:libnvidia-opencl.so.1
+  - --env=ROCM_PATH=/opt/rocm
+  - --env=HIP_PATH=/opt/rocm
+  - --env=CUDA_PATH=/opt/cuda
+  - --env=CUDA_HOME=/opt/cuda
+  - --env=LD_LIBRARY_PATH=/app/lib:/app/lib/GL/default/lib:/app/lib/GL/lib:/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:/opt/cuda/lib64:/run/host/usr/lib:/run/host/usr/lib64:/run/host/usr/lib/x86_64-linux-gnu:/run/host/usr/lib/aarch64-linux-gnu:/run/host/usr/local/cuda/lib64:/run/host/lib:/run/host/lib64
+cleanup-commands:
+  - mkdir -p /app/lib/GL
 build-options:
   append-path: /usr/lib/sdk/rust-stable/bin
   extension-tag: "${RUST_EXT_TAG}"

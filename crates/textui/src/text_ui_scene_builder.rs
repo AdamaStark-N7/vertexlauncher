@@ -226,9 +226,27 @@ impl TextUi {
         layout: &PreparedTextLayout,
         scale: f32,
     ) -> TextGpuScene {
-        let target_page_side_px =
+        let max_page_side_px =
             default_gpu_scene_page_side(self.resolved_graphics_config(self.max_texture_side_px));
         let graphics_config = self.resolved_graphics_config(self.max_texture_side_px);
+        // Size the page to this text instead of always using the full page size: a short label
+        // needs a few KB, not a 4 MB texture that is zeroed, copied and uploaded per label.
+        let target_page_side_px = {
+            let mut area = 0usize;
+            let mut max_dim = 0usize;
+            for glyph in layout.glyphs.iter() {
+                if let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
+                    &glyph.cache_key,
+                    graphics_config.rasterization,
+                    graphics_config.atlas_padding_px,
+                ) {
+                    let [w, h] = atlas_glyph.upload_image.size;
+                    area += w * h;
+                    max_dim = max_dim.max(w).max(h);
+                }
+            }
+            fit_scene_page_side(area, max_dim, max_page_side_px)
+        };
         let mut page_pool = std::mem::take(&mut self.cpu_page_pool);
         let mut pages = Vec::<CpuSceneAtlasPage>::new();
         let mut page_hashers = Vec::<FxHasher>::new();
@@ -456,9 +474,27 @@ impl TextUi {
             path,
             path_options,
         )?;
-        let target_page_side_px =
+        let max_page_side_px =
             default_gpu_scene_page_side(self.resolved_graphics_config(self.max_texture_side_px));
         let graphics_config = self.resolved_graphics_config(self.max_texture_side_px);
+        // Size the page to this text instead of always using the full page size: a short label
+        // needs a few KB, not a 4 MB texture that is zeroed, copied and uploaded per label.
+        let target_page_side_px = {
+            let mut area = 0usize;
+            let mut max_dim = 0usize;
+            for glyph in layout.glyphs.iter() {
+                if let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
+                    &glyph.cache_key,
+                    graphics_config.rasterization,
+                    graphics_config.atlas_padding_px,
+                ) {
+                    let [w, h] = atlas_glyph.upload_image.size;
+                    area += w * h;
+                    max_dim = max_dim.max(w).max(h);
+                }
+            }
+            fit_scene_page_side(area, max_dim, max_page_side_px)
+        };
         let mut page_pool = std::mem::take(&mut self.cpu_page_pool);
         let mut pages = Vec::<CpuSceneAtlasPage>::new();
         let mut page_hashers = Vec::<FxHasher>::new();

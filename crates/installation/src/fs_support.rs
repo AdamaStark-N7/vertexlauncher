@@ -1,4 +1,13 @@
 use super::*;
+pub(crate) use logged_fs::canonicalize as fs_canonicalize;
+pub(crate) use logged_fs::create_dir_all as fs_create_dir_all;
+pub(crate) use logged_fs::file_create as fs_file_create;
+pub(crate) use logged_fs::file_open as fs_file_open;
+pub(crate) use logged_fs::read_dir as fs_read_dir;
+pub(crate) use logged_fs::read_to_string as fs_read_to_string;
+pub(crate) use logged_fs::remove_dir_all as fs_remove_dir_all;
+pub(crate) use logged_fs::rename as fs_rename;
+pub(crate) use logged_fs::write as fs_write;
 
 pub fn display_user_path(path: &Path) -> String {
     #[cfg(target_os = "windows")]
@@ -40,115 +49,4 @@ pub(crate) fn normalize_child_process_path(path: &Path) -> PathBuf {
 pub fn normalize_path_key(path: &Path) -> String {
     let normalized = fs_canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     display_user_path(normalized.as_path())
-}
-
-#[track_caller]
-pub(crate) fn fs_create_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display());
-    let result = fs::create_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_remove_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "remove_dir_all", path = %path.display());
-    let result = fs::remove_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_read_dir(path: impl AsRef<Path>) -> std::io::Result<fs::ReadDir> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "read_dir", path = %path.display());
-    let result = fs::read_dir(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_dir", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_rename(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<()> {
-    let from = from.as_ref();
-    let to = to.as_ref();
-    tracing::debug!(
-        target: "vertexlauncher/io",
-        op = "rename",
-        from = %from.display(),
-        to = %to.display()
-    );
-    let result = fs::rename(from, to);
-    if let Err(err) = &result {
-        tracing::warn!(
-            target: "vertexlauncher/io",
-            op = "rename",
-            from = %from.display(),
-            to = %to.display(),
-            error = %err
-        );
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_canonicalize(path: impl AsRef<Path>) -> std::io::Result<PathBuf> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "canonicalize", path = %path.display());
-    let result = fs::canonicalize(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "canonicalize", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_write(path: impl AsRef<Path>, contents: impl AsRef<[u8]>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "write", path = %path.display());
-    let result = fs::write(path, contents);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "write", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_file_create(path: impl AsRef<Path>) -> std::io::Result<fs::File> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "file_create", path = %path.display());
-    let result = fs::File::create(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "file_create", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-pub(crate) fn fs_file_open(path: impl AsRef<Path>) -> std::io::Result<fs::File> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "file_open", path = %path.display());
-    let result = fs::File::open(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "file_open", path = %path.display(), error = %err);
-    }
-    result
 }

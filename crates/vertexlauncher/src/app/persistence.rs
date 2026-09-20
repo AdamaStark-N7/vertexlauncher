@@ -1,14 +1,5 @@
 use super::*;
 
-pub(super) fn ensure_config_save_channel(app: &mut VertexApp) {
-    if app.config_save_results_tx.is_some() && app.config_save_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<(), String>>();
-    app.config_save_results_tx = Some(tx);
-    app.config_save_results_rx = Some(rx);
-}
-
 pub(super) fn start_pending_config_save(app: &mut VertexApp) {
     if app.config_save_in_flight {
         return;
@@ -17,11 +8,7 @@ pub(super) fn start_pending_config_save(app: &mut VertexApp) {
         return;
     };
 
-    ensure_config_save_channel(app);
-    let Some(tx) = app.config_save_results_tx.as_ref().cloned() else {
-        app.pending_config_save = Some(config);
-        return;
-    };
+    let tx = app.config_save_results.sender();
 
     app.config_save_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
@@ -42,53 +29,27 @@ pub(super) fn queue_config_save(app: &mut VertexApp) {
 }
 
 pub(super) fn poll_config_save_results(app: &mut VertexApp) {
-    let mut should_reset_channel = false;
-    let mut saw_result = false;
-    loop {
-        let Some(result) = app.config_save_results_rx.as_ref().map(|rx| rx.try_recv()) else {
-            return;
-        };
-        match result {
-            Ok(result) => {
-                saw_result = true;
-                app.config_save_in_flight = false;
-                if let Err(err) = result {
-                    tracing::error!(
-                        target: "vertexlauncher/app/config",
-                        "Failed to save config: {err}"
-                    );
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/app/config",
-                    "Config-save worker disconnected unexpectedly."
-                );
-                should_reset_channel = true;
-                app.config_save_in_flight = false;
-                break;
-            }
-        }
+    let drained = app.config_save_results.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/app/config",
+            "Config-save worker disconnected unexpectedly."
+        );
+        app.config_save_in_flight = false;
     }
-
-    if should_reset_channel {
-        app.config_save_results_tx = None;
-        app.config_save_results_rx = None;
+    let saw_result = !drained.items.is_empty();
+    for result in drained.items {
+        app.config_save_in_flight = false;
+        if let Err(err) = result {
+            tracing::error!(
+                target: "vertexlauncher/app/config",
+                "Failed to save config: {err}"
+            );
+        }
     }
     if saw_result || !app.config_save_in_flight {
         start_pending_config_save(app);
     }
-}
-
-pub(super) fn ensure_instance_store_save_channel(app: &mut VertexApp) {
-    if app.instance_store_save_results_tx.is_some() && app.instance_store_save_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<(), String>>();
-    app.instance_store_save_results_tx = Some(tx);
-    app.instance_store_save_results_rx = Some(rx);
 }
 
 pub(super) fn start_pending_instance_store_save(app: &mut VertexApp) {
@@ -99,11 +60,7 @@ pub(super) fn start_pending_instance_store_save(app: &mut VertexApp) {
         return;
     };
 
-    ensure_instance_store_save_channel(app);
-    let Some(tx) = app.instance_store_save_results_tx.as_ref().cloned() else {
-        app.pending_instance_store_save = Some(store);
-        return;
-    };
+    let tx = app.instance_store_save_results.sender();
 
     app.instance_store_save_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
@@ -123,53 +80,24 @@ pub(super) fn queue_instance_store_save(app: &mut VertexApp) {
     start_pending_instance_store_save(app);
 }
 
-pub(super) fn ensure_initial_instance_install_channel(app: &mut VertexApp) {
-    if app.initial_install_results_tx.is_some() && app.initial_install_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<InitialInstanceInstallResult>();
-    app.initial_install_results_tx = Some(tx);
-    app.initial_install_results_rx = Some(rx);
-}
-
 pub(super) fn poll_instance_store_save_results(app: &mut VertexApp) {
-    let mut should_reset_channel = false;
-    let mut saw_result = false;
-    loop {
-        let Some(result) = app
-            .instance_store_save_results_rx
-            .as_ref()
-            .map(|rx| rx.try_recv())
-        else {
-            return;
-        };
-        match result {
-            Ok(result) => {
-                saw_result = true;
-                app.instance_store_save_in_flight = false;
-                if let Err(err) = result {
-                    tracing::error!(
-                        target: "vertexlauncher/app/instances",
-                        "Failed to save instances: {err}"
-                    );
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/app/instances",
-                    "Instance-store save worker disconnected unexpectedly."
-                );
-                should_reset_channel = true;
-                app.instance_store_save_in_flight = false;
-                break;
-            }
-        }
+    let drained = app.instance_store_save_results.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/app/instances",
+            "Instance-store save worker disconnected unexpectedly."
+        );
+        app.instance_store_save_in_flight = false;
     }
-
-    if should_reset_channel {
-        app.instance_store_save_results_tx = None;
-        app.instance_store_save_results_rx = None;
+    let saw_result = !drained.items.is_empty();
+    for result in drained.items {
+        app.instance_store_save_in_flight = false;
+        if let Err(err) = result {
+            tracing::error!(
+                target: "vertexlauncher/app/instances",
+                "Failed to save instances: {err}"
+            );
+        }
     }
     if saw_result || !app.instance_store_save_in_flight {
         start_pending_instance_store_save(app);
@@ -177,34 +105,14 @@ pub(super) fn poll_instance_store_save_results(app: &mut VertexApp) {
 }
 
 pub(super) fn poll_initial_instance_install_results(app: &mut VertexApp) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    loop {
-        let Some(result) = app
-            .initial_install_results_rx
-            .as_ref()
-            .map(|rx| rx.try_recv())
-        else {
-            return;
-        };
-        match result {
-            Ok(update) => updates.push(update),
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/app/initial_install",
-                    "Initial-install result worker disconnected unexpectedly."
-                );
-                should_reset_channel = true;
-                break;
-            }
-        }
+    let drained = app.initial_install_results.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/app/initial_install",
+            "Initial-install result worker disconnected unexpectedly."
+        );
     }
-
-    if should_reset_channel {
-        app.initial_install_results_tx = None;
-        app.initial_install_results_rx = None;
-    }
+    let updates = drained.items;
 
     for update in updates {
         match update {
@@ -257,7 +165,15 @@ pub(super) fn poll_initial_instance_install_results(app: &mut VertexApp) {
 }
 
 pub(super) fn poll_finished_instance_process_notifications(app: &mut VertexApp) {
-    for process in take_finished_instance_processes() {
+    let finished = take_finished_instance_processes();
+    if !finished.is_empty() {
+        // The game rewrites servers, hotbars and history on exit; fan the results out.
+        launcher_ui::sync_runner::spawn(
+            app.instance_store.clone(),
+            launcher_ui::sync_runner::SyncRunConfig::from_config(&app.config),
+        );
+    }
+    for process in finished {
         if process.exit_code != Some(1) {
             continue;
         }

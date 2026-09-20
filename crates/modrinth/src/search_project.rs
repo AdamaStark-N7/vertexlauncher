@@ -1,3 +1,5 @@
+use crate::Environment;
+
 /// A normalized search entry returned from Modrinth.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SearchProject {
@@ -11,4 +13,5 @@ pub struct SearchProject {
     pub project_url: String,
     pub downloads: u64,
     pub date_modified: Option<String>,
+    pub environment: Environment,
 }

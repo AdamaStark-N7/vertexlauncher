@@ -13,10 +13,7 @@ use textui_egui::{
 use crate::{
     assets,
     ui::{
-        color::lerp_color32_oklab,
-        components::icon_button,
-        style,
-        text_input_theme,
+        color::lerp_color32_oklab, components::icon_button, style, text_input_theme,
         toggle_anim::ToggleAnimState,
     },
 };
@@ -1332,12 +1329,20 @@ fn switch(ui: &mut Ui, value: &mut bool, metrics: ControlMetrics, id: egui::Id) 
         };
 
         let corner_radius = rect.height() / 2.0;
-        ui.painter().rect(rect, corner_radius, fill, bg_stroke, egui::StrokeKind::Inside);
+        ui.painter().rect(
+            rect,
+            corner_radius,
+            fill,
+            bg_stroke,
+            egui::StrokeKind::Inside,
+        );
 
         // Knob — same proportions as before, position driven by eased pos.
         let knob_margin = (metrics.control_height * 0.10).clamp(2.0, 4.0);
         let knob_radius = (rect.height() - (knob_margin * 2.0)) / 2.0;
-        let knob_x = rect.left() + knob_margin + knob_radius
+        let knob_x = rect.left()
+            + knob_margin
+            + knob_radius
             + (rect.width() - (knob_margin + knob_radius) * 2.0) * pos;
         let knob_center = egui::pos2(knob_x, rect.center().y);
         let knob_off = visuals.widgets.noninteractive.fg_stroke.color;
@@ -1753,10 +1758,7 @@ fn searchable_dropdown(
             let mut popup_changed = false;
             let focus_popup_entry = take_popup_focus_pending(ui.ctx(), open_id);
             let mut popup_had_focus = false;
-            let mut search_label_style = row_label_options(ui);
-            search_label_style.font_size = 14.0;
-            search_label_style.line_height = 18.0;
-            search_label_style.color = ui.visuals().weak_text_color();
+            let search_label_style = crate::ui::style::caption(ui);
             let _ = text_ui.label(
                 ui,
                 ("searchable_dropdown_hint", open_id),
@@ -1806,10 +1808,7 @@ fn searchable_dropdown(
             let row_height = metrics.control_height + ui.spacing().item_spacing.y;
 
             if filtered_indices.is_empty() {
-                let mut empty_style = row_label_options(ui);
-                empty_style.font_size = 15.0;
-                empty_style.line_height = 20.0;
-                empty_style.color = ui.visuals().weak_text_color();
+                let empty_style = style::caption(ui);
                 let _ = text_ui.label(
                     ui,
                     ("searchable_dropdown_empty", open_id),
@@ -2061,10 +2060,18 @@ fn format_float(value: f32) -> String {
     formatted
 }
 
+/// Settings-row icon: tinted, cached under the `settings` scope.
+fn themed_svg_image(
+    icon_id: &str,
+    svg_bytes: &[u8],
+    icon_size: f32,
+    color: egui::Color32,
+) -> egui::Image<'static> {
+    crate::ui::svg_tint::themed_svg_image("settings", icon_id, svg_bytes, color, icon_size)
+}
+
 fn row_label_options(ui: &Ui) -> LabelOptions {
     LabelOptions {
-        font_size: 18.0,
-        line_height: 24.0,
         color: ui.visuals().text_color(),
         wrap: false,
         ..style::body(ui)
@@ -2073,8 +2080,6 @@ fn row_label_options(ui: &Ui) -> LabelOptions {
 
 fn number_input_options(ui: &Ui, metrics: ControlMetrics) -> InputOptions {
     let mut options = text_input_theme::themed_text_input_options(ui, true);
-    options.font_size = 17.0;
-    options.line_height = 22.0;
     options.desired_rows = 1;
     options.desired_width = Some(metrics.number_input_width);
     options.min_width = metrics.number_input_width;
@@ -2084,8 +2089,6 @@ fn number_input_options(ui: &Ui, metrics: ControlMetrics) -> InputOptions {
 
 fn text_input_options(ui: &Ui, metrics: ControlMetrics) -> InputOptions {
     let mut options = text_input_theme::themed_text_input_options(ui, false);
-    options.font_size = 17.0;
-    options.line_height = 22.0;
     options.desired_rows = 1;
     options.desired_width = Some(metrics.dropdown_width);
     options.min_width = metrics.dropdown_width;
@@ -2096,7 +2099,9 @@ fn text_input_options(ui: &Ui, metrics: ControlMetrics) -> InputOptions {
 fn control_metrics(ui: &Ui) -> ControlMetrics {
     let viewport_width = ui.ctx().input(|i| i.content_rect().width()).max(320.0);
     let local_width = ui.available_width().clamp(220.0, viewport_width);
-    let text_height = ui.text_style_height(&egui::TextStyle::Body).max(14.0);
+    let text_height = crate::ui::style::resolved_typography(ui, config::TextRole::Body)
+        .line_height
+        .max(14.0);
     let control_height = (local_width * 0.024).clamp(22.0, 34.0);
     let control_gap = (control_height * 0.20).clamp(4.0, 8.0);
     let number_input_width = (local_width * 0.10).clamp(84.0, 150.0);
@@ -2120,27 +2125,4 @@ fn dropdown_text_budget(metrics: ControlMetrics) -> f32 {
     let right_padding = 8.0;
     let icon_gap = 6.0;
     (metrics.dropdown_width - metrics.icon_size - left_padding - right_padding - icon_gap).max(0.0)
-}
-
-fn themed_svg_image(
-    icon_id: &str,
-    svg_bytes: &[u8],
-    icon_size: f32,
-    color: egui::Color32,
-) -> egui::Image<'static> {
-    let themed_svg = apply_svg_color(svg_bytes, color);
-    let uri = format!(
-        "bytes://vertex-settings-icons/{icon_id}-{:02x}{:02x}{:02x}.svg",
-        color.r(),
-        color.g(),
-        color.b()
-    );
-    egui::Image::from_bytes(uri, themed_svg).fit_to_exact_size(egui::vec2(icon_size, icon_size))
-}
-
-fn apply_svg_color(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    String::from_utf8_lossy(svg_bytes)
-        .replace("currentColor", &color_hex)
-        .into_bytes()
 }

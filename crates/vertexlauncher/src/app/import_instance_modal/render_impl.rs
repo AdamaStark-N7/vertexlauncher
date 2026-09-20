@@ -16,22 +16,8 @@ pub fn render(
         dialog_options("import_instance_modal_window", DialogPreset::Form),
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(MODAL_GAP_MD, MODAL_GAP_MD);
-            let text_color = ui.visuals().text_color();
-            let heading_style = LabelOptions {
-                font_size: 34.0,
-                line_height: 38.0,
-                weight: 700,
-                color: text_color,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                font_size: 18.0,
-                line_height: 24.0,
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let heading_style = launcher_ui::ui::style::page_heading(ui);
+            let body_style = launcher_ui::ui::style::muted(ui);
 
             let _ = text_ui.label(
                 ui,
@@ -94,10 +80,23 @@ pub fn render(
                         )
                         .clicked()
                         {
-                            if let Some(path) = pick_import_file() {
-                                state.package_path = path;
-                                load_preview_from_state(state);
-                            }
+                            launcher_ui::ui::file_dialog::open(
+                                ui.ctx(),
+                                IMPORT_FILE_DIALOG,
+                                launcher_ui::ui::file_dialog::Pick::File,
+                                launcher_ui::ui::file_dialog::Dialog::new()
+                                    .filter("Launcher profiles", &["vtmpack", "mrpack", "zip"])
+                                    .filter("Vertex packs", &["vtmpack"])
+                                    .filter("Modrinth packs", &["mrpack"])
+                                    .filter("CurseForge packs", &["zip"]),
+                            );
+                        }
+                        if let Some(path) =
+                            launcher_ui::ui::file_dialog::take(ui.ctx(), IMPORT_FILE_DIALOG)
+                                .and_then(|paths| paths.into_iter().next())
+                        {
+                            state.package_path = path;
+                            load_preview_from_state(state);
                         }
 
                         if settings_widgets::full_width_button(
@@ -138,7 +137,7 @@ pub fn render(
                                 ui.visuals().weak_text_color()
                             },
                             wrap: true,
-                            ..LabelOptions::default()
+                            ..launcher_ui::ui::style::body(ui)
                         },
                     );
                 }
@@ -186,10 +185,19 @@ pub fn render(
                         )
                         .clicked()
                         {
-                            if let Some(path) = pick_import_directory() {
-                                state.launcher_path = path;
-                                load_preview_from_state(state);
-                            }
+                            launcher_ui::ui::file_dialog::open(
+                                ui.ctx(),
+                                IMPORT_FOLDER_DIALOG,
+                                launcher_ui::ui::file_dialog::Pick::Folder,
+                                launcher_ui::ui::file_dialog::Dialog::new(),
+                            );
+                        }
+                        if let Some(path) =
+                            launcher_ui::ui::file_dialog::take(ui.ctx(), IMPORT_FOLDER_DIALOG)
+                                .and_then(|paths| paths.into_iter().next())
+                        {
+                            state.launcher_path = path;
+                            load_preview_from_state(state);
                         }
 
                         if settings_widgets::full_width_button(
@@ -226,14 +234,7 @@ pub fn render(
                         ui,
                         "instance_import_preview_title",
                         "Detected package",
-                        &LabelOptions {
-                            font_size: 20.0,
-                            line_height: 24.0,
-                            weight: 600,
-                            color: ui.visuals().text_color(),
-                            wrap: false,
-                            ..LabelOptions::default()
-                        },
+                        &launcher_ui::ui::style::stat_label(ui),
                     );
                     let _ = text_ui.label(
                         ui,
@@ -272,7 +273,7 @@ pub fn render(
                     &LabelOptions {
                         color: ui.visuals().error_fg_color,
                         wrap: true,
-                        ..LabelOptions::default()
+                        ..launcher_ui::ui::style::body(ui)
                     },
                 );
             }
@@ -326,10 +327,14 @@ pub fn render(
                     progress_counts.as_str(),
                     &body_style,
                 );
-                ui.add(
-                    egui::ProgressBar::new(progress_fraction)
-                        .desired_width(ui.available_width())
-                        .show_percentage(),
+                launcher_ui::ui::components::progress_bar::progress_bar(
+                    ui,
+                    text_ui,
+                    "import_instance_progress",
+                    progress_fraction,
+                    false,
+                    (None, None),
+                    launcher_ui::ui::components::progress_bar::ProgressLabel::Percentage,
                 );
             }
 
@@ -371,8 +376,9 @@ pub fn render(
                         load_preview_from_state(state);
                     }
                     if let Some(preview) = state.preview.as_ref() {
-                        let instance_name = non_empty(state.instance_name.as_str())
-                            .unwrap_or_else(|| preview.detected_name.clone());
+                        let instance_name =
+                            instances::normalize_optional(state.instance_name.as_str())
+                                .unwrap_or_else(|| preview.detected_name.clone());
                         action = ModalAction::Import(ImportRequest {
                             source: match selected_import_mode(state) {
                                 ImportMode::ManifestFile => {
@@ -547,10 +553,7 @@ where
 }
 
 pub(super) fn load_preview_from_state(state: &mut ImportInstanceState) {
-    ensure_preview_channel(state);
-    let Some(tx) = state.preview_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.preview_results.sender();
     let request = match selected_import_mode(state) {
         ImportMode::ManifestFile => {
             let path = state.package_path.clone();
@@ -579,7 +582,7 @@ pub(super) fn load_preview_from_state(state: &mut ImportInstanceState) {
     state.preview_in_flight = true;
     state.preview_status_message = Some("Inspecting import source in the background...".to_owned());
     state.error = None;
-    let progress_tx = state.preview_progress_tx.as_ref().cloned();
+    let progress_tx = Some(state.preview_progress.sender());
     let _ = tokio_runtime::spawn_detached(async move {
         let result = tokio_runtime::spawn_blocking(move || {
             let (path, launcher_hint, manifest_mode) = request;
@@ -607,15 +610,6 @@ pub(super) fn load_preview_from_state(state: &mut ImportInstanceState) {
     });
 }
 
-pub(super) fn pick_import_file() -> Option<PathBuf> {
-    rfd::FileDialog::new()
-        .add_filter("Launcher profiles", &["vtmpack", "mrpack", "zip"])
-        .add_filter("Vertex packs", &["vtmpack"])
-        .add_filter("Modrinth packs", &["mrpack"])
-        .add_filter("CurseForge packs", &["zip"])
-        .pick_file()
-}
-
-pub(super) fn pick_import_directory() -> Option<PathBuf> {
-    rfd::FileDialog::new().pick_folder()
-}
+/// File-dialog slots for the import modal's pickers.
+const IMPORT_FILE_DIALOG: &str = "import_instance_pick_file";
+const IMPORT_FOLDER_DIALOG: &str = "import_instance_pick_folder";

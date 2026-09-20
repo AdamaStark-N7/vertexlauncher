@@ -19,6 +19,8 @@ pub struct InputOptions {
     pub corner_radius: u8,
     pub padding: Vec2,
     pub monospace: bool,
+    /// Base font weight (100-900) before the launcher-wide weight offset.
+    pub weight: u16,
     pub min_width: f32,
     pub desired_width: Option<f32>,
     pub desired_rows: usize,
@@ -45,6 +47,7 @@ impl Default for InputOptions {
             corner_radius: 6,
             padding: egui::vec2(8.0, 6.0),
             monospace: false,
+            weight: 400,
             min_width: 64.0,
             desired_width: None,
             desired_rows: 5,

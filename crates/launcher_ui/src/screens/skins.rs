@@ -109,6 +109,12 @@ const FORCE_MODEL_FOCUS_ID: &str = "skins_force_model_focus";
 const CLASSIC_MODEL_BUTTON_ID_KEY: &str = "skins_classic_model_button_id";
 const SLIM_MODEL_BUTTON_ID_KEY: &str = "skins_slim_model_button_id";
 
+/// Frees the skin preview's GPU resources (render targets, pipelines). Call after leaving the
+/// skins screen.
+pub fn release_gpu_resources(render_state: &egui_wgpu::RenderState) {
+    release_preview_gpu_resources(&mut render_state.renderer.write());
+}
+
 pub fn purge_inactive_state(ctx: &egui::Context) {
     let state_id = egui::Id::new("skins_screen_state");
     ctx.data_mut(|data| data.insert_temp(state_id, SkinManagerState::default()));

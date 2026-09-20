@@ -1,23 +1,5 @@
 use super::*;
 
-pub(super) fn ensure_search_channel(state: &mut ContentBrowserState) {
-    if state.search_tx.is_some() && state.search_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<SearchUpdate>();
-    state.search_tx = Some(tx);
-    state.search_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
-pub(super) fn ensure_detail_versions_channel(state: &mut ContentBrowserState) {
-    if state.detail_versions_tx.is_some() && state.detail_versions_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<DetailVersionsResult>();
-    state.detail_versions_tx = Some(tx);
-    state.detail_versions_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn request_detail_versions(state: &mut ContentBrowserState) {
     let Some(entry) = state.detail_entry.clone() else {
         return;
@@ -50,10 +32,7 @@ pub(super) fn request_detail_versions(state: &mut ContentBrowserState) {
         return;
     }
 
-    ensure_detail_versions_channel(state);
-    let Some(tx) = state.detail_versions_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.detail_versions_results.sender();
 
     state.detail_versions_in_flight = true;
     state.detail_versions_error = None;
@@ -94,10 +73,7 @@ pub(super) fn request_version_catalog(state: &mut ContentBrowserState) {
         return;
     }
 
-    ensure_version_catalog_channel(state);
-    let Some(tx) = state.version_catalog_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.version_catalog.sender();
 
     state.version_catalog_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
@@ -196,53 +172,18 @@ pub(super) fn browser_entry_from_unified_content(
     Ok(browser_entry)
 }
 
-fn ensure_version_catalog_channel(state: &mut ContentBrowserState) {
-    if state.version_catalog_tx.is_some() && state.version_catalog_rx.is_some() {
-        return;
-    }
-
-    let (tx, rx) = mpsc::channel::<Result<Vec<MinecraftVersionEntry>, String>>();
-    state.version_catalog_tx = Some(tx);
-    state.version_catalog_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn poll_version_catalog(state: &mut ContentBrowserState) {
-    let mut should_reset_channel = false;
-    let mut updates = Vec::new();
-
-    if let Some(rx) = state.version_catalog_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/content_browser",
-                            "Content-browser version catalog worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/content_browser",
-                    "Content-browser version catalog receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
-
-    if should_reset_channel {
-        state.version_catalog_tx = None;
-        state.version_catalog_rx = None;
+    let drained = state.version_catalog.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/content_browser",
+            "Content-browser version catalog worker stopped unexpectedly."
+        );
         state.version_catalog_in_flight = false;
         state.version_catalog_error =
             Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
+    let updates = drained.items;
 
     for update in updates {
         state.version_catalog_in_flight = false;
@@ -258,16 +199,6 @@ pub(super) fn poll_version_catalog(state: &mut ContentBrowserState) {
     }
 }
 
-fn ensure_identify_channel(state: &mut ContentBrowserState) {
-    if state.identify_tx.is_some() && state.identify_rx.is_some() {
-        return;
-    }
-
-    let (tx, rx) = mpsc::channel::<(PathBuf, Result<UnifiedContentEntry, String>)>();
-    state.identify_tx = Some(tx);
-    state.identify_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn request_identify_file(state: &mut ContentBrowserState, selected_path: PathBuf) {
     if state.identify_in_flight {
         return;
@@ -280,10 +211,7 @@ pub(super) fn request_identify_file(state: &mut ContentBrowserState, selected_pa
         return;
     }
 
-    ensure_identify_channel(state);
-    let Some(tx) = state.identify_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.identify.sender();
 
     state.identify_in_flight = true;
     state.status_message = Some(format!(
@@ -311,39 +239,11 @@ pub(super) fn request_identify_file(state: &mut ContentBrowserState, selected_pa
 }
 
 pub(super) fn poll_identify_results(state: &mut ContentBrowserState) {
-    let Some(rx) = state.identify_rx.as_ref() else {
-        return;
-    };
+    let drained = state.identify.drain();
+    let updates = drained.items;
 
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    match rx.lock() {
-        Ok(receiver) => loop {
-            match receiver.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/content_browser",
-                        "Content identification worker disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        },
-        Err(_) => {
-            tracing::error!(
-                target: "vertexlauncher/content_browser",
-                "Content identification receiver mutex was poisoned."
-            );
-            should_reset_channel = true;
-        }
-    }
-
-    if should_reset_channel {
-        state.identify_tx = None;
-        state.identify_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/content_browser", "identify worker channel stopped unexpectedly.");
         state.identify_in_flight = false;
         state.status_message =
             Some("Content identification worker stopped unexpectedly.".to_owned());
@@ -399,10 +299,7 @@ pub(super) fn request_search(state: &mut ContentBrowserState, request: BrowserSe
         return;
     }
 
-    ensure_search_channel(state);
-    let Some(tx) = state.search_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.search.sender();
 
     state.active_search_request = Some(request.clone());
     state.search_completed_tasks = 0;
@@ -934,39 +831,11 @@ fn resolve_curseforge_class_ids(
 }
 
 pub(super) fn poll_search(state: &mut ContentBrowserState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.search_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/content_browser",
-                            request = ?state.active_search_request,
-                            "Content search worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/content_browser",
-                    request = ?state.active_search_request,
-                    "Content search receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.search.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.search_tx = None;
-        state.search_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/content_browser", "search worker channel stopped unexpectedly.");
         state.search_in_flight = false;
         state.search_completed_tasks = 0;
         state.search_total_tasks = 0;
@@ -1044,39 +913,11 @@ pub(super) fn poll_search(state: &mut ContentBrowserState) {
 }
 
 pub(super) fn poll_detail_versions(state: &mut ContentBrowserState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.detail_versions_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/content_browser",
-                            project = ?state.detail_versions_project_key,
-                            "Detail-versions worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/content_browser",
-                    project = ?state.detail_versions_project_key,
-                    "Detail-versions receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.detail_versions_results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.detail_versions_tx = None;
-        state.detail_versions_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/content_browser", "detail_versions worker channel stopped unexpectedly.");
         state.detail_versions_in_flight = false;
         state.detail_versions_error =
             Some("Version details worker stopped unexpectedly.".to_owned());
@@ -1260,15 +1101,6 @@ fn compare_mod_entries(
     }
 }
 
-fn ensure_download_channel(state: &mut ContentBrowserState) {
-    if state.download_tx.is_some() && state.download_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<ContentDownloadOutcome, String>>();
-    state.download_tx = Some(tx);
-    state.download_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn maybe_start_queued_download(
     state: &mut ContentBrowserState,
     instance_name: &str,
@@ -1281,10 +1113,7 @@ pub(super) fn maybe_start_queued_download(
         return;
     };
 
-    ensure_download_channel(state);
-    let Some(tx) = state.download_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.download.sender();
 
     state.download_in_flight = true;
     state.active_download = Some(active_download_from_request(&next.request));
@@ -1322,39 +1151,11 @@ pub(super) fn maybe_start_queued_download(
 }
 
 pub(super) fn poll_downloads(state: &mut ContentBrowserState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.download_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/content_browser",
-                            active_download = ?state.active_download,
-                            "Content download worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/content_browser",
-                    active_download = ?state.active_download,
-                    "Content download receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.download.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.download_tx = None;
-        state.download_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/content_browser", "download worker channel stopped unexpectedly.");
         state.download_in_flight = false;
         state.active_download = None;
         if let Some(instance_name) = state.active_instance_name.as_deref() {

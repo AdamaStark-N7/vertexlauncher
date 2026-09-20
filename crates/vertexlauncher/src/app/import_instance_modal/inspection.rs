@@ -68,15 +68,16 @@ pub(super) fn inspect_mrpack(path: &Path) -> Result<ImportPreview, String> {
     let dependency_info = resolve_mrpack_dependencies(&manifest.dependencies)?;
     Ok(ImportPreview {
         kind: ImportPreviewKind::Manifest(ImportPackageKind::ModrinthPack),
-        detected_name: non_empty(manifest.name.as_str())
+        detected_name: instances::normalize_optional(manifest.name.as_str())
             .unwrap_or_else(|| "Imported Modrinth Pack".to_owned()),
         game_version: dependency_info.game_version.clone(),
         modloader: dependency_info.modloader.clone(),
         modloader_version: dependency_info.modloader_version.clone(),
         summary: format!(
             "{} {} for Minecraft {} ({}) with {} packaged files.",
-            non_empty(manifest.name.as_str()).unwrap_or_else(|| "Modrinth pack".to_owned()),
-            non_empty(manifest.version_id.as_str()).unwrap_or_default(),
+            instances::normalize_optional(manifest.name.as_str())
+                .unwrap_or_else(|| "Modrinth pack".to_owned()),
+            instances::normalize_optional(manifest.version_id.as_str()).unwrap_or_default(),
             dependency_info.game_version,
             format_loader_label(
                 dependency_info.modloader.as_str(),
@@ -94,15 +95,16 @@ pub(super) fn inspect_curseforge_pack(path: &Path) -> Result<ImportPreview, Stri
     let dependency_info = resolve_curseforge_pack_dependencies(&manifest.minecraft)?;
     Ok(ImportPreview {
         kind: ImportPreviewKind::Manifest(ImportPackageKind::CurseForgePack),
-        detected_name: non_empty(manifest.name.as_str())
+        detected_name: instances::normalize_optional(manifest.name.as_str())
             .unwrap_or_else(|| "Imported CurseForge Pack".to_owned()),
         game_version: dependency_info.game_version.clone(),
         modloader: dependency_info.modloader.clone(),
         modloader_version: dependency_info.modloader_version.clone(),
         summary: format!(
             "{} {} for Minecraft {} ({}) with {} packaged files.",
-            non_empty(manifest.name.as_str()).unwrap_or_else(|| "CurseForge pack".to_owned()),
-            non_empty(manifest.version.as_str()).unwrap_or_default(),
+            instances::normalize_optional(manifest.name.as_str())
+                .unwrap_or_else(|| "CurseForge pack".to_owned()),
+            instances::normalize_optional(manifest.version.as_str()).unwrap_or_default(),
             dependency_info.game_version,
             format_loader_label(
                 dependency_info.modloader.as_str(),
@@ -1195,8 +1197,8 @@ pub(super) fn maybe_add_project_from_json(
                 Some("curseforge") => Some(managed_content::ManagedContentSource::CurseForge),
                 _ => None,
             },
-            selected_version_id: non_empty(version_id.as_str()),
-            selected_version_name: non_empty(version_name.as_str()),
+            selected_version_id: instances::normalize_optional(version_id.as_str()),
+            selected_version_name: instances::normalize_optional(version_name.as_str()),
             ..InstalledContentProject::default()
         },
     );

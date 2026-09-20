@@ -1,6 +1,5 @@
 use egui::{
-    Area, Color32, Context, CornerRadius, CursorIcon, FontId, Id, Key, Order, Pos2, Rect, Sense,
-    pos2, vec2,
+    Area, Color32, Context, CornerRadius, CursorIcon, Id, Key, Order, Pos2, Rect, Sense, pos2, vec2,
 };
 use textui::TextUi;
 use textui_egui::prelude::*;
@@ -213,7 +212,6 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
 
     let screen_rect = ctx.content_rect();
     let anchor_pos = resolved_anchor_pos(ctx, request.anchor_pos);
-    let label_font = FontId::proportional(14.0);
     let visuals = ctx.global_style().visuals.clone();
     let normal_label_color = visuals.text_color();
     let danger_color = visuals.error_fg_color;
@@ -229,23 +227,16 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
         0.0
     };
 
-    let widest_label = ctx.fonts_mut(|fonts| {
-        request
-            .items
-            .iter()
-            .map(|item| {
-                let color = if item.danger {
-                    danger_color
-                } else {
-                    normal_label_color
-                };
-                fonts
-                    .layout_no_wrap(item.label.clone(), label_font.clone(), color)
-                    .size()
-                    .x
-            })
-            .fold(0.0, f32::max)
-    });
+    let measure_style = style::stat_label_ctx(ctx);
+    let widest_label = request
+        .items
+        .iter()
+        .map(|item| {
+            text_ui
+                .measure_text_size_ctx(ctx, item.label.as_str(), &measure_style)
+                .x
+        })
+        .fold(0.0, f32::max);
 
     let row_content_width = widest_label
         + row_left_spacing
@@ -429,7 +420,7 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                                         item_color.g(),
                                         item_color.b(),
                                     ),
-                                    apply_color_to_svg(icon_svg, item_color),
+                                    crate::ui::svg_tint::tint_svg(icon_svg, item_color),
                                 )
                                 .fit_to_exact_size(icon_rect.size());
                                 let _ = ui.put(icon_rect, icon);
@@ -440,11 +431,9 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                                 pos2(item_rect.right() - 10.0, item_rect.bottom()),
                             );
                             let label_style = LabelOptions {
-                                font_size: 14.0,
-                                line_height: 18.0,
                                 color: item_color,
                                 wrap: false,
-                                ..style::body_strong(ui)
+                                ..style::stat_label(ui)
                             };
                             ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
                                 ui.set_clip_rect(label_rect.intersect(ui.clip_rect()));
@@ -489,10 +478,4 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
         });
 
     ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state));
-}
-
-fn apply_color_to_svg(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
-    svg.into_bytes()
 }

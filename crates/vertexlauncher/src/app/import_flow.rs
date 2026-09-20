@@ -1,16 +1,5 @@
 use super::*;
 
-pub(super) fn ensure_create_instance_channel(
-    state: &mut create_instance_modal::CreateInstanceState,
-) {
-    if state.create_results_tx.is_some() && state.create_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<create_instance_modal::CreateInstanceTaskResult>();
-    state.create_results_tx = Some(tx);
-    state.create_results_rx = Some(rx);
-}
-
 pub(super) fn start_create_instance_task(
     app: &mut VertexApp,
     draft: create_instance_modal::CreateInstanceDraft,
@@ -19,15 +8,7 @@ pub(super) fn start_create_instance_task(
         return;
     }
 
-    ensure_create_instance_channel(&mut app.create_instance_state);
-    let Some(tx) = app
-        .create_instance_state
-        .create_results_tx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
+    let tx = app.create_instance_state.create_results.sender();
 
     app.create_instance_state.error = None;
     app.create_instance_state.create_in_flight = true;
@@ -52,29 +33,19 @@ pub(super) fn start_create_instance_task(
 }
 
 pub(super) fn poll_create_instance_result(app: &mut VertexApp) {
-    let Some(result) = app
-        .create_instance_state
-        .create_results_rx
-        .as_ref()
-        .map(|rx| rx.try_recv())
-    else {
+    let drained = app.create_instance_state.create_results.drain();
+    if drained.disconnected {
+        app.create_instance_state.create_in_flight = false;
+        app.create_instance_state.error =
+            Some("Create instance task stopped unexpectedly.".to_owned());
+        tracing::error!(
+            target: "vertexlauncher/app/create_instance",
+            "Create-instance worker channel stopped unexpectedly."
+        );
         return;
-    };
-    let result = match result {
-        Ok(result) => result,
-        Err(mpsc::TryRecvError::Empty) => return,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            app.create_instance_state.create_results_tx = None;
-            app.create_instance_state.create_results_rx = None;
-            app.create_instance_state.create_in_flight = false;
-            app.create_instance_state.error =
-                Some("Create instance task stopped unexpectedly.".to_owned());
-            tracing::error!(
-                target: "vertexlauncher/app/create_instance",
-                "Create-instance worker channel stopped unexpectedly."
-            );
-            return;
-        }
+    }
+    let Some(result) = drained.items.into_iter().next() else {
+        return;
     };
 
     app.create_instance_state.create_in_flight = false;
@@ -99,28 +70,6 @@ pub(super) fn poll_create_instance_result(app: &mut VertexApp) {
             app.create_instance_state.error = Some(format!("Failed to create instance: {err}"));
         }
     }
-}
-
-pub(super) fn ensure_import_instance_channel(
-    state: &mut import_instance_modal::ImportInstanceState,
-) {
-    if state.import_results_tx.is_some() && state.import_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<import_instance_modal::ImportTaskResult>();
-    state.import_results_tx = Some(tx);
-    state.import_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
-pub(super) fn ensure_import_instance_progress_channel(
-    state: &mut import_instance_modal::ImportInstanceState,
-) {
-    if state.import_progress_tx.is_some() && state.import_progress_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<import_instance_modal::ImportProgress>();
-    state.import_progress_tx = Some(tx);
-    state.import_progress_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
 pub(super) fn start_import_instance_task(
@@ -270,24 +219,8 @@ pub(super) fn spawn_import_instance_task(
     app: &mut VertexApp,
     request: import_instance_modal::ImportRequest,
 ) {
-    ensure_import_instance_channel(&mut app.import_instance_state);
-    ensure_import_instance_progress_channel(&mut app.import_instance_state);
-    let Some(tx) = app
-        .import_instance_state
-        .import_results_tx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
-    let Some(progress_tx) = app
-        .import_instance_state
-        .import_progress_tx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
+    let tx = app.import_instance_state.import_results.sender();
+    let progress_tx = app.import_instance_state.import_progress.sender();
 
     app.import_instance_state.error = None;
     app.import_instance_state.import_in_flight = true;
@@ -313,57 +246,32 @@ pub(super) fn cleanup_import_request_manual_staging(
     let Some(request) = request else {
         return;
     };
-    if let Some(staging_dir) = request.manual_curseforge_staging_dir.as_ref() {
-        if let Err(err) = fs::remove_dir_all(staging_dir.as_path()) {
-            tracing::warn!(
-                target: "vertexlauncher/io",
-                op = "remove_dir_all",
-                path = %staging_dir.display(),
-                error = %err,
-                context = "cleanup import manual CurseForge staging"
-            );
-        }
+    if let Some(staging_dir) = request.manual_curseforge_staging_dir.clone() {
+        remove_staging_dir_in_background(staging_dir, "cleanup import manual CurseForge staging");
     }
 }
 
 pub(super) fn poll_import_instance_progress(app: &mut VertexApp) {
-    let Some(rx) = app
+    if let Some(progress) = app
         .import_instance_state
-        .import_progress_rx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/app/import",
-            "Import progress receiver mutex was poisoned."
-        );
-        return;
-    };
-    while let Ok(progress) = receiver.try_recv() {
+        .import_progress
+        .drain()
+        .items
+        .pop()
+    {
         app.import_instance_state.import_latest_progress = Some(progress);
     }
 }
 
 pub(super) fn poll_import_instance_result(app: &mut VertexApp) {
-    let Some(rx) = app
+    let Some(result) = app
         .import_instance_state
-        .import_results_rx
-        .as_ref()
-        .cloned()
+        .import_results
+        .drain()
+        .items
+        .into_iter()
+        .next()
     else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/app/import",
-            "Import result receiver mutex was poisoned."
-        );
-        return;
-    };
-    let Ok(result) = receiver.try_recv() else {
         return;
     };
 
@@ -471,6 +379,9 @@ pub(super) struct PendingCurseForgeManualDownloadState {
     pub(super) staged_files: HashMap<u64, PathBuf>,
     pub(super) last_scan_at: Instant,
     pub(super) error: Option<String>,
+    /// Background scans report here so the downloads folder is never read on the UI thread.
+    scan_results: launcher_runtime::WorkerChannel<Result<Vec<(u64, PathBuf)>, String>>,
+    scan_in_flight: bool,
 }
 
 impl PendingCurseForgeManualDownloadState {
@@ -525,6 +436,8 @@ impl PendingCurseForgeManualDownloadState {
             staged_files,
             last_scan_at: Instant::now() - Duration::from_secs(1),
             error: None,
+            scan_results: Default::default(),
+            scan_in_flight: false,
         })
     }
 }
@@ -550,17 +463,17 @@ pub(super) fn render_curseforge_manual_download_modal(
             let body_style = LabelOptions {
                 color: ui.visuals().text_color(),
                 wrap: true,
-                ..LabelOptions::default()
+                ..launcher_ui::ui::style::body(ui)
             };
             let subtle_style = LabelOptions {
                 color: ui.visuals().weak_text_color(),
                 wrap: true,
-                ..LabelOptions::default()
+                ..launcher_ui::ui::style::body(ui)
             };
             let error_style = LabelOptions {
                 color: ui.visuals().error_fg_color,
                 wrap: true,
-                ..LabelOptions::default()
+                ..launcher_ui::ui::style::body(ui)
             };
             let _ = text_ui.label(
                 ui,
@@ -711,25 +624,49 @@ pub(super) fn poll_pending_curseforge_manual_download(app: &mut VertexApp) {
         let Some(state) = app.pending_curseforge_manual_download.as_mut() else {
             return;
         };
-        if state.last_scan_at.elapsed() < Duration::from_millis(400) {
-            return;
+        let drained = state.scan_results.drain();
+        if drained.disconnected {
+            state.scan_results.reset();
+            state.scan_in_flight = false;
         }
-        state.last_scan_at = Instant::now();
-        match scan_curseforge_manual_downloads(state) {
-            Ok(()) => {
-                if state.pending_files.is_empty() {
-                    should_resume = true;
+        for result in drained.items {
+            state.scan_in_flight = false;
+            match result {
+                Ok(found) => {
+                    apply_found_manual_downloads(state, found);
+                    if state.pending_files.is_empty() {
+                        should_resume = true;
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "vertexlauncher/app/import",
+                        error = %err,
+                        remaining_files = state.pending_files.len(),
+                        "Pending manual CurseForge download scan failed."
+                    );
+                    state.error = Some(err);
                 }
             }
-            Err(err) => {
-                tracing::warn!(
-                    target: "vertexlauncher/app/import",
-                    error = %err,
-                    remaining_files = state.pending_files.len(),
-                    "Pending manual CurseForge download scan failed."
-                );
-                state.error = Some(err);
-            }
+        }
+        if !should_resume
+            && !state.scan_in_flight
+            && state.last_scan_at.elapsed() >= Duration::from_millis(400)
+        {
+            // Reading the downloads folder and copying matches can be slow; do it off-thread.
+            state.last_scan_at = Instant::now();
+            state.scan_in_flight = true;
+            let tx = state.scan_results.sender();
+            let downloads_dir = state.downloads_dir.clone();
+            let staging_dir = state.staging_dir.clone();
+            let pending_files = state.pending_files.clone();
+            tokio_runtime::spawn_blocking_detached(move || {
+                let _ = tx.send(find_and_stage_manual_downloads(
+                    downloads_dir.as_path(),
+                    staging_dir.as_path(),
+                    &pending_files,
+                ));
+            });
         }
     }
     if !should_resume {
@@ -768,10 +705,27 @@ pub(super) fn poll_pending_curseforge_manual_download(app: &mut VertexApp) {
     }
 }
 
+/// One-shot synchronous scan, used while a request is being set up.
 pub(super) fn scan_curseforge_manual_downloads(
     state: &mut PendingCurseForgeManualDownloadState,
 ) -> Result<(), String> {
-    let entries = fs::read_dir(state.downloads_dir.as_path())
+    let found = find_and_stage_manual_downloads(
+        state.downloads_dir.as_path(),
+        state.staging_dir.as_path(),
+        &state.pending_files,
+    )?;
+    apply_found_manual_downloads(state, found);
+    Ok(())
+}
+
+/// Looks in `downloads_dir` for the requested files and copies matches into `staging_dir`.
+/// Pure filesystem work with no shared state, so it can run on a blocking thread.
+fn find_and_stage_manual_downloads(
+    downloads_dir: &Path,
+    staging_dir: &Path,
+    pending_files: &[import_instance_modal::CurseForgeManualDownloadRequirement],
+) -> Result<Vec<(u64, PathBuf)>, String> {
+    let entries = fs::read_dir(downloads_dir)
         .map_err(|err| format!("failed to read downloads folder: {err}"))?;
     let mut candidates = Vec::new();
     for entry in entries {
@@ -787,13 +741,13 @@ pub(super) fn scan_curseforge_manual_downloads(
     }
 
     let mut found = Vec::new();
-    for requirement in &state.pending_files {
+    for requirement in pending_files {
         let Some((_, source_path)) = candidates.iter().find(|(candidate_name, _)| {
             downloaded_filename_matches(candidate_name.as_str(), requirement.file_name.as_str())
         }) else {
             continue;
         };
-        let staged_path = state.staging_dir.join(requirement.file_name.as_str());
+        let staged_path = staging_dir.join(requirement.file_name.as_str());
         fs::copy(source_path, staged_path.as_path()).map_err(|err| {
             tracing::warn!(target: "vertexlauncher/io", op = "copy", from = %source_path.display(), to = %staged_path.display(), error = %err, context = "stage manual CurseForge file");
             format!(
@@ -803,8 +757,15 @@ pub(super) fn scan_curseforge_manual_downloads(
         })?;
         found.push((requirement.file_id, staged_path));
     }
+    Ok(found)
+}
+
+fn apply_found_manual_downloads(
+    state: &mut PendingCurseForgeManualDownloadState,
+    found: Vec<(u64, PathBuf)>,
+) {
     if found.is_empty() {
-        return Ok(());
+        return;
     }
     state.pending_files.retain(|requirement| {
         !found
@@ -815,7 +776,6 @@ pub(super) fn scan_curseforge_manual_downloads(
         state.staged_files.insert(file_id, staged_path);
     }
     state.error = None;
-    Ok(())
 }
 
 pub(super) fn downloaded_filename_matches(candidate_name: &str, expected_name: &str) -> bool {
@@ -849,9 +809,16 @@ pub(super) fn cleanup_pending_curseforge_manual_download(
     let Some(pending) = pending else {
         return;
     };
-    if let Err(err) = fs::remove_dir_all(pending.staging_dir.as_path()) {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_dir_all", path = %pending.staging_dir.display(), error = %err, context = "cleanup manual CurseForge staging");
-    }
+    remove_staging_dir_in_background(pending.staging_dir, "cleanup manual CurseForge staging");
+}
+
+/// Deleting staged mod files can take a while; keep it off the UI thread.
+fn remove_staging_dir_in_background(staging_dir: PathBuf, context: &'static str) {
+    tokio_runtime::spawn_blocking_detached(move || {
+        if let Err(err) = fs::remove_dir_all(staging_dir.as_path()) {
+            tracing::warn!(target: "vertexlauncher/io", op = "remove_dir_all", path = %staging_dir.display(), error = %err, context = context);
+        }
+    });
 }
 
 pub(super) fn cancel_pending_curseforge_manual_download(app: &mut VertexApp) {

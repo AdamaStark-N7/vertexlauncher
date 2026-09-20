@@ -7,6 +7,11 @@ use std::{
     task::{Context, Poll},
 };
 
+mod memory;
+mod worker_channel;
+pub use memory::{BlockingGate, BlockingGatePermit, release_memory_to_os};
+pub use worker_channel::{Drained, WorkerChannel};
+
 pub use runtime_bootstrap::RuntimeBootstrapError;
 use runtime_bootstrap::{RuntimeBootstrapSpec, build_runtime};
 use tokio::runtime::Runtime;

@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 export APPDIR="${HERE}"
-export LD_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib64:${HERE}/usr/lib/x86_64-linux-gnu:${HERE}/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-}"
+APPIMAGE_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib64:${HERE}/usr/lib/x86_64-linux-gnu:${HERE}/usr/lib/aarch64-linux-gnu"
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
 export GSETTINGS_SCHEMA_DIR="${HERE}/usr/share/glib-2.0/schemas"
 
@@ -163,24 +163,16 @@ if [[ -z "${WEBKIT_HELPER_DIR}" ]]; then
     echo "" >&2
 fi
 
-# If a bundled dynamic linker is present, invoke it directly so the
-# AppImage loads its own glibc instead of the host's.  This decouples
-# the AppImage from the host glibc version (WebKitGTK requires ≥ 2.35,
-# which predates several common LTS distributions).
-# LD_LIBRARY_PATH is already set above to point at the bundled libs, so
-# the bundled linker will find both glibc and all other bundled libraries
-# from inside the AppDir.  Fall back to a plain exec when the bundled
-# linker is absent (custom builds, developer machines, etc.).
-BUNDLED_LD=""
-case "$(uname -m)" in
-    x86_64)  BUNDLED_LD="${HERE}/usr/lib/ld-linux-x86-64.so.2" ;;
-    aarch64) BUNDLED_LD="${HERE}/usr/lib/ld-linux-aarch64.so.1" ;;
-esac
-
-if [[ -n "${BUNDLED_LD}" && -x "${BUNDLED_LD}" ]]; then
-    exec "${BUNDLED_LD}" \
-        --library-path "${HERE}/usr/lib:${HERE}/usr/lib64" \
-        "${HERE}/usr/bin/vertexlauncher" "$@"
+# Keep the AppImage library path away from AppRun's shell setup commands.
+# Host tools such as mkdir/rm/ln must never see a bundled libc or dynamic
+# loader, otherwise glibc-private symbol mismatches can abort startup before
+# the launcher binary is reached. The packaging step removes glibc/loader files
+# from the AppDir; exporting the path only for the final exec is an additional
+# guard against accidental runtime-library leakage.
+if [[ -n "${LD_LIBRARY_PATH:-}" ]]; then
+    export LD_LIBRARY_PATH="${APPIMAGE_LIBRARY_PATH}:${LD_LIBRARY_PATH}"
+else
+    export LD_LIBRARY_PATH="${APPIMAGE_LIBRARY_PATH}"
 fi
 
 exec "${HERE}/usr/bin/vertexlauncher" "$@"

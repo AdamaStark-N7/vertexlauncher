@@ -1,4 +1,4 @@
-use crate::{ProjectDependency, ProjectVersionFile};
+use crate::{Environment, ProjectDependency, ProjectVersionFile};
 
 /// A compatible Modrinth version entry for a project.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12,4 +12,5 @@ pub struct ProjectVersion {
     pub game_versions: Vec<String>,
     pub dependencies: Vec<ProjectDependency>,
     pub files: Vec<ProjectVersionFile>,
+    pub environment: Environment,
 }

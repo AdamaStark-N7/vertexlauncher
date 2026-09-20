@@ -17,6 +17,8 @@ pub struct TextFundamentals {
     pub letter_spacing_floor: f32,
     pub feature_settings: Vec<TextFeatureSetting>,
     pub variation_settings: Vec<TextVariationSetting>,
+    /// Named font family overriding the launcher-wide UI font for this text.
+    pub font_family: Option<String>,
 }
 
 impl Default for TextFundamentals {
@@ -37,6 +39,7 @@ impl Default for TextFundamentals {
             letter_spacing_floor: -0.5,
             feature_settings: Vec::new(),
             variation_settings: Vec::new(),
+            font_family: None,
         }
     }
 }

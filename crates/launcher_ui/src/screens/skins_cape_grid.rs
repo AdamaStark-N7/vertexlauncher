@@ -1,18 +1,11 @@
 use super::*;
 
 pub(super) fn render_cape_grid(ui: &mut Ui, text_ui: &mut TextUi, state: &mut SkinManagerState) {
-    let label_font = egui::TextStyle::Body.resolve(ui.style());
-    let label_color = ui.visuals().text_color();
-    let mut max_label_width = ui
-        .painter()
-        .layout_no_wrap("No Cape".to_owned(), label_font.clone(), label_color)
-        .size()
-        .x;
+    let label_style = style::body(ui);
+    let mut max_label_width = text_ui.measure_text_size(ui, "No Cape", &label_style).x;
     for cape in &state.available_capes {
-        let width = ui
-            .painter()
-            .layout_no_wrap(cape.label.clone(), label_font.clone(), label_color)
-            .size()
+        let width = text_ui
+            .measure_text_size(ui, cape.label.as_str(), &label_style)
             .x;
         max_label_width = max_label_width.max(width);
     }
@@ -252,7 +245,8 @@ fn draw_cape_tile(
                     TextureOptions::NEAREST,
                 )
             {
-                egui::Image::from_texture(&texture)
+                texture
+                    .image()
                     .uv(back_uv)
                     .fit_to_exact_size(back_rect.size())
                     .texture_options(TextureOptions::NEAREST)
@@ -266,7 +260,8 @@ fn draw_cape_tile(
                 TextureOptions::NEAREST,
             )
         {
-            let image = egui::Image::from_texture(&texture)
+            let image = texture
+                .image()
                 .fit_to_exact_size(preview_rect.size())
                 .texture_options(TextureOptions::NEAREST);
             image.paint_at(ui, preview_rect);

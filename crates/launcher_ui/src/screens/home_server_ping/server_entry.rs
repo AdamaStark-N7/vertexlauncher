@@ -9,4 +9,6 @@ pub(crate) struct ServerEntry {
     pub(crate) icon_png: Option<Arc<[u8]>>,
     pub(crate) last_used_at_ms: Option<u64>,
     pub(crate) favorite: bool,
+    /// Every instance holding this server; more than one collapses into a single entry.
+    pub(crate) instances: Vec<EntryInstance>,
 }

@@ -8,7 +8,7 @@ pub fn themed_text_input_options(ui: &Ui, monospace: bool) -> InputOptions {
     let hovered = visuals.widgets.hovered;
     let focused = visuals.widgets.active;
 
-    InputOptions {
+    let mut options = InputOptions {
         text_color: visuals.text_color(),
         cursor_color: visuals.text_cursor.stroke.color,
         selection_color: Color32::from_rgba_premultiplied(
@@ -27,7 +27,9 @@ pub fn themed_text_input_options(ui: &Ui, monospace: bool) -> InputOptions {
         corner_radius: max_corner_radius(inactive.corner_radius),
         monospace,
         ..InputOptions::default()
-    }
+    };
+    crate::ui::style::apply_input_typography(ui, &mut options);
+    options
 }
 
 fn max_corner_radius(corner_radius: CornerRadius) -> u8 {

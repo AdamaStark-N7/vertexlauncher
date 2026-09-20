@@ -32,6 +32,14 @@ mod vertex3d_runtime;
 mod vertex3d_scene;
 
 pub(super) use self::callback::SkinPreviewPostProcessWgpuCallback;
+
+/// Drops the preview's pipelines, render targets and textures. They are rebuilt on demand the
+/// next time the skins screen draws a preview.
+pub(in crate::screens) fn release_gpu_resources(renderer: &mut egui_wgpu::Renderer) {
+    renderer
+        .callback_resources
+        .remove::<SkinPreviewPostProcessWgpuResources>();
+}
 use self::present_source::PresentSource;
 use self::render_targets::{DepthAttachmentSet, SkinPreviewPostProcessRenderTargets};
 use self::shader_modules::SkinPreviewPostProcessShaderModules;

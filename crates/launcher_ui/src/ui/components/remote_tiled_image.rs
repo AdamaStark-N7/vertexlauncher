@@ -1,6 +1,6 @@
 use std::hash::{Hash, Hasher};
 use std::io::Read;
-use std::sync::{Arc, Mutex, OnceLock, mpsc};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use egui::{TextureOptions, Ui};
@@ -11,6 +11,13 @@ use crate::app::tokio_runtime;
 use super::{image_memory::compress_rgba_image_for_memory, image_textures};
 
 const TILE_MAX_DIM: u32 = 4096;
+/// Longest side kept for a remote image. Cards and icons are drawn far smaller than this, so
+/// keeping the full-size original only costs memory (a 4096 px image is 64 MB as a texture).
+const REMOTE_IMAGE_MAX_EDGE: u32 = 1536;
+/// Largest download accepted for one image.
+const REMOTE_IMAGE_MAX_DOWNLOAD_BYTES: u64 = 32 * 1024 * 1024;
+/// Remote images decoded at the same time.
+const REMOTE_IMAGE_DECODE_SLOTS: usize = 3;
 const REMOTE_IMAGE_MAX_BYTES: usize = 96 * 1024 * 1024;
 const REMOTE_IMAGE_STALE_FRAMES: u64 = 900;
 
@@ -25,6 +32,8 @@ enum RemoteImageState {
 struct RemoteImageEntry {
     state: RemoteImageState,
     last_touched_frame: u64,
+    /// Frame counter (see `begin_frame`) of the last draw that used this image.
+    touched_epoch: u64,
 }
 
 #[derive(Clone)]
@@ -45,20 +54,43 @@ struct TileImage {
 }
 
 struct RemoteImageCache {
+    /// Advances once per UI frame, unlike `frame_index`, which advances once per drawn image.
+    epoch: u64,
     states: ThreadSafeLru<String, RemoteImageEntry>,
     frame_index: u64,
-    tx: Option<mpsc::Sender<(String, Result<Arc<TiledImage>, String>)>>,
-    rx: Option<Arc<Mutex<mpsc::Receiver<(String, Result<Arc<TiledImage>, String>)>>>>,
+    results: launcher_runtime::WorkerChannel<(String, Result<Arc<TiledImage>, String>)>,
 }
 
 impl Default for RemoteImageCache {
     fn default() -> Self {
         Self {
+            epoch: 0,
             states: ThreadSafeLru::new(REMOTE_IMAGE_MAX_BYTES),
             frame_index: 0,
-            tx: None,
-            rx: None,
+            results: Default::default(),
         }
+    }
+}
+
+/// Marks the start of a UI frame; see [`release_untouched`].
+pub fn begin_frame() {
+    if let Ok(mut cache) = cache().lock() {
+        cache.epoch = cache.epoch.saturating_add(1);
+    }
+}
+
+/// Frees every remote image that was not drawn during the current frame. Call at the end of a
+/// frame after switching screens, so images that belonged to the old screen go away at once.
+pub fn release_untouched(ctx: &egui::Context) {
+    let Ok(cache) = cache().lock() else {
+        return;
+    };
+    let epoch = cache.epoch;
+    let evicted = cache
+        .states
+        .write(|state| state.retain(|_, entry| entry.value.touched_epoch >= epoch));
+    for (_, entry) in evicted {
+        forget_remote_entry(ctx, &entry);
     }
 }
 
@@ -67,47 +99,17 @@ fn cache() -> &'static Mutex<RemoteImageCache> {
     CACHE.get_or_init(|| Mutex::new(RemoteImageCache::default()))
 }
 
-fn ensure_channel(cache: &mut RemoteImageCache) {
-    if cache.tx.is_some() && cache.rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, Result<Arc<TiledImage>, String>)>();
-    cache.tx = Some(tx);
-    cache.rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn poll_updates(ctx: &egui::Context, cache: &mut RemoteImageCache) -> bool {
-    let mut updates = Vec::new();
-    let mut should_reset = false;
-    if let Some(rx) = cache.rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/remote_image",
-                            "Remote image worker disconnected unexpectedly."
-                        );
-                        should_reset = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/remote_image",
-                    "Remote image receiver mutex was poisoned."
-                );
-                should_reset = true;
-            }
-        }
+    let drained = cache.results.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/remote_image",
+            "Remote image worker channel stopped unexpectedly."
+        );
     }
+    let updates = drained.items;
 
-    if should_reset {
-        cache.tx = None;
-        cache.rx = None;
+    if drained.disconnected {
         // Remove any entries still stuck in Loading state — their in-flight tasks
         // held the old sender and can no longer deliver results. Removing them lets
         // the next show() call re-dispatch a fresh request on the new channel.
@@ -126,6 +128,7 @@ fn poll_updates(ctx: &egui::Context, cache: &mut RemoteImageCache) -> bool {
                         url,
                         RemoteImageEntry {
                             last_touched_frame: cache.frame_index,
+                            touched_epoch: cache.epoch,
                             state: RemoteImageState::Ready(image),
                         },
                         approx_bytes,
@@ -150,6 +153,7 @@ fn poll_updates(ctx: &egui::Context, cache: &mut RemoteImageCache) -> bool {
                         url,
                         RemoteImageEntry {
                             last_touched_frame: cache.frame_index,
+                            touched_epoch: cache.epoch,
                             state: RemoteImageState::Failed,
                         },
                         0,
@@ -192,12 +196,14 @@ pub fn show(
         };
         cache.frame_index = cache.frame_index.saturating_add(1);
         let frame_index = cache.frame_index;
+        let epoch = cache.epoch;
         trim_remote_cache(ui.ctx(), &mut cache);
         let mut request_follow_up_repaint = poll_updates(ui.ctx(), &mut cache);
 
         if let Some(entry) = cache.states.write(|state| {
             let entry = state.touch(&normalized_url.to_owned())?;
             entry.value.last_touched_frame = frame_index;
+            entry.value.touched_epoch = epoch;
             Some(entry.value.clone())
         }) {
             match &entry.state {
@@ -213,17 +219,14 @@ pub fn show(
                 }
             }
         } else {
-            ensure_channel(&mut cache);
-            let Some(tx) = cache.tx.as_ref().cloned() else {
-                show_placeholder(ui, desired_size, id_source, placeholder_svg);
-                return;
-            };
+            let tx = cache.results.sender();
             cache.states.write(|state| {
                 state.insert_without_eviction(
                     normalized_url.to_owned(),
                     RemoteImageEntry {
                         state: RemoteImageState::Loading,
                         last_touched_frame: frame_index,
+                        touched_epoch: cache.epoch,
                     },
                     0,
                 );
@@ -275,7 +278,7 @@ fn show_tiled(ui: &mut Ui, image: &TiledImage, desired_size: egui::Vec2) {
                 TextureOptions::LINEAR,
             )
         {
-            let image = egui::Image::from_texture(&texture).fit_to_exact_size(tile_rect.size());
+            let image = texture.image().fit_to_exact_size(tile_rect.size());
             let _ = ui.put(tile_rect, image);
         }
     }
@@ -298,18 +301,41 @@ fn show_placeholder(
     );
 }
 
+fn decode_gate() -> &'static launcher_runtime::BlockingGate {
+    static GATE: launcher_runtime::BlockingGate =
+        launcher_runtime::BlockingGate::new(REMOTE_IMAGE_DECODE_SLOTS);
+    &GATE
+}
+
 fn fetch_and_tile_remote_image(url: &str) -> Result<Arc<TiledImage>, String> {
     let response = ureq::get(url)
         .call()
         .map_err(|err| format!("failed to fetch remote icon {url}: {err}"))?;
     let (_, body) = response.into_parts();
-    let mut reader = body.into_reader();
+    let mut reader = body.into_reader().take(REMOTE_IMAGE_MAX_DOWNLOAD_BYTES + 1);
     let mut bytes = Vec::new();
     reader
         .read_to_end(&mut bytes)
         .map_err(|err| format!("failed to read remote icon bytes {url}: {err}"))?;
+    if bytes.len() as u64 > REMOTE_IMAGE_MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "remote icon {url} is larger than the download limit"
+        ));
+    }
+    // Downloading is I/O; decoding is the memory-hungry part, so only that is gated.
+    let _slot = decode_gate().acquire();
     let image = image::load_from_memory(bytes.as_slice())
         .map_err(|err| format!("failed to decode remote icon {url}: {err}"))?;
+    drop(bytes);
+    let image = if image.width().max(image.height()) > REMOTE_IMAGE_MAX_EDGE {
+        image.resize(
+            REMOTE_IMAGE_MAX_EDGE,
+            REMOTE_IMAGE_MAX_EDGE,
+            image::imageops::FilterType::Triangle,
+        )
+    } else {
+        image
+    };
 
     let width = image.width();
     let height = image.height();

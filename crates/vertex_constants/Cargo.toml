@@ -1,5 +1,5 @@
 [package]
 name = "vertex_constants"
-version = "0.1.19-Alpha"
+version = "0.1.20-Alpha"
 edition = "2024"
 publish = false

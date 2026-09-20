@@ -4,4 +4,5 @@ use super::*;
 pub(crate) struct HomeActivityScanRequest {
     pub(crate) scanned_instance_count: usize,
     pub(crate) instances: Vec<HomeActivityScanInstance>,
+    pub(crate) synced_worlds: Vec<instances::SyncedWorld>,
 }

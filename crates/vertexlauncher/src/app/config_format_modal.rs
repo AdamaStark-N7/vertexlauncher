@@ -24,18 +24,8 @@ pub fn render(
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
             let text_color = ui.visuals().text_color();
-            let heading = LabelOptions {
-                font_size: 28.0,
-                line_height: 32.0,
-                weight: 700,
-                color: text_color,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body = LabelOptions {
-                color: text_color,
-                ..LabelOptions::default()
-            };
+            let heading = launcher_ui::ui::style::modal_title(ui);
+            let body = launcher_ui::ui::style::role(ui, config::TextRole::Body, true);
             let mut muted = body.clone();
             muted.color = ui.visuals().weak_text_color();
             let _ = text_ui.label(ui, "config_modal_heading", "Config format", &heading);

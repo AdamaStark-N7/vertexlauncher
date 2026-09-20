@@ -1,6 +1,6 @@
 use config::Config;
 use eframe::{self, egui, egui_wgpu::wgpu};
-use launcher_ui::window_effects;
+
 use std::fmt::Write as _;
 use std::sync::Arc;
 use vertex_3d::{
@@ -24,9 +24,7 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
     let startup_power_preference = startup_config.graphics_adapter_profile();
     let startup_power_preference =
         adapter_preference_for_profile(startup_power_preference).power_preference();
-    let blur_enabled =
-        startup_config.window_blur_enabled() && window_effects::platform_supports_blur();
-    let transparent_viewport = blur_enabled;
+    let transparent_viewport = startup_config.window_transparency().is_translucent();
     let startup_graphics = platform::startup_graphics_config(
         transparent_viewport,
         startup_config.graphics_api_preference(),
@@ -83,6 +81,9 @@ pub fn build(startup_config: &Config) -> eframe::NativeOptions {
 
         wgpu::DeviceDescriptor {
             label: Some("egui wgpu device"),
+            // BC texture compression keeps screenshot-viewer textures ~8x smaller on the GPU;
+            // requested only when the adapter offers it.
+            required_features: adapter.features() & wgpu::Features::TEXTURE_COMPRESSION_BC,
             required_limits: base_limits.using_resolution(adapter_limits),
             ..Default::default()
         }

@@ -23,7 +23,7 @@ use textui::{
     TextPathError, TextPathLayout, TextPathOptions, TextPointerButton, TextRenderScene, TextUi,
 };
 
-pub use button_options::ButtonOptions;
+pub use button_options::{ButtonOptions, ButtonTypography, set_button_typography};
 pub use code_block_options::CodeBlockOptions;
 pub use input_options::InputOptions;
 pub use label_options::LabelOptions;
@@ -75,8 +75,15 @@ impl TextTextureHandle {
 
 const GPU_SCENE_TEXTURE_CACHE_ID: &str = "textui_egui_gpu_scene_texture_cache";
 const GPU_SCENE_TEXTURE_CACHE_STALE_FRAMES: u64 = 600;
+/// Memory ceiling for the GPU textures made from text atlas pages.
+const GPU_SCENE_TEXTURE_CACHE_MAX_BYTES: usize = 160 * 1024 * 1024;
+/// When a cache goes over its ceiling it evicts down to this fraction of it, so the eviction pass
+/// (which frees many entries at once) is rare instead of running on every insert.
+const CACHE_EVICT_TARGET_PERCENT: usize = 80;
 const RETAINED_GPU_SCENE_CACHE_ID: &str = "textui_egui_retained_gpu_scene_cache";
 const RETAINED_GPU_SCENE_CACHE_STALE_FRAMES: u64 = 600;
+/// Memory ceiling for the atlas page pixels kept alive by retained scenes.
+const RETAINED_GPU_SCENE_CACHE_MAX_BYTES: usize = 160 * 1024 * 1024;
 const WIDTH_BIN_PX: f32 = 16.0;
 
 #[derive(Clone)]
@@ -88,6 +95,9 @@ struct CachedGpuSceneTexture {
 #[derive(Default)]
 struct GpuSceneTextureCacheState {
     entries: HashMap<u64, CachedGpuSceneTexture>,
+    /// Running total of the textures' sizes, kept up to date on insert and removal so no pass
+    /// over the cache is needed to know it.
+    bytes: usize,
     /// Frame on which `entries.retain` was last run. Ensures the O(N) eviction
     /// scan runs at most once per frame rather than once per text element.
     last_eviction_frame: u64,
@@ -106,6 +116,10 @@ struct CachedRetainedGpuScene {
 struct RetainedGpuSceneCacheState {
     entries: HashMap<Id, CachedRetainedGpuScene>,
     last_eviction_frame: u64,
+    /// Page snapshots shared by retained scenes: pointer -> (bytes, scenes using it). Their bytes
+    /// are counted once however many scenes share them.
+    pages: HashMap<usize, (usize, usize)>,
+    bytes: usize,
 }
 
 type RetainedGpuSceneCache = Arc<Mutex<RetainedGpuSceneCacheState>>;
@@ -178,7 +192,7 @@ fn retained_gpu_scene(
             .expect("textui_egui retained scene cache poisoned");
         if current_frame > cache_guard.last_eviction_frame {
             cache_guard.last_eviction_frame = current_frame;
-            cache_guard.entries.retain(|_, entry| {
+            cache_guard.retain_scenes(|entry| {
                 current_frame.saturating_sub(entry.last_used_frame)
                     <= RETAINED_GPU_SCENE_CACHE_STALE_FRAMES
             });
@@ -195,15 +209,138 @@ fn retained_gpu_scene(
     let mut cache_guard = cache
         .lock()
         .expect("textui_egui retained scene cache poisoned");
-    cache_guard.entries.insert(
+    cache_guard.insert_scene(
         cache_id,
         CachedRetainedGpuScene {
             fingerprint,
             scene: Arc::clone(&scene),
             last_used_frame: current_frame,
         },
+        current_frame,
     );
     Some(scene)
+}
+
+impl GpuSceneTextureCacheState {
+    fn retain_textures(&mut self, mut keep: impl FnMut(&CachedGpuSceneTexture) -> bool) {
+        let bytes = &mut self.bytes;
+        self.entries.retain(|_, entry| {
+            let keep = keep(entry);
+            if !keep {
+                *bytes = bytes.saturating_sub(entry.handle.byte_size());
+            }
+            keep
+        });
+    }
+
+    /// Called after an insert. Does nothing until the ceiling is crossed, then drops the least
+    /// recently used textures (never ones used this frame) down to a margin below it.
+    fn evict_textures_over_budget(&mut self, current_frame: u64) {
+        if self.bytes <= GPU_SCENE_TEXTURE_CACHE_MAX_BYTES {
+            return;
+        }
+        let target = GPU_SCENE_TEXTURE_CACHE_MAX_BYTES / 100 * CACHE_EVICT_TARGET_PERCENT;
+        let mut by_age: Vec<(u64, u64)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.last_used_frame < current_frame)
+            .map(|(key, entry)| (entry.last_used_frame, *key))
+            .collect();
+        by_age.sort_unstable();
+        for (_, key) in by_age {
+            if self.bytes <= target {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&key) {
+                self.bytes = self.bytes.saturating_sub(entry.handle.byte_size());
+            }
+        }
+    }
+}
+
+impl RetainedGpuSceneCacheState {
+    fn add_pages(&mut self, scene: &TextGpuScene) {
+        for page in &scene.atlas_pages {
+            let slot = self
+                .pages
+                .entry(page.rgba8.as_ptr() as usize)
+                .or_insert((page.rgba8.len(), 0));
+            if slot.1 == 0 {
+                self.bytes += slot.0;
+            }
+            slot.1 += 1;
+        }
+    }
+
+    fn remove_pages(&mut self, scene: &TextGpuScene) {
+        for page in &scene.atlas_pages {
+            let ptr = page.rgba8.as_ptr() as usize;
+            if let Some(slot) = self.pages.get_mut(&ptr) {
+                slot.1 = slot.1.saturating_sub(1);
+                if slot.1 == 0 {
+                    self.bytes = self.bytes.saturating_sub(slot.0);
+                    self.pages.remove(&ptr);
+                }
+            }
+        }
+    }
+
+    fn retain_scenes(&mut self, mut keep: impl FnMut(&CachedRetainedGpuScene) -> bool) {
+        let mut dropped = Vec::new();
+        self.entries.retain(|_, entry| {
+            let keep = keep(entry);
+            if !keep {
+                dropped.push(Arc::clone(&entry.scene));
+            }
+            keep
+        });
+        for scene in dropped {
+            self.remove_pages(&scene);
+        }
+    }
+
+    fn insert_scene(&mut self, id: Id, entry: CachedRetainedGpuScene, current_frame: u64) {
+        self.add_pages(&entry.scene);
+        if let Some(old) = self.entries.insert(id, entry) {
+            self.remove_pages(&old.scene);
+        }
+        self.evict_scenes_over_budget(current_frame);
+    }
+
+    /// Called after an insert; see [`GpuSceneTextureCacheState::evict_textures_over_budget`].
+    fn evict_scenes_over_budget(&mut self, current_frame: u64) {
+        if self.bytes <= RETAINED_GPU_SCENE_CACHE_MAX_BYTES {
+            return;
+        }
+        let target = RETAINED_GPU_SCENE_CACHE_MAX_BYTES / 100 * CACHE_EVICT_TARGET_PERCENT;
+        let mut by_age: Vec<(u64, Id)> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.last_used_frame < current_frame)
+            .map(|(id, entry)| (entry.last_used_frame, *id))
+            .collect();
+        by_age.sort_unstable_by_key(|(frame, _)| *frame);
+        for (_, id) in by_age {
+            if self.bytes <= target {
+                break;
+            }
+            if let Some(entry) = self.entries.remove(&id) {
+                self.remove_pages(&entry.scene);
+            }
+        }
+    }
+}
+
+/// Drops every cached text scene and page texture that was not used this frame. Call at the end
+/// of a frame after switching screens; text for the old screen's widgets is no longer needed.
+pub fn release_untouched(ctx: &Context) {
+    let frame = ctx.cumulative_frame_nr();
+    if let Ok(mut cache) = gpu_scene_texture_cache(ctx).lock() {
+        cache.retain_textures(|entry| entry.last_used_frame >= frame);
+    }
+    if let Ok(mut cache) = retained_gpu_scene_cache(ctx).lock() {
+        cache.retain_scenes(|entry| entry.last_used_frame >= frame);
+    }
 }
 
 fn hash_text_fundamentals(hasher: &mut DefaultHasher, fundamentals: &textui::TextFundamentals) {
@@ -222,6 +359,7 @@ fn hash_text_fundamentals(hasher: &mut DefaultHasher, fundamentals: &textui::Tex
     fundamentals.letter_spacing_floor.to_bits().hash(hasher);
     fundamentals.feature_settings.hash(hasher);
     fundamentals.variation_settings.hash(hasher);
+    fundamentals.font_family.hash(hasher);
 }
 
 fn hash_label_options(hasher: &mut DefaultHasher, options: &LabelOptions) {
@@ -365,7 +503,7 @@ fn texture_ids_for_gpu_scene(
     let mut cache_guard = cache.lock().expect("textui_egui texture cache poisoned");
     if current_frame > cache_guard.last_eviction_frame {
         cache_guard.last_eviction_frame = current_frame;
-        cache_guard.entries.retain(|_, entry| {
+        cache_guard.retain_textures(|entry| {
             current_frame.saturating_sub(entry.last_used_frame)
                 <= GPU_SCENE_TEXTURE_CACHE_STALE_FRAMES
         });
@@ -373,19 +511,26 @@ fn texture_ids_for_gpu_scene(
 
     for page in &scene.atlas_pages {
         let key = hash_gpu_scene_page(page, sampling);
-        let entry = cache_guard
-            .entries
-            .entry(key)
-            .or_insert_with(|| CachedGpuSceneTexture {
-                handle: ctx.load_texture(
-                    format!("textui_egui_gpu_scene_{key:016x}"),
-                    egui::ColorImage::from_rgba_premultiplied(page.size_px, &page.rgba8),
-                    texture_options_for_sampling(sampling),
-                ),
-                last_used_frame: current_frame,
-            });
-        entry.last_used_frame = current_frame;
-        texture_ids.insert(page.page_index, entry.handle.id());
+        if !cache_guard.entries.contains_key(&key) {
+            let handle = ctx.load_texture(
+                format!("textui_egui_gpu_scene_{key:016x}"),
+                egui::ColorImage::from_rgba_premultiplied(page.size_px, &page.rgba8),
+                texture_options_for_sampling(sampling),
+            );
+            cache_guard.bytes += handle.byte_size();
+            cache_guard.entries.insert(
+                key,
+                CachedGpuSceneTexture {
+                    handle,
+                    last_used_frame: current_frame,
+                },
+            );
+            cache_guard.evict_textures_over_budget(current_frame);
+        }
+        if let Some(entry) = cache_guard.entries.get_mut(&key) {
+            entry.last_used_frame = current_frame;
+            texture_ids.insert(page.page_index, entry.handle.id());
+        }
     }
 
     texture_ids
@@ -605,6 +750,8 @@ pub trait TextUiEguiExt {
         options: &LabelOptions,
     ) -> Response;
     fn measure_text_size(&mut self, ui: &Ui, text: &str, options: &LabelOptions) -> Vec2;
+    /// Like [`Self::measure_text_size`] for code that only has a [`Context`].
+    fn measure_text_size_ctx(&mut self, ctx: &Context, text: &str, options: &LabelOptions) -> Vec2;
     fn prepare_label_texture<H: Hash>(
         &mut self,
         ctx: &Context,
@@ -669,6 +816,26 @@ pub trait TextUiEguiExt {
         ui: &Ui,
         id_source: H,
         response: &Response,
+        text: &str,
+        options: &TooltipOptions,
+    );
+    /// Paints a single unwrapped line of styled spans with its top-left at `pos`, without
+    /// allocating layout space. Returns the painted size. Scenes are cached per `id_source`.
+    fn paint_rich_line<H: Hash>(
+        &mut self,
+        ui: &Ui,
+        painter: &Painter,
+        id_source: H,
+        pos: egui::Pos2,
+        spans: &[RichTextSpan],
+        options: &LabelOptions,
+    ) -> Vec2;
+    /// Draws a tooltip at `pointer` without needing a widget response.
+    fn tooltip_at<H: Hash>(
+        &mut self,
+        ctx: &Context,
+        id_source: H,
+        pointer: egui::Pos2,
         text: &str,
         options: &TooltipOptions,
     );
@@ -975,7 +1142,7 @@ fn selectable_button_impl(
     selected: bool,
     options: &ButtonOptions,
 ) -> Response {
-    let label_style = LabelOptions {
+    let mut label_style = LabelOptions {
         font_size: options.font_size,
         line_height: options.line_height,
         color: options.text_color,
@@ -987,6 +1154,14 @@ fn selectable_button_impl(
         fundamentals: Default::default(),
         ..LabelOptions::default()
     };
+    if let Some(typography) = button_options::button_typography(ui.ctx()) {
+        // Keep each button's size relative to the default so explicitly sized buttons stay proportional.
+        let relative = options.font_size / button_options::DEFAULT_BUTTON_FONT_SIZE;
+        label_style.font_size = typography.font_size * relative;
+        label_style.line_height = typography.line_height * relative;
+        label_style.weight = typography.weight;
+        label_style.fundamentals.font_family = typography.font_family;
+    }
     let scale = ui.ctx().pixels_per_point();
     let cache_id = ui.make_persistent_id((&id_source, "textui_button_retained_scene"));
     let fingerprint = hash_label_scene_request(text, &label_style, None, scale);
@@ -1061,14 +1236,36 @@ fn tooltip_impl(
     }
 
     let pointer = response.hover_pos().unwrap_or(response.rect.right_bottom());
-    let scale = ui.ctx().pixels_per_point();
+    tooltip_at_impl(
+        text_ui,
+        ui.ctx(),
+        ui.clip_rect().top(),
+        egui::Id::new(&id_source),
+        pointer,
+        text,
+        options,
+    );
+}
+
+/// Draws a textui tooltip at `pointer` from a bare [`Context`], for callers that queue
+/// tooltips and draw them once per frame.
+fn tooltip_at_impl(
+    text_ui: &mut TextUi,
+    ctx: &Context,
+    min_y: f32,
+    id_source: egui::Id,
+    pointer: egui::Pos2,
+    text: &str,
+    options: &TooltipOptions,
+) {
+    let scale = ctx.pixels_per_point();
     let width_points_opt = normalize_wrapped_width(
-        Some(320.0_f32.min(ui.ctx().input(|i| i.content_rect().width() * 0.35))),
+        Some(320.0_f32.min(ctx.input(|i| i.content_rect().width() * 0.35))),
         scale,
     );
-    let cache_id = ui.make_persistent_id((&id_source, "textui_tooltip_retained_scene"));
+    let cache_id = id_source.with("textui_tooltip_retained_scene");
     let fingerprint = hash_label_scene_request(text, &options.text, width_points_opt, scale);
-    let scene = retained_gpu_scene(ui.ctx(), cache_id, fingerprint, || {
+    let scene = retained_gpu_scene(ctx, cache_id, fingerprint, || {
         Some(text_ui.prepare_label_gpu_scene_at_scale(
             (&id_source, "tooltip"),
             text,
@@ -1081,16 +1278,12 @@ fn tooltip_impl(
     let raster_size = egui::vec2(scene.size_points[0], scene.size_points[1]);
     let size = raster_size + options.padding * 2.0;
     let mut rect = Rect::from_min_size(pointer + options.offset, size);
-    let min_y = ui.clip_rect().top();
     if rect.min.y < min_y {
         rect = rect.translate(egui::vec2(0.0, min_y - rect.min.y));
     }
     rect = snap_rect_to_pixel_grid(rect, scale);
-    let layer_id = egui::LayerId::new(
-        egui::Order::Tooltip,
-        ui.make_persistent_id(&id_source).with("tooltip_layer"),
-    );
-    let painter = ui.ctx().layer_painter(layer_id);
+    let layer_id = egui::LayerId::new(egui::Order::Tooltip, id_source.with("tooltip_layer"));
+    let painter = ctx.layer_painter(layer_id);
     painter.rect_filled(
         rect,
         CornerRadius::same(options.corner_radius),
@@ -1112,6 +1305,70 @@ fn tooltip_impl(
 }
 
 impl TextUiEguiExt for TextUi {
+    fn paint_rich_line<H: Hash>(
+        &mut self,
+        ui: &Ui,
+        painter: &Painter,
+        id_source: H,
+        pos: egui::Pos2,
+        spans: &[RichTextSpan],
+        options: &LabelOptions,
+    ) -> Vec2 {
+        let scale = ui.ctx().pixels_per_point();
+        let cache_id = ui.make_persistent_id((&id_source, "textui_rich_line_scene"));
+        let mut hasher = DefaultHasher::new();
+        "rich_line_scene".hash(&mut hasher);
+        for span in spans {
+            span.text.hash(&mut hasher);
+            span.style.color.hash(&mut hasher);
+            span.style.monospace.hash(&mut hasher);
+            span.style.italic.hash(&mut hasher);
+            span.style.weight.hash(&mut hasher);
+        }
+        hash_label_options(&mut hasher, options);
+        scale.to_bits().hash(&mut hasher);
+        let fingerprint = hasher.finish();
+        let text_options = options.to_text_label_options();
+        let scene = retained_gpu_scene(ui.ctx(), cache_id, fingerprint, || {
+            Some(self.prepare_rich_text_gpu_scene_at_scale(
+                &id_source,
+                spans,
+                &text_options,
+                None,
+                scale,
+            ))
+        })
+        .expect("synchronous textui rich line scene should always be available");
+        let size = egui::vec2(scene.size_points[0], scene.size_points[1]);
+        paint_gpu_scene_in_rect(
+            self,
+            painter,
+            Rect::from_min_size(pos, size),
+            &scene,
+            Color32::WHITE,
+        );
+        size
+    }
+
+    fn tooltip_at<H: Hash>(
+        &mut self,
+        ctx: &Context,
+        id_source: H,
+        pointer: egui::Pos2,
+        text: &str,
+        options: &TooltipOptions,
+    ) {
+        tooltip_at_impl(
+            self,
+            ctx,
+            ctx.content_rect().top(),
+            egui::Id::new(id_source),
+            pointer,
+            text,
+            options,
+        );
+    }
+
     fn label_async<H: Hash>(
         &mut self,
         ui: &mut Ui,
@@ -1150,6 +1407,15 @@ impl TextUiEguiExt for TextUi {
         options: &LabelOptions,
     ) -> Response {
         label_impl(self, ui, id_source, text, options, Sense::click(), false)
+    }
+
+    fn measure_text_size_ctx(&mut self, ctx: &Context, text: &str, options: &LabelOptions) -> Vec2 {
+        self.measure_text_size_at_scale(
+            ctx.pixels_per_point(),
+            text,
+            &options.to_text_label_options(),
+        )
+        .into()
     }
 
     fn measure_text_size(&mut self, ui: &Ui, text: &str, options: &LabelOptions) -> Vec2 {

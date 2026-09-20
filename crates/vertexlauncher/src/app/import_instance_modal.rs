@@ -1,3 +1,11 @@
+use logged_fs::copy as fs_copy_logged;
+use logged_fs::create_dir_all as fs_create_dir_all_logged;
+use logged_fs::file_open as fs_file_open_logged;
+use logged_fs::read_dir as fs_read_dir_logged;
+use logged_fs::read_to_string as fs_read_to_string_logged;
+use logged_fs::remove_dir_all as fs_remove_dir_all_logged;
+use logged_fs::rename as fs_rename_logged;
+use logged_fs::write as fs_write_logged;
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::io::Read;
@@ -37,86 +45,6 @@ const MODAL_GAP_LG: f32 = 10.0;
 const ACTION_BUTTON_MAX_WIDTH: f32 = 260.0;
 const MODRINTH_DOWNLOAD_MIN_SPACING: Duration = Duration::from_millis(250);
 const CURSEFORGE_DOWNLOAD_MIN_SPACING: Duration = Duration::from_millis(500);
-
-#[track_caller]
-fn fs_create_dir_all_logged(path: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display());
-    let result = fs::create_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_read_dir_logged(path: &Path) -> std::io::Result<fs::ReadDir> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_dir", path = %path.display());
-    let result = fs::read_dir(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_dir", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_read_to_string_logged(path: &Path) -> std::io::Result<String> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_copy_logged(source: &Path, destination: &Path) -> std::io::Result<u64> {
-    tracing::debug!(target: "vertexlauncher/io", op = "copy", from = %source.display(), to = %destination.display());
-    let result = fs::copy(source, destination);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "copy", from = %source.display(), to = %destination.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_write_logged(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "write", path = %path.display());
-    let result = fs::write(path, bytes);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "write", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_remove_dir_all_logged(path: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "remove_dir_all", path = %path.display());
-    let result = fs::remove_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_rename_logged(source: &Path, destination: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "rename", from = %source.display(), to = %destination.display());
-    let result = fs::rename(source, destination);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "rename", from = %source.display(), to = %destination.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_file_open_logged(path: &Path) -> std::io::Result<fs::File> {
-    tracing::debug!(target: "vertexlauncher/io", op = "file_open", path = %path.display());
-    let result = fs::File::open(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "file_open", path = %path.display(), error = %err);
-    }
-    result
-}
 
 mod inspection;
 mod package_import;

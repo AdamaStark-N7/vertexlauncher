@@ -143,11 +143,7 @@ pub fn render(
             ui.scope_builder(egui::UiBuilder::new().max_rect(drag_rect), |ui| {
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     ui.add_space(style::SPACE_LG);
-                    let section_style = LabelOptions {
-                        font_size: 18.0,
-                        line_height: 24.0,
-                        ..style::muted_single_line(ui)
-                    };
+                    let section_style = style::muted_single_line(ui);
                     let _ = text_ui.label(
                         ui,
                         ("topbar_screen", section_label),
@@ -431,7 +427,8 @@ fn render_profile_button(
         if let image_textures::ManagedTextureStatus::Ready(texture) =
             image_textures::request_texture(ui.ctx(), key, rounded, egui::TextureOptions::LINEAR)
         {
-            let icon = egui::Image::from_texture(&texture)
+            let icon = texture
+                .image()
                 .fit_to_exact_size(egui::vec2(button_size.max(1.0), button_size.max(1.0)));
             let _ = ui.put(rect, icon);
         }
@@ -571,7 +568,7 @@ fn render_active_user_terminal_button(
     compact: bool,
 ) -> egui::Response {
     let text_color = ui.visuals().text_color();
-    let themed_svg = apply_text_color(assets::TERMINAL_2_SVG, text_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(assets::TERMINAL_2_SVG, text_color);
     let uri = format!(
         "bytes://vertex-topbar/user-active-terminal-{:02x}{:02x}{:02x}.svg",
         text_color.r(),
@@ -615,7 +612,6 @@ fn render_active_user_terminal_button(
                 |ui| {
                     ui.set_clip_rect(ui.max_rect());
                     let label_style = LabelOptions {
-                        line_height: 20.0,
                         color: text_color,
                         ..style::stat_label(ui)
                     };
@@ -631,12 +627,6 @@ fn render_active_user_terminal_button(
     });
 
     response
-}
-
-fn apply_text_color(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
-    svg.into_bytes()
 }
 
 fn render_device_code_section(
@@ -671,15 +661,7 @@ fn render_device_code_section(
     );
 
     // Code row: build style then measure actual rendered size to drive layout
-    let base = LabelOptions::default();
-    let code_label_style = LabelOptions {
-        font_size: base.font_size * 1.25,
-        line_height: base.line_height * 1.25,
-        weight: 700,
-        color: ui.visuals().text_color(),
-        wrap: false,
-        ..base
-    };
+    let code_label_style = style::subtitle(ui);
     let code_text_size =
         text_ui.measure_text_size(ui, prompt.user_code.as_str(), &code_label_style);
     let code_row_height = code_text_size.y + style::SPACE_MD * 2.0;
@@ -714,7 +696,7 @@ fn render_device_code_section(
 
                     // Copy SVG icon button — square, right-rounded
                     let text_color = ui.visuals().text_color();
-                    let themed_svg = apply_text_color(assets::COPY_SVG, text_color);
+                    let themed_svg = crate::ui::svg_tint::tint_svg(assets::COPY_SVG, text_color);
                     let uri = format!(
                         "bytes://vertex-topbar/device-code-copy-{:02x}{:02x}{:02x}.svg",
                         text_color.r(),
@@ -1126,11 +1108,7 @@ fn render_profile_popup(
         ui.available_width().max(220.0)
     };
 
-    let heading_style = LabelOptions {
-        font_size: 18.0,
-        line_height: 22.0,
-        ..style::stat_label(ui)
-    };
+    let heading_style = style::stat_label(ui);
     let muted_style = style::muted_single_line(ui);
 
     let button_style = ButtonOptions {
@@ -1414,13 +1392,10 @@ fn render_pending_text_button(
         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
             ui.spinner();
             ui.add_space(crate::ui::style::SPACE_XS);
-            let mut label_style = LabelOptions {
+            let label_style = LabelOptions {
                 color: options.text_color,
-                wrap: false,
-                ..LabelOptions::default()
+                ..crate::ui::style::caption(ui)
             };
-            label_style.font_size = 14.0;
-            label_style.line_height = 18.0;
             let _ = text_ui.label(ui, label_id, label, &label_style);
         });
     });
