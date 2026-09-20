@@ -218,4 +218,59 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn game_versions_sort_by_release_time_not_by_id_tokens() {
+        use crate::installation_core::{MinecraftVersionEntry, MinecraftVersionType};
+        let entry = |id: &str, kind, time: &str| MinecraftVersionEntry {
+            id: id.to_owned(),
+            version_type: kind,
+            release_time: Some(time.to_owned()),
+        };
+        let mut versions = vec![
+            entry(
+                "26.3-snapshot-10",
+                MinecraftVersionType::Snapshot,
+                "2026-08-01T10:00:00+00:00",
+            ),
+            entry(
+                "26.3",
+                MinecraftVersionType::Release,
+                "2026-09-15T10:00:00+00:00",
+            ),
+            entry(
+                "26.3-pre1",
+                MinecraftVersionType::Snapshot,
+                "2026-09-01T10:00:00+00:00",
+            ),
+            entry(
+                "24w14a",
+                MinecraftVersionType::Snapshot,
+                "2024-04-03T10:00:00+00:00",
+            ),
+            entry(
+                "1.21.4",
+                MinecraftVersionType::Release,
+                "2024-12-03T10:00:00+00:00",
+            ),
+            entry(
+                "26.2",
+                MinecraftVersionType::Release,
+                "2026-06-01T10:00:00+00:00",
+            ),
+        ];
+        sort_game_versions_newest_first(&mut versions);
+        let ids: Vec<&str> = versions.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "26.3",
+                "26.3-pre1",
+                "26.3-snapshot-10",
+                "26.2",
+                "1.21.4",
+                "24w14a"
+            ]
+        );
+    }
 }

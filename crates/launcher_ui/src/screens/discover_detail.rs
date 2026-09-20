@@ -172,11 +172,14 @@ pub(super) fn render_discover_detail_content(
             );
         });
         if state.install_total_steps > 0 {
-            ui.add(
-                egui::ProgressBar::new(
-                    state.install_completed_steps as f32 / state.install_total_steps as f32,
-                )
-                .show_percentage(),
+            crate::ui::components::progress_bar::progress_bar(
+                ui,
+                text_ui,
+                "discover_detail_install_progress",
+                state.install_completed_steps as f32 / state.install_total_steps as f32,
+                false,
+                (None, None),
+                crate::ui::components::progress_bar::ProgressLabel::Percentage,
             );
         }
     }
@@ -242,8 +245,6 @@ pub(super) fn render_discover_detail_content(
                                                 ),
                                                 version.version_name.as_str(),
                                                 &LabelOptions {
-                                                    font_size: 18.0,
-                                                    line_height: 22.0,
                                                     wrap: true,
                                                     ..style::stat_label(ui)
                                                 },
@@ -435,7 +436,7 @@ fn build_install_request(
     };
     Some(DiscoverInstallRequest {
         instance_name: entry.name.clone(),
-        project_summary: non_empty(entry.summary.as_str()),
+        project_summary: instances::normalize_optional(entry.summary.as_str()),
         icon_url: entry.icon_url.clone(),
         version_name: version.version_name.clone(),
         source,
@@ -467,16 +468,13 @@ pub(super) fn request_detail_versions(state: &mut DiscoverState) {
         return;
     };
 
-    ensure_detail_versions_channel(state);
-    let Some(tx) = state.detail_version_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.detail_version_results.sender();
 
     state.detail_versions_in_flight = true;
     state.detail_version_request_serial = state.detail_version_request_serial.saturating_add(1);
     let request_serial = state.detail_version_request_serial;
     let loader_filter = state.loader_filter;
-    let game_version_filter = non_empty(state.game_version_filter.as_str());
+    let game_version_filter = instances::normalize_optional(state.game_version_filter.as_str());
     let _ = tokio_runtime::spawn_detached(async move {
         let versions: Result<Vec<DiscoverVersionEntry>, String> = match tokio::time::timeout(
             DETAIL_VERSIONS_FETCH_TIMEOUT,
@@ -513,69 +511,44 @@ pub(super) fn request_detail_versions(state: &mut DiscoverState) {
     });
 }
 
-fn ensure_detail_versions_channel(state: &mut DiscoverState) {
-    if state.detail_version_results_tx.is_some() && state.detail_version_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<DiscoverVersionsResult>();
-    state.detail_version_results_tx = Some(tx);
-    state.detail_version_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn poll_detail_versions(state: &mut DiscoverState) {
-    let Some(rx) = state.detail_version_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.detail_version_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/discover",
             request_serial = state.detail_version_request_serial,
-            "Discover detail-version receiver mutex was poisoned."
+            "Discover detail-version worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok(result) => {
-                if result.request_serial != state.detail_version_request_serial {
-                    tracing::debug!(
-                        target: "vertexlauncher/discover",
-                        request_serial = result.request_serial,
-                        active_request_serial = state.detail_version_request_serial,
-                        "Ignoring stale discover detail-version result."
-                    );
-                    continue;
-                }
-                state.detail_versions_in_flight = false;
-                match result.versions {
-                    Ok(versions) => {
-                        state.detail_versions = versions;
-                        state.detail_versions_error = None;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "vertexlauncher/discover",
-                            request_serial = result.request_serial,
-                            error = %error,
-                            "Discover detail-version fetch failed."
-                        );
-                        state.detail_versions.clear();
-                        state.detail_versions_error = Some(error);
-                    }
-                }
+        state.detail_versions_in_flight = false;
+        state.detail_versions.clear();
+        state.detail_versions_error =
+            Some("Version detail worker stopped unexpectedly.".to_owned());
+    }
+    for result in drained.items {
+        if result.request_serial != state.detail_version_request_serial {
+            tracing::debug!(
+                target: "vertexlauncher/discover",
+                request_serial = result.request_serial,
+                active_request_serial = state.detail_version_request_serial,
+                "Ignoring stale discover detail-version result."
+            );
+            continue;
+        }
+        state.detail_versions_in_flight = false;
+        match result.versions {
+            Ok(versions) => {
+                state.detail_versions = versions;
+                state.detail_versions_error = None;
             }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
+            Err(error) => {
+                tracing::warn!(
                     target: "vertexlauncher/discover",
-                    request_serial = state.detail_version_request_serial,
-                    "Discover detail-version worker disconnected unexpectedly."
+                    request_serial = result.request_serial,
+                    error = %error,
+                    "Discover detail-version fetch failed."
                 );
-                state.detail_versions_in_flight = false;
                 state.detail_versions.clear();
-                state.detail_versions_error =
-                    Some("Version detail worker stopped unexpectedly.".to_owned());
-                break;
+                state.detail_versions_error = Some(error);
             }
         }
     }
@@ -616,7 +589,9 @@ fn load_detail_versions(
                                 source: DiscoverSource::Modrinth,
                                 version_id: version.id,
                                 version_name: version.version_number,
-                                published_at: non_empty(version.date_published.as_str()),
+                                published_at: instances::normalize_optional(
+                                    version.date_published.as_str(),
+                                ),
                                 file_name: file.filename.clone(),
                                 file_url: Some(file.url.clone()),
                                 game_versions: version.game_versions,
@@ -646,7 +621,7 @@ fn load_detail_versions(
                             source: DiscoverSource::CurseForge,
                             version_id: file.id.to_string(),
                             version_name: file.display_name,
-                            published_at: non_empty(file.file_date.as_str()),
+                            published_at: instances::normalize_optional(file.file_date.as_str()),
                             file_name: file.file_name,
                             file_url: file.download_url,
                             game_versions: file.game_versions,

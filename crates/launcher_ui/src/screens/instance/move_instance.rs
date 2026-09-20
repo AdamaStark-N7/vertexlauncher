@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use crate::app::tokio_runtime;
@@ -29,19 +29,6 @@ fn collect_files_recursively(root: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-pub(super) fn ensure_move_instance_channels(state: &mut InstanceScreenState) {
-    if state.move_instance_progress_tx.is_none() || state.move_instance_progress_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.move_instance_progress_tx = Some(tx);
-        state.move_instance_progress_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-    if state.move_instance_results_tx.is_none() || state.move_instance_results_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.move_instance_results_tx = Some(tx);
-        state.move_instance_results_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-}
-
 pub(super) fn request_move_instance(
     state: &mut InstanceScreenState,
     source_root: PathBuf,
@@ -50,15 +37,8 @@ pub(super) fn request_move_instance(
     if state.move_instance_in_flight {
         return;
     }
-    ensure_move_instance_channels(state);
-    let Some(progress_tx) = state.move_instance_progress_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start move progress channel.".to_owned());
-        return;
-    };
-    let Some(results_tx) = state.move_instance_results_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start move result channel.".to_owned());
-        return;
-    };
+    let progress_tx = state.move_instance_progress.sender();
+    let results_tx = state.move_instance_results.sender();
 
     state.move_instance_in_flight = true;
     state.move_instance_latest_progress = None;
@@ -70,7 +50,7 @@ pub(super) fn request_move_instance(
 
     let _ = tokio_runtime::spawn_detached(async move {
         // Create the destination root directory
-        if let Err(err) = std::fs::create_dir_all(&dest_root) {
+        if let Err(err) = tokio::fs::create_dir_all(&dest_root).await {
             tracing::warn!(
                 target: "vertexlauncher/move_instance",
                 path = %dest_root.display(),
@@ -89,9 +69,24 @@ pub(super) fn request_move_instance(
             return;
         }
 
-        // Collect all files
-        let mut files: Vec<PathBuf> = Vec::new();
-        collect_files_recursively(&source_root, &mut files);
+        // Walk the tree and total its size on a blocking thread; both are pure filesystem work.
+        let scan_root = source_root.clone();
+        let Ok((files, total_bytes)) = tokio::task::spawn_blocking(move || {
+            let mut files: Vec<PathBuf> = Vec::new();
+            collect_files_recursively(&scan_root, &mut files);
+            let total_bytes: u64 = files
+                .iter()
+                .filter_map(|f| f.metadata().ok().map(|m| m.len()))
+                .sum();
+            (files, total_bytes)
+        })
+        .await
+        else {
+            let _ = results_tx.send(MoveInstanceResult::Failed {
+                reason: "Could not scan the instance folder.".to_owned(),
+            });
+            return;
+        };
 
         if files.is_empty() {
             if let Err(send_err) = results_tx.send(MoveInstanceResult::Complete {
@@ -106,10 +101,6 @@ pub(super) fn request_move_instance(
             return;
         }
 
-        let total_bytes: u64 = files
-            .iter()
-            .filter_map(|f| f.metadata().ok().map(|m| m.len()))
-            .sum();
         let total_files = files.len();
         let max_concurrent_copies = std::thread::available_parallelism()
             .map(|count| count.get().saturating_mul(2))
@@ -356,19 +347,8 @@ pub(super) fn request_move_instance(
 }
 
 pub(super) fn poll_move_instance_progress(state: &mut InstanceScreenState) {
-    let mut latest: Option<MoveInstanceProgress> = None;
-    if let Some(rx) = state.move_instance_progress_rx.as_ref() {
-        if let Ok(receiver) = rx.lock() {
-            loop {
-                match receiver.try_recv() {
-                    Ok(update) => latest = Some(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => break,
-                }
-            }
-        }
-    }
-    if let Some(progress) = latest {
+    // Only the newest progress update matters.
+    if let Some(progress) = state.move_instance_progress.drain().items.pop() {
         state.move_instance_latest_progress = Some(progress);
     }
 }
@@ -382,33 +362,14 @@ pub(super) fn poll_move_instance_results(
         let result = state.move_instance_pending_result.take();
         state.move_instance_in_flight = false;
         state.move_instance_progress_visible_until = None;
-        state.move_instance_progress_tx = None;
-        state.move_instance_progress_rx = None;
-        state.move_instance_results_tx = None;
-        state.move_instance_results_rx = None;
+        state.move_instance_progress.reset();
+        state.move_instance_results.reset();
         return result;
     }
 
-    let mut result: Option<MoveInstanceResult> = None;
-    let mut channel_disconnected = false;
-
-    if let Some(rx) = state.move_instance_results_rx.as_ref() {
-        if let Ok(receiver) = rx.lock() {
-            loop {
-                match receiver.try_recv() {
-                    Ok(r) => {
-                        result = Some(r);
-                        break;
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        channel_disconnected = true;
-                        break;
-                    }
-                }
-            }
-        }
-    }
+    let drained = state.move_instance_results.drain();
+    let mut channel_disconnected = drained.disconnected;
+    let result: Option<MoveInstanceResult> = drained.items.into_iter().next();
 
     if result.is_some() {
         if now < visible_until {
@@ -422,10 +383,8 @@ pub(super) fn poll_move_instance_results(
     }
 
     if channel_disconnected {
-        state.move_instance_progress_tx = None;
-        state.move_instance_progress_rx = None;
-        state.move_instance_results_tx = None;
-        state.move_instance_results_rx = None;
+        state.move_instance_progress.reset();
+        state.move_instance_results.reset();
         if state.move_instance_in_flight {
             // channel closed without a result — treat as unexpected failure
             state.move_instance_in_flight = false;

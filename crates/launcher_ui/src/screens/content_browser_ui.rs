@@ -40,7 +40,7 @@ pub(super) fn render_controls(
                 placeholder_text: Some(
                     "Search project names, summaries, and tags. Press Enter to search".to_owned(),
                 ),
-                ..InputOptions::default()
+                ..crate::ui::style::input_options(ui)
             },
         );
         let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
@@ -222,13 +222,21 @@ pub(super) fn render_controls(
                 false,
             )
         });
-        if identify_response.inner.clicked()
-            && let Some(selected_path) = rfd::FileDialog::new()
-                .set_title("Identify Content File")
-                .add_filter("Minecraft Content", &["jar", "zip"])
-                .add_filter("Mods", &["jar"])
-                .add_filter("Packs", &["zip"])
-                .pick_file()
+        let identify_slot = ("content_browser_identify_dialog", instance_id);
+        if identify_response.inner.clicked() {
+            crate::ui::file_dialog::open(
+                ui.ctx(),
+                identify_slot,
+                crate::ui::file_dialog::Pick::File,
+                crate::ui::file_dialog::Dialog::new()
+                    .title("Identify Content File")
+                    .filter("Minecraft Content", &["jar", "zip"])
+                    .filter("Mods", &["jar"])
+                    .filter("Packs", &["zip"]),
+            );
+        }
+        if let Some(selected_path) = crate::ui::file_dialog::take(ui.ctx(), identify_slot)
+            .and_then(|paths| paths.into_iter().next())
         {
             request_identify_file(state, selected_path);
         }
@@ -384,13 +392,31 @@ pub(super) fn render_results(
                 "Page",
                 &style::caption(ui),
             );
-            let mut page_value = state.current_page.max(1);
-            ui.add(
-                egui::DragValue::new(&mut page_value)
-                    .range(1..=10_000)
-                    .speed(0.1)
-                    .max_decimals(0),
-            );
+            // The field edits its own text and resets whenever the active page changes.
+            let page_input_id = ui.make_persistent_id(("content_browser_page_input", instance_id));
+            let current_page_text = state.current_page.max(1).to_string();
+            let (mut page_text, seen_page_text) = ui
+                .ctx()
+                .data(|data| data.get_temp::<(String, String)>(page_input_id))
+                .unwrap_or_else(|| (current_page_text.clone(), current_page_text.clone()));
+            if seen_page_text != current_page_text {
+                page_text = current_page_text.clone();
+            }
+            let mut page_input_options = style::input_options(ui);
+            page_input_options.desired_width = Some(72.0);
+            page_input_options.min_width = 72.0;
+            page_input_options.desired_rows = 1;
+            let _ =
+                text_ui.singleline_input(ui, page_input_id, &mut page_text, &page_input_options);
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(page_input_id, (page_text.clone(), current_page_text))
+            });
+            let page_value = page_text
+                .trim()
+                .parse()
+                .unwrap_or(state.current_page)
+                .max(1)
+                .min(10_000);
             if ui
                 .add_enabled_ui(!state.search_in_flight, |ui| {
                     text_ui.button(
@@ -533,11 +559,16 @@ fn render_result_tile(
                                     .download_progress_width
                                     .min(ui.available_width().max(64.0))
                                     .max(metrics.action_button_width * 2.5);
-                                let progress = ui.add_sized(
-                                    egui::vec2(progress_width, metrics.action_button_height),
-                                    egui::ProgressBar::new(0.0)
-                                        .animate(true)
-                                        .text("Downloading"),
+                                let progress = crate::ui::components::progress_bar::progress_bar(
+                                    ui,
+                                    text_ui,
+                                    (id_source, "download_progress"),
+                                    0.0,
+                                    true,
+                                    (Some(progress_width), Some(metrics.action_button_height)),
+                                    crate::ui::components::progress_bar::ProgressLabel::Text(
+                                        "Downloading",
+                                    ),
                                 );
                                 download_button_rect = progress.rect;
                             } else {
@@ -585,8 +616,6 @@ fn render_result_tile(
                                             (id_source, "name"),
                                             title_text,
                                             &LabelOptions {
-                                                font_size: 18.0,
-                                                line_height: 22.0,
                                                 ..style::stat_label(ui)
                                             },
                                         );
@@ -696,11 +725,8 @@ fn render_chip(
                 (id_source, "chip", label),
                 label,
                 &LabelOptions {
-                    font_size: 12.0,
-                    line_height: 16.0,
                     color: ui.visuals().text_color(),
-                    wrap: false,
-                    ..LabelOptions::default()
+                    ..style::caption(ui)
                 },
             );
         });
@@ -713,11 +739,8 @@ fn render_search_tag_chips(
 ) -> bool {
     let mut removed_index: Option<usize> = None;
     let tag_style = LabelOptions {
-        font_size: 14.0,
-        line_height: 18.0,
         color: ui.visuals().text_color(),
-        wrap: false,
-        ..style::body(ui)
+        ..style::caption(ui)
     };
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
@@ -725,7 +748,7 @@ fn render_search_tag_chips(
             let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
             let stroke = egui::Stroke::new(1.0, ui.visuals().selection.bg_fill.gamma_multiply(0.7));
             let text_color = ui.visuals().text_color();
-            let themed_svg = themed_svg_bytes(assets::X_SVG, text_color);
+            let themed_svg = crate::ui::svg_tint::tint_svg(assets::X_SVG, text_color);
             let uri = format!(
                 "bytes://content-browser/tag-remove/{index}-{:02x}{:02x}{:02x}.svg",
                 text_color.r(),
@@ -756,10 +779,13 @@ fn render_search_tag_chips(
                         )
                         .frame(false)
                         .min_size(egui::vec2(22.0, 22.0));
-                        if ui
-                            .add(icon_button)
-                            .on_hover_text(format!("Remove tag: {tag}"))
-                            .clicked()
+                        let icon_response = ui.add(icon_button);
+                        if crate::ui::style::hover_tip(
+                            ui,
+                            icon_response,
+                            format!("Remove tag: {tag}"),
+                        )
+                        .clicked()
                         {
                             removed_index = Some(index);
                         }
@@ -1133,8 +1159,6 @@ fn render_detail_versions_tab(
                                                 ),
                                                 version.version_name.as_str(),
                                                 &LabelOptions {
-                                                    font_size: 17.0,
-                                                    line_height: 22.0,
                                                     ..style::stat_label(ui)
                                                 },
                                             );
@@ -1326,7 +1350,7 @@ fn render_rounded_icon_button(
     enabled: bool,
 ) -> IconButtonOutcome {
     let text_color = ui.visuals().text_color();
-    let themed_svg = themed_svg_bytes(svg_bytes, text_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(svg_bytes, text_color);
     let uri = format!(
         "bytes://content-browser-rounded/{icon_id}-{:02x}{:02x}{:02x}.svg",
         text_color.r(),
@@ -1367,16 +1391,9 @@ fn render_rounded_icon_button(
     let _ = ui.put(icon_rect, image);
 
     IconButtonOutcome {
-        clicked: response.on_hover_text(tooltip).clicked(),
+        clicked: crate::ui::style::hover_tip(ui, response, tooltip).clicked(),
         rect,
     }
-}
-
-fn themed_svg_bytes(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    String::from_utf8_lossy(svg_bytes)
-        .replace("currentColor", color_hex.as_str())
-        .into_bytes()
 }
 
 fn version_row_action(

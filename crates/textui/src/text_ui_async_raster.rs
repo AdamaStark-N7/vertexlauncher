@@ -308,7 +308,13 @@ fn async_build_text_attrs_owned(req: &AsyncRasterRequest, style: &SpanStyle) -> 
 
     if style.monospace {
         attrs = attrs.family(Family::Monospace);
-    } else if let Some(family) = req.typography.ui_font_family.as_deref() {
+    } else if let Some(family) = req
+        .options
+        .fundamentals
+        .font_family
+        .as_deref()
+        .or(req.typography.ui_font_family.as_deref())
+    {
         attrs = attrs.family(Family::Name(family));
     }
     if style.italic {

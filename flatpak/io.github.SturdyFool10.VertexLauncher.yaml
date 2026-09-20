@@ -10,6 +10,18 @@ runtime-version: "24.08"
 sdk: org.freedesktop.Sdk
 command: vertexlauncher-flatpak
 separate-locales: false
+add-extensions:
+  org.freedesktop.Platform.GL:
+    directory: lib/GL
+    versions: "1.4;24.08;24.08-extra"
+    subdirectories: true
+    no-autodownload: true
+    autodelete: false
+    add-ld-path: lib:default/lib
+    merge-dirs: vulkan/icd.d;glvnd/egl_vendor.d;lib/dri;lib/OpenCL
+    download-if: active-gl-driver
+    enable-if: active-gl-driver
+    autoprune-unless: active-gl-driver
 finish-args:
   - --share=network
   - --share=ipc
@@ -18,6 +30,10 @@ finish-args:
   - --socket=pulseaudio
   - --device=all
   - --filesystem=host
+  - --filesystem=host-os:ro
+  - --filesystem=/opt/rocm:ro
+  - --filesystem=/opt/cuda:ro
+  - --filesystem=/run/udev:ro
   - --filesystem=xdg-run/gvfs
   - --filesystem=xdg-run/discord-ipc-0
   - --filesystem=xdg-run/discord-ipc-1
@@ -39,6 +55,16 @@ finish-args:
   - --talk-name=org.freedesktop.NetworkManager
   - --env=GDK_BACKEND=wayland,x11
   - --env=WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
+  - --env=OCL_ICD_VENDORS=
+  - --env=OPENCL_VENDOR_PATH=/app/lib/GL/lib/OpenCL/vendors
+  - --env=OCL_ICD_FILENAMES=/opt/rocm/lib/libamdocl64.so:libnvidia-opencl.so.1
+  - --env=ROCM_PATH=/opt/rocm
+  - --env=HIP_PATH=/opt/rocm
+  - --env=CUDA_PATH=/opt/cuda
+  - --env=CUDA_HOME=/opt/cuda
+  - --env=LD_LIBRARY_PATH=/app/lib:/app/lib/GL/default/lib:/app/lib/GL/lib:/opt/rocm/lib:/opt/rocm/lib64:/opt/rocm/llvm/lib:/opt/cuda/lib64:/run/host/usr/lib:/run/host/usr/lib64:/run/host/usr/lib/x86_64-linux-gnu:/run/host/usr/lib/aarch64-linux-gnu:/run/host/usr/local/cuda/lib64:/run/host/lib:/run/host/lib64
+cleanup-commands:
+  - mkdir -p /app/lib/GL
 modules:
   - name: vertexlauncher-bundle
     buildsystem: simple

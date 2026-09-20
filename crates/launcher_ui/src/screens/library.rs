@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::Path,
-    sync::{Arc, Mutex, mpsc},
+    sync::Arc,
     time::Duration,
 };
 
@@ -153,7 +153,10 @@ pub fn render(
             .map(|a| a.player_name.clone())
             .or_else(|| auth.display_name().map(str::to_owned)),
         player_uuid: auth.launch_auth.as_ref().map(|a| a.player_uuid.clone()),
-        access_token: auth.launch_auth.as_ref().and_then(|a| a.access_token.clone()),
+        access_token: auth
+            .launch_auth
+            .as_ref()
+            .and_then(|a| a.access_token.clone()),
         xuid: auth.launch_auth.as_ref().and_then(|a| a.xuid.clone()),
         user_type: auth.launch_auth.as_ref().map(|a| a.user_type.clone()),
     };
@@ -292,11 +295,7 @@ pub fn render(
                                 }
                             }
                             RuntimeAction::CopyCommandRequested => {
-                                copy_instance_launch_command(
-                                    ui.ctx(),
-                                    instance.id.as_str(),
-                                    auth,
-                                );
+                                copy_instance_launch_command(ui.ctx(), instance.id.as_str(), auth);
                             }
                             RuntimeAction::CopySteamOptionsRequested => {
                                 copy_instance_steam_launch_options(
@@ -335,8 +334,7 @@ pub fn render(
                                         "Sign in with an account that owns Minecraft to launch."
                                             .to_owned()
                                     } else if launch_disabled_for_token_refresh {
-                                        "Waiting for account token refresh to complete."
-                                            .to_owned()
+                                        "Waiting for account token refresh to complete.".to_owned()
                                     } else {
                                         "Launch is currently unavailable.".to_owned()
                                     },
@@ -508,7 +506,7 @@ fn render_instance_tile(
                     } else {
                         "Stop the running instance before deleting its folder."
                     };
-                    let _ = delete_response.on_hover_text(reason);
+                    let _ = crate::ui::style::hover_tip(ui, delete_response, reason);
                 }
 
                 let muted_style = style::muted(ui);
@@ -696,7 +694,7 @@ fn render_runtime_action_button(
                 stop_icon_color.g(),
                 stop_icon_color.b()
             ),
-            apply_color_to_svg(assets::STOP_SVG, stop_icon_color),
+            crate::ui::svg_tint::tint_svg(assets::STOP_SVG, stop_icon_color),
         )
         .fit_to_exact_size(egui::vec2(icon_size, icon_size));
         let _ = ui.put(stop_icon_rect, stop_icon);
@@ -720,7 +718,7 @@ fn render_runtime_action_button(
                 text_color.g(),
                 text_color.b()
             ),
-            apply_color_to_svg(assets::PLAY_SVG, text_color),
+            crate::ui::svg_tint::tint_svg(assets::PLAY_SVG, text_color),
         )
         .fit_to_exact_size(egui::vec2(icon_size, icon_size));
         let _ = ui.put(icon_rect, play_icon);
@@ -790,10 +788,9 @@ fn render_delete_instance_button(
         );
     }
     let label_style = LabelOptions {
-        font_size: 15.0,
-        line_height: 20.0,
         color: text_color,
-        ..style::body_strong(ui)
+        wrap: false,
+        ..style::stat_label(ui)
     };
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
         ui.set_clip_rect(rect.intersect(ui.clip_rect()));
@@ -832,7 +829,7 @@ fn render_running_user_avatar(
                 TextureOptions::LINEAR,
             )
         {
-            let image = egui::Image::from_texture(&texture).fit_to_exact_size(rect.size());
+            let image = texture.image().fit_to_exact_size(rect.size());
             let _ = ui.put(rect, image);
         }
         return;
@@ -840,7 +837,7 @@ fn render_running_user_avatar(
 
     let fallback = egui::Image::from_bytes(
         format!("bytes://library/runtime-avatar-fallback/{instance_id}.svg"),
-        apply_color_to_svg(assets::USER_SVG, ui.visuals().text_color()),
+        crate::ui::svg_tint::tint_svg(assets::USER_SVG, ui.visuals().text_color()),
     )
     .fit_to_exact_size(rect.size());
     let _ = ui.put(rect, fallback);
@@ -1004,12 +1001,6 @@ fn modal_default_focus_requested(ctx: &egui::Context, id_source: impl Hash) -> b
     })
 }
 
-fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
-    svg.into_bytes()
-}
-
 fn copy_instance_launch_command(
     ctx: &egui::Context,
     instance_id: &str,
@@ -1062,15 +1053,6 @@ fn copy_instance_steam_launch_options(
     );
 }
 
-fn ensure_thumbnail_channel(state: &mut LibraryState) {
-    if state.thumbnail_results_tx.is_some() && state.thumbnail_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, Option<Arc<[u8]>>)>();
-    state.thumbnail_results_tx = Some(tx);
-    state.thumbnail_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn thumbnail_cache_key(instance_id: &str, path: &Path) -> String {
     format!("{instance_id}\n{}", path.display())
 }
@@ -1091,10 +1073,7 @@ fn request_instance_thumbnail(state: &mut LibraryState, instance_id: &str, path:
         return;
     }
 
-    ensure_thumbnail_channel(state);
-    let Some(tx) = state.thumbnail_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.thumbnail_results.sender();
     state.thumbnail_in_flight.insert(key.clone());
     let path = path.to_path_buf();
     tokio_runtime::spawn_detached(async move {
@@ -1112,29 +1091,11 @@ fn request_instance_thumbnail(state: &mut LibraryState, instance_id: &str, path:
 }
 
 fn poll_thumbnail_results(ctx: &egui::Context, state: &mut LibraryState) {
-    let Some(rx) = state.thumbnail_results_rx.as_ref() else {
-        return;
-    };
+    let drained = state.thumbnail_results.drain();
+    let updates = drained.items;
 
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    match rx.lock() {
-        Ok(receiver) => loop {
-            match receiver.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        },
-        Err(_) => should_reset_channel = true,
-    }
-
-    if should_reset_channel {
-        state.thumbnail_results_tx = None;
-        state.thumbnail_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/worker", "thumbnail_results worker channel stopped unexpectedly.");
         state.thumbnail_in_flight.clear();
     }
 
@@ -1245,8 +1206,7 @@ fn render_instance_thumbnail(
                         {
                             ui.put(
                                 image_rect,
-                                egui::Image::from_texture(&texture)
-                                    .fit_to_exact_size(centered_thumbnail_size),
+                                texture.image().fit_to_exact_size(centered_thumbnail_size),
                             );
                         }
                         return;
@@ -1263,7 +1223,7 @@ fn render_instance_thumbnail(
                 "bytes://library/instance-thumbnail-default/{}.svg",
                 instance.id
             ),
-            apply_color_to_svg(assets::LIBRARY_SVG, ui.visuals().text_color()),
+            crate::ui::svg_tint::tint_svg(assets::LIBRARY_SVG, ui.visuals().text_color()),
         )
         .fit_to_exact_size(placeholder_size);
         let (rect, _) = ui.allocate_exact_size(thumbnail_size, egui::Sense::hover());

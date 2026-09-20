@@ -122,7 +122,7 @@ async fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
         max_download_bps: config.parsed_download_speed_limit_bps(),
     };
     let java_path = select_java_path(&config, instance.game_version.as_str()).await?;
-    let modloader_version = normalize_optional(instance.modloader_version.as_str());
+    let modloader_version = instances::normalize_optional(instance.modloader_version.as_str());
     let setup = ensure_game_files_async(
         instance_root.clone(),
         instance.game_version.clone(),
@@ -134,12 +134,8 @@ async fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
     )
     .await
     .map_err(|err| err.to_string())?;
-    let (linux_set_opengl_driver, linux_use_zink_driver) =
-        instances::effective_linux_graphics_settings(
-            &instance,
-            config.linux_set_opengl_driver(),
-            config.linux_use_zink_driver(),
-        );
+    let launch_settings =
+        launcher_ui::launch_settings::InstanceLaunchSettings::resolve(&config, &instance);
     let launch_request = LaunchRequest {
         instance_root: instance_root.clone(),
         game_version: instance.game_version.clone(),
@@ -147,15 +143,9 @@ async fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
         modloader_version,
         account_key: Some(account.minecraft_profile.id.clone()),
         java_executable: Some(java_path),
-        max_memory_mib: instance
-            .max_memory_mib
-            .unwrap_or(config.default_instance_max_memory_mib()),
-        extra_jvm_args: instance
-            .cli_args
-            .as_deref()
-            .and_then(normalize_optional)
-            .or_else(|| normalize_optional(config.default_instance_cli_args())),
-        extra_env_vars: instance.env_vars.as_deref().and_then(normalize_optional),
+        max_memory_mib: launch_settings.max_memory_mib,
+        extra_jvm_args: launch_settings.extra_jvm_args,
+        extra_env_vars: launch_settings.extra_env_vars,
         player_name: Some(account.minecraft_profile.name.clone()),
         player_uuid: Some(account.minecraft_profile.id.clone()),
         auth_access_token: account.minecraft_access_token.clone(),
@@ -163,9 +153,13 @@ async fn run_quick_launch(spec: QuickLaunchSpec) -> Result<(), String> {
         auth_user_type: account.user_type.clone(),
         quick_play_singleplayer,
         quick_play_multiplayer,
-        linux_set_opengl_driver,
-        linux_use_zink_driver,
+        linux_set_opengl_driver: launch_settings.linux_set_opengl_driver,
+        linux_use_zink_driver: launch_settings.linux_use_zink_driver,
     };
+    let _ = launcher_ui::sync_runner::run_blocking(
+        &store,
+        &launcher_ui::sync_runner::SyncRunConfig::from_config(&config),
+    );
     let launch = launch_instance(&launch_request).map_err(|err| err.to_string())?;
     let _ = record_instance_launch_usage(&mut store, instance.id.as_str());
     save_store(&store).map_err(|err| format!("failed to save instance usage: {err}"))?;
@@ -499,17 +493,8 @@ fn startup_config() -> Config {
     }
 }
 
-fn normalize_optional(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
 async fn select_java_path(config: &Config, game_version: &str) -> Result<String, String> {
-    let runtime = recommended_java_runtime_for_game(game_version);
+    let runtime = JavaRuntimeVersion::recommended_for_game(game_version);
     let configured = runtime.and_then(|runtime| config.java_runtime_path_ref(runtime));
     if let Some(path) = configured {
         let normalized = path.as_os_str().to_string_lossy().trim().to_owned();
@@ -524,75 +509,6 @@ async fn select_java_path(config: &Config, game_version: &str) -> Result<String,
             .map_err(|err| format!("failed to auto-install OpenJDK {}: {err}", runtime.major()));
     }
     Ok("java".to_owned())
-}
-
-fn recommended_java_runtime_for_game(game_version: &str) -> Option<JavaRuntimeVersion> {
-    let parsed = parse_java_version_key(game_version)?;
-    let major = parsed.major;
-    let minor = parsed.minor;
-    let patch = parsed.patch;
-
-    if major != 1 {
-        // New versioning scheme (e.g. 26.x): Java version is major - 1
-        return Some(JavaRuntimeVersion::Java25);
-    }
-    if minor <= 16 {
-        return Some(JavaRuntimeVersion::Java8);
-    }
-    if minor == 17 {
-        return Some(JavaRuntimeVersion::Java16);
-    }
-    if minor > 20 || (minor == 20 && patch >= 5) {
-        return Some(JavaRuntimeVersion::Java21);
-    }
-    Some(JavaRuntimeVersion::Java17)
-}
-
-#[derive(Clone, Copy)]
-struct JavaVersionKey {
-    major: u32,
-    minor: u32,
-    patch: u32,
-}
-
-fn parse_java_version_key(game_version: &str) -> Option<JavaVersionKey> {
-    let trimmed = game_version.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((year, week)) = trimmed.split_once('w') {
-        let major = parse_ascii_u32_prefix(year)?;
-        if major >= 26 && parse_ascii_u32_prefix(week).is_some() {
-            return Some(JavaVersionKey {
-                major,
-                minor: 0,
-                patch: 0,
-            });
-        }
-    }
-
-    let mut parts = trimmed.split(['.', '-']);
-    let major = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let minor = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let patch = parts.next().and_then(parse_ascii_u32_prefix).unwrap_or(0);
-    Some(JavaVersionKey {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_ascii_u32_prefix(value: &str) -> Option<u32> {
-    let digits_len = value
-        .as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits_len == 0 {
-        return None;
-    }
-    value.get(..digits_len)?.parse().ok()
 }
 
 fn microsoft_client_id() -> Result<String, String> {

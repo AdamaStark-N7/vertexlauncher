@@ -1,15 +1,6 @@
 use super::content_updates::update_all_installed_content;
 use super::*;
 
-fn ensure_content_apply_channel(state: &mut InstanceScreenState) {
-    if state.content_apply_results_tx.is_some() && state.content_apply_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<ContentApplyResult>();
-    state.content_apply_results_tx = Some(tx);
-    state.content_apply_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn request_content_update(
     state: &mut InstanceScreenState,
     instance_root: &Path,
@@ -26,10 +17,7 @@ pub(super) fn request_content_update(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let lookup_key = lookup_key.to_owned();
     let version_id = version_id.to_owned();
@@ -195,7 +183,7 @@ pub(super) fn render_joined_content_browser_controls(
                         ui.visuals().weak_text_color()
                     },
                     wrap: false,
-                    ..LabelOptions::default()
+                    ..crate::ui::style::body(ui)
                 };
                 let _ = text_ui.label(
                     ui,
@@ -221,7 +209,7 @@ pub(super) fn render_joined_content_browser_controls(
         egui::StrokeKind::Inside,
     );
     let icon_color = ui.visuals().text_color();
-    let themed_svg = apply_color_to_svg(assets::PLUS_SVG, icon_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(assets::PLUS_SVG, icon_color);
     let uri = format!(
         "bytes://instance/content-plus/{instance_id}-{:02x}{:02x}{:02x}.svg",
         icon_color.r(),
@@ -258,10 +246,7 @@ pub(super) fn request_vtmpatch_apply(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let instance_root = instance_root.to_path_buf();
     let instance_name = state.name_input.clone();
@@ -349,10 +334,7 @@ pub(super) fn request_local_content_import(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let instance_root = instance_root.to_path_buf();
     let instance_name = state.name_input.clone();
@@ -502,10 +484,7 @@ pub(super) fn request_content_delete(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let lookup_key = lookup_key.to_owned();
     let path = path.to_path_buf();
@@ -580,10 +559,7 @@ pub(super) fn request_content_toggle(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let lookup_key = lookup_key.to_owned();
     let path = path.to_path_buf();
@@ -651,10 +627,7 @@ pub(super) fn request_bulk_content_update(
         return;
     }
 
-    ensure_content_apply_channel(state);
-    let Some(tx) = state.content_apply_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_apply_results.sender();
 
     let instance_name = state.name_input.clone();
     let instance_root = instance_root.to_path_buf();
@@ -741,37 +714,11 @@ pub(super) fn request_bulk_content_update(
 }
 
 pub(super) fn poll_content_apply_results(state: &mut InstanceScreenState, instance_root: &Path) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.content_apply_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_content",
-                            "Content-apply worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_content",
-                    "Content-apply receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.content_apply_results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.content_apply_results_tx = None;
-        state.content_apply_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_content", "content_apply_results worker channel stopped unexpectedly.");
         state.content_apply_in_flight = false;
         install_activity::clear_instance(state.name_input.as_str());
         state.status_message = Some("Content apply worker stopped unexpectedly.".to_owned());

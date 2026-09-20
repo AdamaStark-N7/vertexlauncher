@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::Arc,
 };
 
 use config::{Config, JavaRuntimeVersion};
@@ -11,9 +11,10 @@ use installation::{
 };
 use instances::{
     InstanceRecord, InstanceStore, delete_instance_root_path, instance_root_path,
-    record_instance_launch_usage, remove_instance_record,
+    normalize_optional, record_instance_launch_usage, remove_instance_record,
 };
 
+use crate::launch_settings::InstanceLaunchSettings;
 use crate::{app::tokio_runtime, console, install_activity, notification};
 
 use super::LIBRARY_RUNTIME_LAUNCH_TASK_KIND;
@@ -31,8 +32,7 @@ use self::runtime_launch_result::RuntimeLaunchResult;
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct LibraryRuntimeState {
-    results_tx: Option<mpsc::Sender<RuntimeLaunchResult>>,
-    results_rx: Option<Arc<Mutex<mpsc::Receiver<RuntimeLaunchResult>>>>,
+    results: launcher_runtime::WorkerChannel<RuntimeLaunchResult>,
     pub(super) pending_launches: HashSet<String>,
     pending_launch_contexts: HashMap<String, PendingLaunchContext>,
     pub(super) status_by_instance: HashMap<String, String>,
@@ -40,9 +40,7 @@ pub(super) struct LibraryRuntimeState {
     pub(super) delete_target_instance_id: Option<String>,
     pub(super) delete_error: Option<String>,
     pub(super) delete_in_flight: bool,
-    pub(super) delete_results_tx: Option<mpsc::Sender<Result<InstanceRecord, String>>>,
-    pub(super) delete_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<Result<InstanceRecord, String>>>>>,
+    pub(super) delete_results: launcher_runtime::WorkerChannel<Result<InstanceRecord, String>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,15 +51,6 @@ pub(super) struct LibraryLaunchIdentity {
     pub(super) access_token: Option<String>,
     pub(super) xuid: Option<String>,
     pub(super) user_type: Option<String>,
-}
-
-fn ensure_result_channel(state: &mut LibraryRuntimeState) {
-    if state.results_tx.is_some() && state.results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<RuntimeLaunchResult>();
-    state.results_tx = Some(tx);
-    state.results_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
 pub(super) fn request_runtime_launch(
@@ -91,10 +80,7 @@ pub(super) fn request_runtime_launch(
         return false;
     }
 
-    ensure_result_channel(state);
-    let Some(tx) = state.results_tx.as_ref().cloned() else {
-        return false;
-    };
+    let tx = state.results.sender();
 
     let instance_id = instance.id.clone();
     let instance_name = instance.name.clone();
@@ -110,8 +96,12 @@ pub(super) fn request_runtime_launch(
         .as_deref()
         .map(|value| format!(" {value}"))
         .unwrap_or_default();
-    let required_java_major = effective_required_java_major(config, game_version.as_str());
-    let java_executable = choose_java_executable(config, instance, required_java_major);
+    let required_java_major = config.effective_required_java_major(game_version.as_str());
+    let java_executable = config.choose_java_executable(
+        instance.java_override_enabled,
+        instance.java_override_runtime_major,
+        required_java_major,
+    );
     let java_launch_mode = if let Some(path) = java_executable
         .as_deref()
         .map(str::trim)
@@ -125,29 +115,18 @@ pub(super) fn request_runtime_launch(
     };
     let download_max_concurrent = config.download_max_concurrent().max(1);
     let download_speed_limit_bps = config.parsed_download_speed_limit_bps();
-    let default_instance_max_memory_mib = config.default_instance_max_memory_mib();
-    let default_instance_cli_args = normalize_optional(config.default_instance_cli_args());
-    let global_linux_set_opengl_driver = config.linux_set_opengl_driver();
-    let global_linux_use_zink_driver = config.linux_use_zink_driver();
+    let sync_run = crate::sync_runner::SyncRunConfig::from_config(config);
     let download_policy = DownloadPolicy {
         max_concurrent_downloads: download_max_concurrent,
         max_download_bps: download_speed_limit_bps,
     };
-    let max_memory_mib = instance
-        .max_memory_mib
-        .unwrap_or(default_instance_max_memory_mib);
-    let extra_jvm_args = instance
-        .cli_args
-        .as_deref()
-        .and_then(normalize_optional)
-        .or(default_instance_cli_args);
-    let extra_env_vars = instance.env_vars.as_deref().and_then(normalize_optional);
-    let (linux_set_opengl_driver, linux_use_zink_driver) =
-        instances::effective_linux_graphics_settings(
-            instance,
-            global_linux_set_opengl_driver,
-            global_linux_use_zink_driver,
-        );
+    let InstanceLaunchSettings {
+        max_memory_mib,
+        extra_jvm_args,
+        extra_env_vars,
+        linux_set_opengl_driver,
+        linux_use_zink_driver,
+    } = InstanceLaunchSettings::resolve(config, instance);
     let instance_root_display = display_user_path(instance_root.as_path());
     let tab_user_key = player_uuid
         .as_deref()
@@ -301,6 +280,11 @@ pub(super) fn request_runtime_launch(
                 );
                 let downloaded_files = setup.downloaded_files;
                 let resolved_modloader_version = setup.resolved_modloader_version;
+                // Pull servers, history and hotbars into this instance before the game reads them.
+                let _ = tokio_runtime::spawn_blocking(move || {
+                    crate::sync_runner::run_from_saved_store_blocking(&sync_run)
+                })
+                .await;
                 let launch_request = LaunchRequest {
                     instance_root: instance_root.clone(),
                     game_version: game_version.clone(),
@@ -380,37 +364,11 @@ pub(super) fn poll_runtime_actions(
     config: &mut Config,
     instances: &mut InstanceStore,
 ) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/library",
-                            pending = state.pending_launch_contexts.len(),
-                            "Library runtime worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/library",
-                    pending = state.pending_launch_contexts.len(),
-                    "Library runtime receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/library", "results worker channel stopped unexpectedly.");
         for context in state.pending_launch_contexts.values() {
             console::set_instance_tab_loading(
                 context.instance_root_display.as_str(),
@@ -419,8 +377,6 @@ pub(super) fn poll_runtime_actions(
             );
         }
         state.pending_launch_contexts.clear();
-        state.results_tx = None;
-        state.results_rx = None;
         notification::error!(
             "library/runtime",
             "Launch worker stopped unexpectedly before returning a result."
@@ -443,7 +399,7 @@ pub(super) fn poll_runtime_actions(
             Ok(outcome) => {
                 let _ = record_instance_launch_usage(instances, update.instance_id.as_str());
                 if let Some((runtime_major, path)) = outcome.configured_java
-                    && let Some(runtime) = java_runtime_from_major(runtime_major)
+                    && let Some(runtime) = JavaRuntimeVersion::from_major(runtime_major)
                 {
                     config.set_java_runtime_path_ref(runtime, Some(Path::new(path.as_str())));
                 }
@@ -505,143 +461,6 @@ pub(super) fn poll_runtime_actions(
     }
 }
 
-fn normalize_optional(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
-fn choose_java_executable(
-    config: &Config,
-    instance: &InstanceRecord,
-    required_java_major: Option<u8>,
-) -> Option<String> {
-    if instance.java_override_enabled
-        && let Some(override_major) = instance.java_override_runtime_major
-        && let Some(runtime) = java_runtime_from_major(override_major)
-        && let Some(path) = config.java_runtime_path_ref(runtime)
-    {
-        let trimmed = path.as_os_str().to_string_lossy().trim().to_owned();
-        if !trimmed.is_empty() && path.exists() {
-            return Some(trimmed);
-        }
-    }
-
-    if let Some(runtime_major) = required_java_major
-        && let Some(runtime) = java_runtime_from_major(runtime_major)
-        && let Some(path) = config.java_runtime_path_ref(runtime)
-    {
-        let trimmed = path.as_os_str().to_string_lossy().trim().to_owned();
-        if !trimmed.is_empty() && path.exists() {
-            return Some(trimmed);
-        }
-    }
-    None
-}
-
-fn required_java_major(game_version: &str) -> Option<u8> {
-    let parsed = parse_java_version_key(game_version)?;
-    let major = parsed.major;
-    let minor = parsed.minor;
-    let patch = parsed.patch;
-
-    if major != 1 {
-        return major.checked_sub(1).and_then(|v| u8::try_from(v).ok());
-    }
-    if minor <= 16 {
-        return Some(8);
-    }
-    if minor == 17 {
-        return Some(16);
-    }
-    if minor >= 21 {
-        return u8::try_from(minor).ok();
-    }
-    if minor > 20 || (minor == 20 && patch >= 5) {
-        return Some(21);
-    }
-    Some(17)
-}
-
-#[derive(Clone, Copy)]
-struct JavaVersionKey {
-    major: u32,
-    minor: u32,
-    patch: u32,
-}
-
-fn parse_java_version_key(game_version: &str) -> Option<JavaVersionKey> {
-    let trimmed = game_version.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((year, week)) = trimmed.split_once('w') {
-        let major = parse_ascii_u32_prefix(year)?;
-        if major >= 26 && parse_ascii_u32_prefix(week).is_some() {
-            return Some(JavaVersionKey {
-                major,
-                minor: 0,
-                patch: 0,
-            });
-        }
-    }
-
-    let mut parts = trimmed.split(['.', '-']);
-    let major = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let minor = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let patch = parts.next().and_then(parse_ascii_u32_prefix).unwrap_or(0);
-    Some(JavaVersionKey {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_ascii_u32_prefix(value: &str) -> Option<u32> {
-    let digits_len = value
-        .as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits_len == 0 {
-        return None;
-    }
-    value.get(..digits_len)?.parse().ok()
-}
-
-fn effective_required_java_major(config: &Config, game_version: &str) -> Option<u8> {
-    let required = required_java_major(game_version)?;
-    if config.force_java_21_minimum() && required < 21 {
-        Some(21)
-    } else {
-        Some(required)
-    }
-}
-
-fn java_runtime_from_major(major: u8) -> Option<JavaRuntimeVersion> {
-    match major {
-        8 => Some(JavaRuntimeVersion::Java8),
-        16 => Some(JavaRuntimeVersion::Java16),
-        17 => Some(JavaRuntimeVersion::Java17),
-        21 => Some(JavaRuntimeVersion::Java21),
-        25 => Some(JavaRuntimeVersion::Java25),
-        _ => None,
-    }
-}
-
-fn ensure_delete_channel(state: &mut LibraryRuntimeState) {
-    if state.delete_results_tx.is_some() && state.delete_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<InstanceRecord, String>>();
-    state.delete_results_tx = Some(tx);
-    state.delete_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn request_instance_delete(
     state: &mut LibraryRuntimeState,
     instance: InstanceRecord,
@@ -651,10 +470,7 @@ pub(super) fn request_instance_delete(
         return;
     }
 
-    ensure_delete_channel(state);
-    let Some(tx) = state.delete_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.delete_results.sender();
 
     state.delete_in_flight = true;
     state.delete_error = None;
@@ -678,41 +494,11 @@ pub(super) fn poll_delete_instance_results(
     state: &mut LibraryRuntimeState,
     instances: &mut InstanceStore,
 ) {
-    let Some(rx) = state.delete_results_rx.as_ref() else {
-        return;
-    };
+    let drained = state.delete_results.drain();
+    let updates = drained.items;
 
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    match rx.lock() {
-        Ok(receiver) => loop {
-            match receiver.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/library",
-                        target = ?state.delete_target_instance_id,
-                        "Instance-delete worker disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        },
-        Err(_) => {
-            tracing::error!(
-                target: "vertexlauncher/library",
-                target = ?state.delete_target_instance_id,
-                "Instance-delete receiver mutex was poisoned."
-            );
-            should_reset_channel = true;
-        }
-    }
-
-    if should_reset_channel {
-        state.delete_results_tx = None;
-        state.delete_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/library", "delete_results worker channel stopped unexpectedly.");
         state.delete_in_flight = false;
         state.delete_error = Some("Delete worker stopped unexpectedly.".to_owned());
     }

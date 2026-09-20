@@ -149,7 +149,8 @@ fn render_instance_screenshot_tile(
             INSTANCE_SCREENSHOT_TILE_TEXTURE_MAX_EDGE,
         ) {
             image_textures::ManagedTextureStatus::Ready(texture) => {
-                egui::Image::from_texture(&texture)
+                texture
+                    .image()
                     .fit_to_exact_size(rect.size())
                     .corner_radius(egui::CornerRadius::same(14))
                     .paint_at(ui, rect);
@@ -256,13 +257,17 @@ fn render_instance_screenshot_tile(
         });
     });
 
-    image_response = image_response.on_hover_text(format!(
-        "{}\n{}x{}\n{}",
-        screenshot.file_name,
-        screenshot.width,
-        screenshot.height,
-        screenshot.path.display()
-    ));
+    image_response = crate::ui::style::hover_tip(
+        ui,
+        image_response,
+        format!(
+            "{}\n{}x{}\n{}",
+            screenshot.file_name,
+            screenshot.width,
+            screenshot.height,
+            screenshot.path.display()
+        ),
+    );
     action.open_viewer = image_response.clicked() && !overlay_clicked;
     action
 }
@@ -575,21 +580,20 @@ pub(super) fn render_instance_screenshot_viewer_modal(
             }
 
             if let Some(bytes) = image_bytes.as_ref() {
-                match image_textures::request_texture(
+                match image_textures::request_viewer_texture(
                     ui.ctx(),
                     image_key.clone(),
                     Arc::clone(bytes),
-                    TextureOptions::LINEAR,
                 ) {
-                    image_textures::ManagedTextureStatus::Ready(texture) => {
-                        egui::Image::from_texture(&texture)
-                            .fit_to_exact_size(image_rect.size())
-                            .maintain_aspect_ratio(false)
-                            .uv(instance_viewer_uv_rect(viewer_state))
-                            .corner_radius(egui::CornerRadius::same(12))
-                            .paint_at(ui, image_rect);
+                    image_textures::ViewerTextureStatus::Ready(texture) => {
+                        texture.paint(
+                            ui,
+                            image_rect,
+                            instance_viewer_uv_rect(viewer_state),
+                            egui::CornerRadius::same(12),
+                        );
                     }
-                    image_textures::ManagedTextureStatus::Loading => {
+                    image_textures::ViewerTextureStatus::Loading => {
                         ui.painter().rect_filled(
                             image_rect,
                             egui::CornerRadius::same(12),
@@ -602,7 +606,7 @@ pub(super) fn render_instance_screenshot_viewer_modal(
                             "Loading screenshot...",
                         );
                     }
-                    image_textures::ManagedTextureStatus::Failed => {
+                    image_textures::ViewerTextureStatus::Failed => {
                         ui.painter().rect_filled(
                             image_rect,
                             egui::CornerRadius::same(12),
@@ -846,7 +850,7 @@ fn render_instance_screenshot_overlay_button(
             INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE,
         ),
     );
-    let themed_svg = apply_color_to_svg(icon_svg, icon_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(icon_svg, icon_color);
     let icon_color_key = format!(
         "{:02x}{:02x}{:02x}",
         icon_color.r(),
@@ -935,60 +939,26 @@ fn copy_instance_screenshot_to_clipboard(ctx: &egui::Context, label: &str, bytes
     }
 }
 
-fn ensure_instance_screenshot_scan_channel(state: &mut InstanceScreenState) {
-    if state.screenshot_scan_results_tx.is_some() && state.screenshot_scan_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(u64, Vec<InstanceScreenshotEntry>)>();
-    state.screenshot_scan_results_tx = Some(tx);
-    state.screenshot_scan_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn poll_instance_screenshot_scan_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.screenshot_scan_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.screenshot_scan_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/instance",
-            "Instance screenshot-scan receiver mutex was poisoned."
+            "Instance screenshot-scan worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok((request_id, screenshots)) => {
-                if request_id != state.screenshot_scan_request_serial {
-                    continue;
-                }
-                if screenshots != state.screenshots {
-                    state.screenshots = screenshots;
-                    state.mark_screenshot_layout_dirty();
-                }
-                state.last_screenshot_scan_at = Some(Instant::now());
-                state.screenshot_scan_in_flight = false;
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance",
-                    "Instance screenshot-scan worker disconnected unexpectedly."
-                );
-                state.screenshot_scan_in_flight = false;
-                break;
-            }
+        state.screenshot_scan_in_flight = false;
+    }
+    for (request_id, screenshots) in drained.items {
+        if request_id != state.screenshot_scan_request_serial {
+            continue;
         }
+        if screenshots != state.screenshots {
+            state.screenshots = screenshots;
+            state.mark_screenshot_layout_dirty();
+        }
+        state.last_screenshot_scan_at = Some(Instant::now());
+        state.screenshot_scan_in_flight = false;
     }
-}
-
-fn ensure_instance_screenshot_delete_channel(state: &mut InstanceScreenState) {
-    if state.delete_screenshot_results_tx.is_some() && state.delete_screenshot_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, String, Result<(), String>)>();
-    state.delete_screenshot_results_tx = Some(tx);
-    state.delete_screenshot_results_rx = Some(Arc::new(Mutex::new(rx)));
 }
 
 fn request_instance_screenshot_delete(
@@ -1001,14 +971,11 @@ fn request_instance_screenshot_delete(
         return;
     }
 
-    ensure_instance_screenshot_delete_channel(state);
-    let Some(tx) = state.delete_screenshot_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.delete_screenshot_results.sender();
 
     state.delete_screenshot_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
-        let result = fs::remove_file(path.as_path()).map_err(|err| {
+        let result = tokio::fs::remove_file(path.as_path()).await.map_err(|err| {
             tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err, context = "delete instance screenshot");
             format!("failed to remove {}: {err}", path.display())
         });
@@ -1028,62 +995,43 @@ pub(super) fn poll_instance_screenshot_delete_results(
     state: &mut InstanceScreenState,
     instance_root: &Path,
 ) {
-    let Some(rx) = state.delete_screenshot_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.delete_screenshot_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/instance",
-            "Instance screenshot-delete receiver mutex was poisoned."
+            "Instance screenshot-delete worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok((screenshot_key, file_name, result)) => {
-                state.delete_screenshot_in_flight = false;
-                match result {
-                    Ok(()) => {
-                        if state
-                            .screenshot_viewer
-                            .as_ref()
-                            .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
-                        {
-                            tracing::info!(
-                                target: "vertexlauncher/screenshots",
-                                screenshot_key = screenshot_key.as_str(),
-                                "Instance screenshot viewer closed because the screenshot was deleted."
-                            );
-                            state.screenshot_viewer = None;
-                        }
-                        state.pending_delete_screenshot_key = None;
-                        refresh_instance_screenshots(state, instance_root, true);
-                        notification::info!(
-                            "instance/screenshots",
-                            "Deleted '{}' from disk.",
-                            file_name
-                        );
-                    }
-                    Err(err) => {
-                        state.pending_delete_screenshot_key = None;
-                        notification::error!(
-                            "instance/screenshots",
-                            "Failed to delete '{}': {}",
-                            file_name,
-                            err
-                        );
-                    }
+        state.delete_screenshot_in_flight = false;
+        state.pending_delete_screenshot_key = None;
+    }
+    for (screenshot_key, file_name, result) in drained.items {
+        state.delete_screenshot_in_flight = false;
+        match result {
+            Ok(()) => {
+                if state
+                    .screenshot_viewer
+                    .as_ref()
+                    .is_some_and(|viewer| viewer.screenshot_key == screenshot_key)
+                {
+                    tracing::info!(
+                        target: "vertexlauncher/screenshots",
+                        screenshot_key = screenshot_key.as_str(),
+                        "Instance screenshot viewer closed because the screenshot was deleted."
+                    );
+                    state.screenshot_viewer = None;
                 }
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance",
-                    "Instance screenshot-delete worker disconnected unexpectedly."
-                );
-                state.delete_screenshot_in_flight = false;
                 state.pending_delete_screenshot_key = None;
-                break;
+                refresh_instance_screenshots(state, instance_root, true);
+                notification::info!("instance/screenshots", "Deleted '{}' from disk.", file_name);
+            }
+            Err(err) => {
+                state.pending_delete_screenshot_key = None;
+                notification::error!(
+                    "instance/screenshots",
+                    "Failed to delete '{}': {}",
+                    file_name,
+                    err
+                );
             }
         }
     }
@@ -1098,10 +1046,7 @@ pub(super) fn refresh_instance_screenshots(
         return;
     }
 
-    ensure_instance_screenshot_scan_channel(state);
-    let Some(tx) = state.screenshot_scan_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.screenshot_scan_results.sender();
     state.screenshot_scan_request_serial = state.screenshot_scan_request_serial.saturating_add(1);
     let request_id = state.screenshot_scan_request_serial;
     state.screenshot_scan_in_flight = true;

@@ -78,8 +78,7 @@ pub(super) fn start_initial_instance_install(
     installations_root: &Path,
     config: &Config,
 ) {
-    ensure_initial_instance_install_channel(app);
-    let initial_install_results_tx = app.initial_install_results_tx.as_ref().cloned();
+    let initial_install_results_tx = Some(app.initial_install_results.sender());
     let instance_id = instance.id.clone();
     let instance_name = instance.name.clone();
     let activity_instance = instance_name.clone();
@@ -150,7 +149,7 @@ pub(super) fn start_initial_instance_install(
         ));
         let notification_source_for_progress = notification_source.clone();
         let activity_instance_for_progress = activity_instance.clone();
-        let runtime = recommended_java_runtime_for_game(game_version.as_str());
+        let runtime = JavaRuntimeVersion::recommended_for_game(game_version.as_str());
         let configured_java = runtime.and_then(|runtime| match runtime {
             JavaRuntimeVersion::Java8 => java_8.as_deref(),
             JavaRuntimeVersion::Java16 => java_16.as_deref(),
@@ -302,75 +301,6 @@ pub(super) fn start_initial_instance_install(
             }
         }
     });
-}
-
-pub(super) fn recommended_java_runtime_for_game(game_version: &str) -> Option<JavaRuntimeVersion> {
-    let parsed = parse_java_version_key(game_version)?;
-    let major = parsed.major;
-    let minor = parsed.minor;
-    let patch = parsed.patch;
-
-    if major != 1 {
-        // New versioning scheme (e.g. 26.x): Java version is major - 1
-        return Some(JavaRuntimeVersion::Java25);
-    }
-    if minor <= 16 {
-        return Some(JavaRuntimeVersion::Java8);
-    }
-    if minor == 17 {
-        return Some(JavaRuntimeVersion::Java16);
-    }
-    if minor > 20 || (minor == 20 && patch >= 5) {
-        return Some(JavaRuntimeVersion::Java21);
-    }
-    Some(JavaRuntimeVersion::Java17)
-}
-
-#[derive(Clone, Copy)]
-struct JavaVersionKey {
-    major: u32,
-    minor: u32,
-    patch: u32,
-}
-
-fn parse_java_version_key(game_version: &str) -> Option<JavaVersionKey> {
-    let trimmed = game_version.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((year, week)) = trimmed.split_once('w') {
-        let major = parse_ascii_u32_prefix(year)?;
-        if major >= 26 && parse_ascii_u32_prefix(week).is_some() {
-            return Some(JavaVersionKey {
-                major,
-                minor: 0,
-                patch: 0,
-            });
-        }
-    }
-
-    let mut parts = trimmed.split(['.', '-']);
-    let major = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let minor = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let patch = parts.next().and_then(parse_ascii_u32_prefix).unwrap_or(0);
-    Some(JavaVersionKey {
-        major,
-        minor,
-        patch,
-    })
-}
-
-fn parse_ascii_u32_prefix(value: &str) -> Option<u32> {
-    let digits_len = value
-        .as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits_len == 0 {
-        return None;
-    }
-    value.get(..digits_len)?.parse().ok()
 }
 
 pub fn run() -> Result<(), RunError> {

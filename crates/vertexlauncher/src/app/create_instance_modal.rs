@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::time::Duration;
 
 use eframe::egui;
@@ -40,8 +39,7 @@ pub struct CreateInstanceState {
     pub custom_modloader: String,
     pub error: Option<String>,
     pub create_in_flight: bool,
-    pub create_results_tx: Option<mpsc::Sender<CreateInstanceTaskResult>>,
-    pub create_results_rx: Option<mpsc::Receiver<CreateInstanceTaskResult>>,
+    pub create_results: launcher_runtime::WorkerChannel<CreateInstanceTaskResult>,
     available_game_versions: Vec<MinecraftVersionEntry>,
     selected_game_version_index: usize,
     loader_support: LoaderSupportIndex,
@@ -49,14 +47,12 @@ pub struct CreateInstanceState {
     version_catalog_filter: Option<VersionCatalogFilter>,
     version_catalog_error: Option<String>,
     version_catalog_in_flight: bool,
-    version_catalog_results_tx:
-        Option<mpsc::Sender<(VersionCatalogFilter, Result<VersionCatalog, String>)>>,
-    version_catalog_results_rx:
-        Option<mpsc::Receiver<(VersionCatalogFilter, Result<VersionCatalog, String>)>>,
+    version_catalog:
+        launcher_runtime::WorkerChannel<(VersionCatalogFilter, Result<VersionCatalog, String>)>,
     modloader_versions_cache: BTreeMap<String, Vec<String>>,
     modloader_versions_in_flight: HashSet<String>,
-    modloader_versions_results_tx: Option<mpsc::Sender<(String, Result<Vec<String>, String>)>>,
-    modloader_versions_results_rx: Option<mpsc::Receiver<(String, Result<Vec<String>, String>)>>,
+    modloader_versions_results:
+        launcher_runtime::WorkerChannel<(String, Result<Vec<String>, String>)>,
     modloader_versions_status_key: Option<String>,
     modloader_versions_status: Option<String>,
 }
@@ -76,8 +72,7 @@ impl Default for CreateInstanceState {
             custom_modloader: String::new(),
             error: None,
             create_in_flight: false,
-            create_results_tx: None,
-            create_results_rx: None,
+            create_results: Default::default(),
             available_game_versions: Vec::new(),
             selected_game_version_index: 0,
             loader_support: LoaderSupportIndex::default(),
@@ -85,12 +80,10 @@ impl Default for CreateInstanceState {
             version_catalog_filter: None,
             version_catalog_error: None,
             version_catalog_in_flight: false,
-            version_catalog_results_tx: None,
-            version_catalog_results_rx: None,
+            version_catalog: Default::default(),
             modloader_versions_cache: BTreeMap::new(),
             modloader_versions_in_flight: HashSet::new(),
-            modloader_versions_results_tx: None,
-            modloader_versions_results_rx: None,
+            modloader_versions_results: Default::default(),
             modloader_versions_status_key: None,
             modloader_versions_status: None,
         }
@@ -155,22 +148,8 @@ pub fn render(
             let action_width = ui.available_width();
             let compact_actions = action_width < 320.0;
             let footer_reserve = if compact_actions { 152.0 } else { 110.0 };
-            let text_color = ui.visuals().text_color();
-            let heading_style = LabelOptions {
-                font_size: 34.0,
-                line_height: 38.0,
-                weight: 700,
-                color: text_color,
-                wrap: false,
-                ..LabelOptions::default()
-            };
-            let body_style = LabelOptions {
-                font_size: 18.0,
-                line_height: 24.0,
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..LabelOptions::default()
-            };
+            let heading_style = launcher_ui::ui::style::page_heading(ui);
+            let body_style = launcher_ui::ui::style::muted(ui);
 
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
@@ -238,7 +217,7 @@ pub fn render(
                                 &LabelOptions {
                                     color: ui.visuals().weak_text_color(),
                                     wrap: true,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                         });
@@ -252,7 +231,7 @@ pub fn render(
                             &LabelOptions {
                                 color: ui.visuals().error_fg_color,
                                 wrap: true,
-                                ..LabelOptions::default()
+                                ..launcher_ui::ui::style::body(ui)
                             },
                         );
                     }
@@ -298,13 +277,7 @@ pub fn render(
                         ui,
                         "instance_create_modloader_label",
                         "Modloader",
-                        &LabelOptions {
-                            font_size: 18.0,
-                            line_height: 24.0,
-                            color: text_color,
-                            wrap: false,
-                            ..LabelOptions::default()
-                        },
+                        &launcher_ui::ui::style::role(ui, config::TextRole::Body, false),
                     );
                     ui.add_space(4.0);
 
@@ -338,7 +311,7 @@ pub fn render(
                                 available,
                             );
                             if let Some(reason) = unavailable_reason.as_deref() {
-                                response = response.on_hover_text(reason);
+                                response = launcher_ui::ui::style::hover_tip(ui, response, reason);
                             }
 
                             if available && response.clicked() && state.selected_modloader != index {
@@ -402,7 +375,7 @@ pub fn render(
                                     &LabelOptions {
                                         color: ui.visuals().weak_text_color(),
                                         wrap: true,
-                                        ..LabelOptions::default()
+                                        ..launcher_ui::ui::style::body(ui)
                                     },
                                 );
                             });
@@ -424,7 +397,7 @@ pub fn render(
                                         ui.visuals().weak_text_color()
                                     },
                                     wrap: true,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                         }
@@ -495,7 +468,7 @@ pub fn render(
                                 &LabelOptions {
                                     color: ui.visuals().weak_text_color(),
                                     wrap: true,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                         }
@@ -510,7 +483,7 @@ pub fn render(
                             &LabelOptions {
                                 color: ui.visuals().error_fg_color,
                                 wrap: true,
-                                ..LabelOptions::default()
+                                ..launcher_ui::ui::style::body(ui)
                             },
                         );
                     }
@@ -526,7 +499,7 @@ pub fn render(
                                 &LabelOptions {
                                     color: ui.visuals().weak_text_color(),
                                     wrap: true,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                         });
@@ -646,10 +619,7 @@ fn sync_version_catalog(
         return;
     }
 
-    ensure_version_catalog_channel(state);
-    let Some(tx) = state.version_catalog_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.version_catalog.sender();
 
     state.version_catalog_in_flight = true;
     state.version_catalog_filter = Some(filter);
@@ -707,15 +677,6 @@ fn sync_version_catalog(
     });
 }
 
-fn ensure_version_catalog_channel(state: &mut CreateInstanceState) {
-    if state.version_catalog_results_tx.is_some() && state.version_catalog_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(VersionCatalogFilter, Result<VersionCatalog, String>)>();
-    state.version_catalog_results_tx = Some(tx);
-    state.version_catalog_results_rx = Some(rx);
-}
-
 fn apply_version_catalog(
     state: &mut CreateInstanceState,
     filter: VersionCatalogFilter,
@@ -768,33 +729,18 @@ fn apply_version_catalog_error(
 }
 
 fn poll_version_catalog(state: &mut CreateInstanceState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.version_catalog_results_rx.as_ref() {
-        loop {
-            match rx.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/create_instance",
-                        version_catalog_filter = ?state.version_catalog_filter,
-                        "Create-instance version catalog worker channel disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    if should_reset_channel {
-        state.version_catalog_results_tx = None;
-        state.version_catalog_results_rx = None;
+    let drained = state.version_catalog.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/create_instance",
+            version_catalog_filter = ?state.version_catalog_filter,
+            "Create-instance version catalog worker stopped unexpectedly."
+        );
         state.version_catalog_in_flight = false;
         state.version_catalog_error =
             Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
+    let updates = drained.items;
 
     for (filter, result) in updates {
         state.version_catalog_in_flight = false;
@@ -837,7 +783,7 @@ fn render_thumbnail_picker(
                                 &LabelOptions {
                                     color: ui.visuals().weak_text_color(),
                                     wrap: false,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                             return;
@@ -851,7 +797,7 @@ fn render_thumbnail_picker(
                                 &LabelOptions {
                                     color: ui.visuals().weak_text_color(),
                                     wrap: false,
-                                    ..LabelOptions::default()
+                                    ..launcher_ui::ui::style::body(ui)
                                 },
                             );
                             return;
@@ -895,8 +841,18 @@ fn render_thumbnail_picker(
             }
         }
 
-        if should_open_picker
-            && let Some(path) = pick_thumbnail_path(state.thumbnail_path.as_path())
+        if should_open_picker {
+            launcher_ui::ui::file_dialog::open(
+                ui.ctx(),
+                THUMBNAIL_DIALOG,
+                launcher_ui::ui::file_dialog::Pick::File,
+                launcher_ui::ui::file_dialog::Dialog::new()
+                    .filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"])
+                    .start_in(state.thumbnail_path.as_path()),
+            );
+        }
+        if let Some(path) = launcher_ui::ui::file_dialog::take(ui.ctx(), THUMBNAIL_DIALOG)
+            .and_then(|paths| paths.into_iter().next())
         {
             state.thumbnail_path = path;
         }
@@ -909,18 +865,8 @@ fn file_uri_from_path(path: &Path) -> String {
         .unwrap_or_else(|_| "file:///".to_owned())
 }
 
-fn pick_thumbnail_path(current_path: &Path) -> Option<PathBuf> {
-    let mut dialog =
-        rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "webp", "gif", "bmp"]);
-    if current_path.is_file() {
-        if let Some(parent) = current_path.parent() {
-            dialog = dialog.set_directory(parent);
-        }
-    } else if current_path.is_dir() {
-        dialog = dialog.set_directory(current_path);
-    }
-    dialog.pick_file()
-}
+/// File-dialog slot for the instance thumbnail picker.
+const THUMBNAIL_DIALOG: &str = "create_instance_thumbnail";
 
 fn selected_modloader_versions<'a>(
     state: &'a CreateInstanceState,
@@ -959,17 +905,6 @@ fn modloader_versions_cache_key(loader_label: &str, game_version: &str) -> Strin
     )
 }
 
-fn ensure_modloader_versions_channel(state: &mut CreateInstanceState) {
-    if state.modloader_versions_results_tx.is_some()
-        && state.modloader_versions_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, Result<Vec<String>, String>)>();
-    state.modloader_versions_results_tx = Some(tx);
-    state.modloader_versions_results_rx = Some(rx);
-}
-
 fn request_modloader_versions(
     state: &mut CreateInstanceState,
     loader_label: &str,
@@ -990,10 +925,7 @@ fn request_modloader_versions(
         return;
     }
 
-    ensure_modloader_versions_channel(state);
-    let Some(tx) = state.modloader_versions_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.modloader_versions_results.sender();
 
     state.modloader_versions_in_flight.insert(key.clone());
     state.modloader_versions_status_key = Some(key.clone());
@@ -1057,28 +989,11 @@ fn request_modloader_versions(
 }
 
 fn poll_modloader_versions(state: &mut CreateInstanceState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.modloader_versions_results_rx.as_ref() {
-        loop {
-            match rx.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/create_instance",
-                        "Create-instance modloader version worker channel disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        }
-    }
+    let drained = state.modloader_versions_results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.modloader_versions_results_tx = None;
-        state.modloader_versions_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/create_instance", "modloader_versions_results worker channel stopped unexpectedly.");
         state.modloader_versions_status =
             Some("Modloader version worker stopped unexpectedly.".to_owned());
     }

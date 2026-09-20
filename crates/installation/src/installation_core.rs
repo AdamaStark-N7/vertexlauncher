@@ -32,6 +32,10 @@ pub struct VersionCatalogFilter {
 pub struct MinecraftVersionEntry {
     pub id: String,
     pub version_type: MinecraftVersionType,
+    /// ISO-8601 release time from Mojang's manifest; the authoritative "newer than" order.
+    /// Absent in catalogs cached by older launcher versions.
+    #[serde(default)]
+    pub release_time: Option<String>,
 }
 
 impl MinecraftVersionEntry {
@@ -714,10 +718,11 @@ fn fetch_version_catalog_uncached(
             };
             if include {
                 Some((
-                    entry.release_time,
+                    entry.release_time.clone(),
                     MinecraftVersionEntry {
                         id: entry.id,
                         version_type,
+                        release_time: Some(entry.release_time),
                     },
                 ))
             } else {

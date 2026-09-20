@@ -1,4 +1,5 @@
 mod client;
+mod environment;
 mod hashing;
 mod modrinth_error;
 mod project;
@@ -9,6 +10,7 @@ mod response_records;
 mod search_project;
 
 pub use client::Client;
+pub use environment::Environment;
 pub use hashing::{hash_file_sha1_and_sha512_hex, hash_file_sha1_hex, hash_file_sha512_hex};
 pub use modrinth_error::ModrinthError;
 pub use project::Project;

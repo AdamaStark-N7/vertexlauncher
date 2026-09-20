@@ -3,6 +3,9 @@ use egui::{Area, Color32, Context, CornerRadius, Frame, Id, Margin, Order, Rect,
 const MODAL_CORNER_RADIUS: u8 = 14;
 const MODAL_INNER_MARGIN: i8 = 14;
 const MODAL_SCRIM_ALPHA: u8 = 160;
+/// Space every modal keeps clear between itself and each edge of the window, whatever its layout
+/// asks for. Small windows shrink the modal rather than letting it touch the edge.
+const MODAL_MIN_VIEWPORT_PADDING: f32 = 16.0;
 const MODAL_HOST_STATE_ID: &str = "modal_host_state";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -92,7 +95,11 @@ impl ModalLayout {
             viewport_rect.width() * self.viewport_margin_fraction.x.clamp(0.0, 0.49),
             viewport_rect.height() * self.viewport_margin_fraction.y.clamp(0.0, 0.49),
         );
-        let constrained = viewport_rect.shrink2(self.viewport_margin + fractional_margin);
+        let requested_margin = self.viewport_margin + fractional_margin;
+        let constrained = viewport_rect.shrink2(egui::vec2(
+            requested_margin.x.max(MODAL_MIN_VIEWPORT_PADDING),
+            requested_margin.y.max(MODAL_MIN_VIEWPORT_PADDING),
+        ));
         let size = egui::vec2(
             self.width.resolve(constrained.width().max(1.0)),
             self.height.resolve(constrained.height().max(1.0)),
@@ -296,18 +303,13 @@ pub fn show_window<R>(
         }
     }
 
-    let mut inner = None;
-    Area::new(options.id)
-        .order(order)
-        .fixed_pos(modal_rect.min)
-        .interactable(true)
-        .show(ctx, |ui| {
-            ui.set_min_size(modal_rect.size());
-            ui.set_max_size(modal_rect.size());
-            window_frame(ctx).show(ui, |ui| {
-                inner = Some(add_contents(ui));
-            });
-        });
+    let inner = Some(show_modal_contents(
+        ctx,
+        options.id,
+        order,
+        modal_rect,
+        add_contents,
+    ));
 
     ModalShowResponse {
         inner: inner.expect("modal window should render exactly once"),
@@ -342,18 +344,13 @@ pub fn show_area<R>(
         }
     }
 
-    let mut inner = None;
-    Area::new(options.id)
-        .order(order)
-        .fixed_pos(modal_rect.min)
-        .interactable(true)
-        .show(ctx, |ui| {
-            ui.set_min_size(modal_rect.size());
-            ui.set_max_size(modal_rect.size());
-            window_frame(ctx).show(ui, |ui| {
-                inner = Some(add_contents(ui));
-            });
-        });
+    let inner = Some(show_modal_contents(
+        ctx,
+        options.id,
+        order,
+        modal_rect,
+        add_contents,
+    ));
 
     ModalShowResponse {
         inner: inner.expect("modal area should render exactly once"),
@@ -362,6 +359,53 @@ pub fn show_area<R>(
         is_top_modal: registration.is_top_modal,
         stack_index: registration.stack_index,
     }
+}
+
+/// Draws the modal's frame at exactly `modal_rect` and runs `add_contents` inside it.
+///
+/// The frame never grows with its content, so the modal stays centered where the layout put it.
+/// The contents are laid out as if they had the whole frame interior to themselves; anything that
+/// needs more room than that (a small window, a long dialog) is reached by scrolling.
+fn show_modal_contents<R>(
+    ctx: &Context,
+    id: Id,
+    order: Order,
+    modal_rect: Rect,
+    add_contents: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let mut inner = None;
+    Area::new(id)
+        .order(order)
+        .fixed_pos(modal_rect.min)
+        .interactable(true)
+        .show(ctx, |ui| {
+            let (outer, _) = ui.allocate_exact_size(modal_rect.size(), egui::Sense::hover());
+            let content_rect = outer.shrink(f32::from(MODAL_INNER_MARGIN));
+            ui.painter().add(window_frame(ctx).paint(content_rect));
+
+            let mut content_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(content_rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            // A little slack beyond the content area so focus outlines aren't cut off.
+            content_ui.set_clip_rect(outer.shrink(4.0).intersect(ui.clip_rect()));
+            let bar_width = content_ui.spacing().scroll.allocated_width();
+            egui::ScrollArea::both()
+                .id_salt((id, "modal_content_scroll"))
+                .auto_shrink([false, false])
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded)
+                .show(&mut content_ui, |ui| {
+                    let size = egui::vec2(
+                        (content_rect.width() - bar_width).max(1.0),
+                        content_rect.height(),
+                    );
+                    ui.set_min_size(size);
+                    ui.set_max_size(size);
+                    inner = Some(add_contents(ui));
+                });
+        });
+    inner.expect("modal window should render exactly once")
 }
 
 pub fn show_scrim(ctx: &Context, id: impl std::hash::Hash, viewport_rect: Rect) {
@@ -478,5 +522,34 @@ fn one_order_below(order: Order) -> Order {
         Order::Debug | Order::Tooltip => Order::Foreground,
         Order::Foreground => Order::Middle,
         Order::Middle | Order::Background => Order::Background,
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+
+    fn layout() -> ModalLayout {
+        ModalLayout::centered(
+            AxisSizing::new(0.7, 520.0, 980.0),
+            AxisSizing::new(0.85, 420.0, 900.0),
+        )
+    }
+
+    #[test]
+    fn modal_is_centered_in_a_large_window() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(2000.0, 1200.0));
+        let rect = layout().resolve_rect(viewport);
+        assert_eq!(rect.center(), viewport.center());
+    }
+
+    #[test]
+    fn modal_keeps_the_minimum_padding_in_a_tiny_window() {
+        let viewport = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 300.0));
+        let rect = layout().resolve_rect(viewport);
+        assert!(rect.left() >= MODAL_MIN_VIEWPORT_PADDING);
+        assert!(rect.top() >= MODAL_MIN_VIEWPORT_PADDING);
+        assert!(viewport.right() - rect.right() >= MODAL_MIN_VIEWPORT_PADDING);
+        assert!(viewport.bottom() - rect.bottom() >= MODAL_MIN_VIEWPORT_PADDING);
     }
 }

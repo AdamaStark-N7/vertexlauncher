@@ -34,40 +34,81 @@ pub const fn blur_requires_transparent_viewport() -> bool {
     }
 }
 
-/// Applies platform-specific window blur/backdrop effects when enabled.
+/// Applies platform-specific transparency and blur/backdrop effects.
 pub fn apply(
     cc: &CreationContext<'_>,
-    blur_enabled: bool,
+    window_transparency: config::WindowTransparency,
     windows_backdrop_type: config::WindowsBackdropType,
+    linux_blur_protocol: config::LinuxBlurProtocol,
+    macos_visual_effect_material: config::MacosVisualEffectMaterial,
+    macos_visual_effect_blending_mode: config::MacosVisualEffectBlendingMode,
+    macos_visual_effect_state: config::MacosVisualEffectState,
+    macos_visual_effect_emphasized: bool,
 ) -> Result<(), String> {
-    if !blur_enabled || !platform_supports_blur() {
+    if !window_transparency.is_translucent() {
         return Ok(());
     }
+    if window_transparency.uses_native_blur() && !platform_supports_blur() {
+        return Err("window blur is not supported on this platform".to_owned());
+    }
 
-    apply_impl(cc, windows_backdrop_type)
+    apply_impl(
+        cc,
+        window_transparency,
+        windows_backdrop_type,
+        linux_blur_protocol,
+        macos_visual_effect_material,
+        macos_visual_effect_blending_mode,
+        macos_visual_effect_state,
+        macos_visual_effect_emphasized,
+    )
 }
 
 fn apply_impl(
     cc: &CreationContext<'_>,
+    window_transparency: config::WindowTransparency,
     windows_backdrop_type: config::WindowsBackdropType,
+    linux_blur_protocol: config::LinuxBlurProtocol,
+    macos_visual_effect_material: config::MacosVisualEffectMaterial,
+    macos_visual_effect_blending_mode: config::MacosVisualEffectBlendingMode,
+    macos_visual_effect_state: config::MacosVisualEffectState,
+    macos_visual_effect_emphasized: bool,
 ) -> Result<(), String> {
+    #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+    let _ = (cc, window_transparency);
     #[cfg(not(target_os = "windows"))]
     let _ = windows_backdrop_type;
+    #[cfg(not(target_os = "linux"))]
+    let _ = linux_blur_protocol;
+    #[cfg(not(target_os = "macos"))]
+    let _ = (
+        macos_visual_effect_material,
+        macos_visual_effect_blending_mode,
+        macos_visual_effect_state,
+        macos_visual_effect_emphasized,
+    );
 
     #[cfg(target_os = "windows")]
-    return windows::apply(cc, windows_backdrop_type);
+    return windows::apply(cc, window_transparency, windows_backdrop_type);
     #[cfg(target_os = "linux")]
-    return linux::apply(cc);
+    return linux::apply(cc, window_transparency, linux_blur_protocol);
     #[cfg(target_os = "macos")]
-    return macos::apply(cc);
+    return macos::apply(
+        cc,
+        window_transparency,
+        macos_visual_effect_material,
+        macos_visual_effect_blending_mode,
+        macos_visual_effect_state,
+        macos_visual_effect_emphasized,
+    );
 
     #[allow(unreachable_code)]
-    Err("window blur is not supported on this platform".to_owned())
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
 mod windows {
-    use config::WindowsBackdropType;
+    use config::{WindowTransparency, WindowsBackdropType};
     use core::ffi::c_void;
     use core::mem::size_of;
     use eframe::CreationContext;
@@ -82,6 +123,7 @@ mod windows {
     const DWMWA_USE_HOSTBACKDROPBRUSH: i32 = 17;
     const DWMWA_MICA_EFFECT: i32 = 1029;
     const DWMSBT_AUTO: i32 = 0;
+    const DWMSBT_NONE: i32 = 1;
     const DWMSBT_MAINWINDOW: i32 = 2;
     const DWMSBT_TRANSIENTWINDOW: i32 = 3;
     const DWMSBT_TABBEDWINDOW: i32 = 4;
@@ -113,17 +155,22 @@ mod windows {
 
     pub fn apply(
         cc: &CreationContext<'_>,
+        window_transparency: WindowTransparency,
         windows_backdrop_type: WindowsBackdropType,
     ) -> Result<(), String> {
         let window_handle = cc
             .window_handle()
             .map_err(|error| format!("window handle unavailable: {error}"))?;
         let RawWindowHandle::Win32(handle) = window_handle.as_raw() else {
-            return Err("unsupported window handle for Windows blur".to_owned());
+            return Err("unsupported window handle for Windows transparency".to_owned());
         };
         let hwnd: HWND = handle.hwnd.get() as HWND;
-        let _ = set_bool_window_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, true);
         let _ = set_bool_window_attribute(hwnd, DWMWA_REDIRECTIONBITMAP_ALPHA, true);
+        if !window_transparency.uses_native_blur() {
+            return Ok(());
+        }
+
+        let _ = set_bool_window_attribute(hwnd, DWMWA_USE_HOSTBACKDROPBRUSH, true);
         apply_backdrop_with_fallback(hwnd, windows_backdrop_type)
     }
 
@@ -180,6 +227,13 @@ mod windows {
                     Ok(())
                 } else {
                     Err("DWMSBT_AUTO was rejected".to_owned())
+                }
+            }
+            WindowsBackdropType::None => {
+                if set_system_backdrop(hwnd, DWMSBT_NONE).is_ok() {
+                    Ok(())
+                } else {
+                    Err("DWMSBT_NONE was rejected".to_owned())
                 }
             }
             WindowsBackdropType::Mica => {
@@ -357,6 +411,7 @@ mod windows {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use config::{LinuxBlurProtocol, WindowTransparency};
     use eframe::CreationContext;
     use raw_window_handle::{HasDisplayHandle, HasWindowHandle, RawDisplayHandle, RawWindowHandle};
     use std::ffi::CStr;
@@ -383,7 +438,15 @@ mod linux {
     static CARDINAL_ATOM: &CStr = c"CARDINAL";
     const WHOLE_SURFACE_BLUR_REGION_SIZE: i32 = i32::MAX;
 
-    pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
+    pub fn apply(
+        cc: &CreationContext<'_>,
+        window_transparency: WindowTransparency,
+        linux_blur_protocol: LinuxBlurProtocol,
+    ) -> Result<(), String> {
+        if !window_transparency.uses_native_blur() {
+            return Ok(());
+        }
+
         let window_handle = cc
             .window_handle()
             .map_err(|error| format!("window handle unavailable: {error}"))?;
@@ -396,12 +459,17 @@ mod linux {
                 let Some(display) = display.display else {
                     return Ok(());
                 };
-                apply_x11(display.as_ptr().cast::<xlib::Display>(), window.window)
+                apply_x11(
+                    display.as_ptr().cast::<xlib::Display>(),
+                    window.window,
+                    linux_blur_protocol,
+                )
             }
             (RawDisplayHandle::Wayland(display), RawWindowHandle::Wayland(window)) => {
                 apply_wayland(
                     display.display.as_ptr().cast::<c_void>(),
                     window.surface.as_ptr().cast::<c_void>(),
+                    linux_blur_protocol,
                 )
             }
             _ => Ok(()),
@@ -420,7 +488,17 @@ mod linux {
         }
     }
 
-    fn apply_x11(display: *mut xlib::Display, window: std::os::raw::c_ulong) -> Result<(), String> {
+    fn apply_x11(
+        display: *mut xlib::Display,
+        window: std::os::raw::c_ulong,
+        linux_blur_protocol: LinuxBlurProtocol,
+    ) -> Result<(), String> {
+        if matches!(linux_blur_protocol, LinuxBlurProtocol::ExtBackgroundEffect) {
+            return Err(
+                "ext_background_effect_v1 is Wayland-only and unavailable on X11".to_owned(),
+            );
+        }
+
         let xlib =
             xlib::Xlib::open().map_err(|_| "failed to load Xlib for blur support".to_owned())?;
 
@@ -492,7 +570,11 @@ mod linux {
     delegate_noop!(WaylandBlurState: ignore OrgKdeKwinBlurManager);
     delegate_noop!(WaylandBlurState: ignore OrgKdeKwinBlur);
 
-    fn apply_wayland(display: *mut c_void, surface: *mut c_void) -> Result<(), String> {
+    fn apply_wayland(
+        display: *mut c_void,
+        surface: *mut c_void,
+        linux_blur_protocol: LinuxBlurProtocol,
+    ) -> Result<(), String> {
         if display.is_null() || surface.is_null() {
             return Err("Wayland display or surface pointer unavailable".to_owned());
         }
@@ -516,31 +598,44 @@ mod linux {
 
         let qh = queue.handle();
         let mut state = WaylandBlurState::default();
-        match apply_ext_background_effect(&conn, &globals, &mut queue, &mut state, &qh, &surface) {
-            Ok(()) => {
-                tracing::info!(
-                    target: "vertexlauncher/window_blur",
-                    protocol = "ext_background_effect_v1",
-                    "Wayland blur effect applied."
-                );
-                Ok(())
-            }
-            Err(ext_error) => {
-                match apply_kde_blur(&conn, &globals, &mut queue, &mut state, &qh, &surface) {
+        match linux_blur_protocol {
+            LinuxBlurProtocol::Auto => {
+                match apply_ext_background_effect(
+                    &conn, &globals, &mut queue, &mut state, &qh, &surface,
+                ) {
                     Ok(()) => {
                         tracing::info!(
                             target: "vertexlauncher/window_blur",
-                            protocol = "org_kde_kwin_blur",
-                            fallback_from = "ext_background_effect_v1",
-                            fallback_reason = %ext_error,
-                            "Wayland blur effect applied using fallback protocol."
+                            protocol = "ext_background_effect_v1",
+                            "Wayland blur effect applied."
                         );
                         Ok(())
                     }
-                    Err(kde_error) => Err(format!(
-                        "Wayland blur protocols are unavailable: ext_background_effect_v1: {ext_error}; org_kde_kwin_blur: {kde_error}"
-                    )),
+                    Err(ext_error) => {
+                        match apply_kde_blur(&conn, &globals, &mut queue, &mut state, &qh, &surface)
+                        {
+                            Ok(()) => {
+                                tracing::info!(
+                                    target: "vertexlauncher/window_blur",
+                                    protocol = "org_kde_kwin_blur",
+                                    fallback_from = "ext_background_effect_v1",
+                                    fallback_reason = %ext_error,
+                                    "Wayland blur effect applied using fallback protocol."
+                                );
+                                Ok(())
+                            }
+                            Err(kde_error) => Err(format!(
+                                "Wayland blur protocols are unavailable: ext_background_effect_v1: {ext_error}; org_kde_kwin_blur: {kde_error}"
+                            )),
+                        }
+                    }
                 }
+            }
+            LinuxBlurProtocol::ExtBackgroundEffect => {
+                apply_ext_background_effect(&conn, &globals, &mut queue, &mut state, &qh, &surface)
+            }
+            LinuxBlurProtocol::KdeBlur => {
+                apply_kde_blur(&conn, &globals, &mut queue, &mut state, &qh, &surface)
             }
         }
     }
@@ -617,6 +712,10 @@ mod linux {
 
 #[cfg(target_os = "macos")]
 mod macos {
+    use config::{
+        MacosVisualEffectBlendingMode, MacosVisualEffectMaterial, MacosVisualEffectState,
+        WindowTransparency,
+    };
     use eframe::CreationContext;
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
@@ -644,12 +743,42 @@ mod macos {
     }
 
     const NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW: isize = 0;
+    const NS_VISUAL_EFFECT_BLENDING_MODE_WITHIN_WINDOW: isize = 1;
+    const NS_VISUAL_EFFECT_MATERIAL_APPEARANCE_BASED: isize = 0;
+    const NS_VISUAL_EFFECT_MATERIAL_LIGHT: isize = 1;
+    const NS_VISUAL_EFFECT_MATERIAL_DARK: isize = 2;
+    const NS_VISUAL_EFFECT_MATERIAL_TITLEBAR: isize = 3;
+    const NS_VISUAL_EFFECT_MATERIAL_SELECTION: isize = 4;
+    const NS_VISUAL_EFFECT_MATERIAL_MENU: isize = 5;
+    const NS_VISUAL_EFFECT_MATERIAL_POPOVER: isize = 6;
+    const NS_VISUAL_EFFECT_MATERIAL_SIDEBAR: isize = 7;
+    const NS_VISUAL_EFFECT_MATERIAL_HEADER_VIEW: isize = 10;
+    const NS_VISUAL_EFFECT_MATERIAL_SHEET: isize = 11;
+    const NS_VISUAL_EFFECT_MATERIAL_WINDOW_BACKGROUND: isize = 12;
+    const NS_VISUAL_EFFECT_MATERIAL_HUD_WINDOW: isize = 13;
+    const NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI: isize = 15;
+    const NS_VISUAL_EFFECT_MATERIAL_TOOLTIP: isize = 17;
+    const NS_VISUAL_EFFECT_MATERIAL_CONTENT_BACKGROUND: isize = 18;
     const NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND: isize = 21;
+    const NS_VISUAL_EFFECT_MATERIAL_UNDER_PAGE_BACKGROUND: isize = 22;
+    const NS_VISUAL_EFFECT_STATE_FOLLOWS_WINDOW_ACTIVE_STATE: isize = 0;
     const NS_VISUAL_EFFECT_STATE_ACTIVE: isize = 1;
+    const NS_VISUAL_EFFECT_STATE_INACTIVE: isize = 2;
     const NS_VIEW_WIDTH_SIZABLE: usize = 1 << 1;
     const NS_VIEW_HEIGHT_SIZABLE: usize = 1 << 4;
 
-    pub fn apply(cc: &CreationContext<'_>) -> Result<(), String> {
+    pub fn apply(
+        cc: &CreationContext<'_>,
+        window_transparency: WindowTransparency,
+        material: MacosVisualEffectMaterial,
+        blending_mode: MacosVisualEffectBlendingMode,
+        state: MacosVisualEffectState,
+        emphasized: bool,
+    ) -> Result<(), String> {
+        if !window_transparency.uses_native_blur() {
+            return Ok(());
+        }
+
         let window_handle = cc
             .window_handle()
             .map_err(|error| format!("window handle unavailable: {error}"))?;
@@ -676,11 +805,66 @@ mod macos {
             }
 
             let _: () = msg_send![effect_view, setAutoresizingMask: (NS_VIEW_WIDTH_SIZABLE | NS_VIEW_HEIGHT_SIZABLE)];
-            let _: () = msg_send![effect_view, setBlendingMode: NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW];
-            let _: () = msg_send![effect_view, setMaterial: NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND];
-            let _: () = msg_send![effect_view, setState: NS_VISUAL_EFFECT_STATE_ACTIVE];
+            let _: () =
+                msg_send![effect_view, setBlendingMode: appkit_blending_mode(blending_mode)];
+            let _: () = msg_send![effect_view, setMaterial: appkit_material(material)];
+            let _: () = msg_send![effect_view, setState: appkit_state(state)];
+            let _: () = msg_send![effect_view, setEmphasized: emphasized];
             let _: () = msg_send![content_view, addSubview: effect_view positioned: 0isize relativeTo: std::ptr::null::<Object>()];
         }
         Ok(())
+    }
+
+    const fn appkit_material(material: MacosVisualEffectMaterial) -> isize {
+        match material {
+            MacosVisualEffectMaterial::AppearanceBased => {
+                NS_VISUAL_EFFECT_MATERIAL_APPEARANCE_BASED
+            }
+            MacosVisualEffectMaterial::Light => NS_VISUAL_EFFECT_MATERIAL_LIGHT,
+            MacosVisualEffectMaterial::Dark => NS_VISUAL_EFFECT_MATERIAL_DARK,
+            MacosVisualEffectMaterial::Titlebar => NS_VISUAL_EFFECT_MATERIAL_TITLEBAR,
+            MacosVisualEffectMaterial::Selection => NS_VISUAL_EFFECT_MATERIAL_SELECTION,
+            MacosVisualEffectMaterial::Menu => NS_VISUAL_EFFECT_MATERIAL_MENU,
+            MacosVisualEffectMaterial::Popover => NS_VISUAL_EFFECT_MATERIAL_POPOVER,
+            MacosVisualEffectMaterial::Sidebar => NS_VISUAL_EFFECT_MATERIAL_SIDEBAR,
+            MacosVisualEffectMaterial::HeaderView => NS_VISUAL_EFFECT_MATERIAL_HEADER_VIEW,
+            MacosVisualEffectMaterial::Sheet => NS_VISUAL_EFFECT_MATERIAL_SHEET,
+            MacosVisualEffectMaterial::WindowBackground => {
+                NS_VISUAL_EFFECT_MATERIAL_WINDOW_BACKGROUND
+            }
+            MacosVisualEffectMaterial::HudWindow => NS_VISUAL_EFFECT_MATERIAL_HUD_WINDOW,
+            MacosVisualEffectMaterial::FullScreenUi => NS_VISUAL_EFFECT_MATERIAL_FULL_SCREEN_UI,
+            MacosVisualEffectMaterial::Tooltip => NS_VISUAL_EFFECT_MATERIAL_TOOLTIP,
+            MacosVisualEffectMaterial::ContentBackground => {
+                NS_VISUAL_EFFECT_MATERIAL_CONTENT_BACKGROUND
+            }
+            MacosVisualEffectMaterial::UnderWindowBackground => {
+                NS_VISUAL_EFFECT_MATERIAL_UNDER_WINDOW_BACKGROUND
+            }
+            MacosVisualEffectMaterial::UnderPageBackground => {
+                NS_VISUAL_EFFECT_MATERIAL_UNDER_PAGE_BACKGROUND
+            }
+        }
+    }
+
+    const fn appkit_blending_mode(blending_mode: MacosVisualEffectBlendingMode) -> isize {
+        match blending_mode {
+            MacosVisualEffectBlendingMode::BehindWindow => {
+                NS_VISUAL_EFFECT_BLENDING_MODE_BEHIND_WINDOW
+            }
+            MacosVisualEffectBlendingMode::WithinWindow => {
+                NS_VISUAL_EFFECT_BLENDING_MODE_WITHIN_WINDOW
+            }
+        }
+    }
+
+    const fn appkit_state(state: MacosVisualEffectState) -> isize {
+        match state {
+            MacosVisualEffectState::FollowsWindowActiveState => {
+                NS_VISUAL_EFFECT_STATE_FOLLOWS_WINDOW_ACTIVE_STATE
+            }
+            MacosVisualEffectState::Active => NS_VISUAL_EFFECT_STATE_ACTIVE,
+            MacosVisualEffectState::Inactive => NS_VISUAL_EFFECT_STATE_INACTIVE,
+        }
     }
 }

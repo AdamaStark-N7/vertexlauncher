@@ -3,7 +3,7 @@ use config::{
     GraphicsAdapterPreferenceType, GraphicsAdapterProfile, GraphicsApiPreference,
     INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
     JavaRuntimeVersion, SkinPreviewAaMode, SkinPreviewTexelAaMode, SvgAaMode, TextRenderingPath,
-    UiEmojiFontFamily, UiFontFamily, parse_bitrate_to_bps,
+    UiEmojiFontFamily, UiFontFamily, WindowTransparency, parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::{ensure_openjdk_runtime_async, purge_cache_async as purge_installation_cache};
@@ -43,10 +43,7 @@ use textui::TextUi;
 use textui_egui::{gamepad_scroll, prelude::*};
 
 use super::{SettingsInfo, platform};
-use crate::{
-    ui::{components::settings_widgets, style, theme::Theme},
-    window_effects,
-};
+use crate::ui::{components::settings_widgets, style, theme::Theme};
 
 const RESERVED_SYSTEM_MEMORY_MIB: u128 = 4 * 1024;
 const FALLBACK_TOTAL_MEMORY_MIB: u128 = 20 * 1024;
@@ -127,7 +124,7 @@ fn render_settings_contents(
             );
             render_skin_preview_setting(ui, text_ui, config);
             render_svg_aa_setting(ui, text_ui, config);
-            render_window_blur_setting(ui, text_ui, config);
+            render_window_transparency_setting(ui, text_ui, config);
             render_ui_opacity_setting(ui, text_ui, config);
             render_selected_toggles(
                 ui,
@@ -164,6 +161,13 @@ fn render_settings_contents(
                 available_emoji_font_labels,
             );
             render_text_rendering_path_setting(ui, text_ui, config);
+            render_typography_settings(
+                ui,
+                text_ui,
+                config,
+                available_ui_fonts,
+                available_ui_font_labels,
+            );
             render_selected_toggles(
                 ui,
                 text_ui,
@@ -190,6 +194,26 @@ fn render_settings_contents(
                 text_ui,
                 config,
                 &[config::ToggleSettingId::DiscordRichPresenceEnabled],
+            );
+        },
+    );
+
+    render_settings_section(
+        ui,
+        text_ui,
+        "Instance Sync",
+        "Keep multiplayer servers, command history, and creative hotbars in step across your instances. Sync runs before an instance launches and after it closes; right-click a server on Home to choose which instances it goes to.",
+        |ui, text_ui| {
+            render_selected_toggles(
+                ui,
+                text_ui,
+                config,
+                &[
+                    config::ToggleSettingId::SyncServersEnabled,
+                    config::ToggleSettingId::SyncServersToAllInstancesByDefault,
+                    config::ToggleSettingId::SyncCommandHistoryEnabled,
+                    config::ToggleSettingId::SyncHotbarsEnabled,
+                ],
             );
         },
     );
@@ -268,8 +292,7 @@ fn render_info_section(ui: &mut Ui, text_ui: &mut TextUi, settings_info: &Settin
             key_style.weight = 700;
             key_style.wrap = false;
 
-            let mut value_style = style::body(ui);
-            value_style.monospace = true;
+            let value_style = style::code(ui);
 
             egui::Grid::new("settings_info_grid")
                 .num_columns(2)
@@ -429,7 +452,7 @@ fn render_theme_setting(
         .unwrap_or(0);
     let theme_labels: Vec<&str> = available_theme_labels.iter().map(String::as_str).collect();
     let theme_tooltip = format!(
-        "Themes are loaded from {} at startup.",
+        "Themes are loaded from {} when the launcher starts; add or edit a theme file there and restart to see it.",
         app_paths::themes_dir().display()
     );
     let response = settings_widgets::dropdown_row(
@@ -529,6 +552,112 @@ fn render_ui_font_settings(
     });
 
     render_selected_int_settings(ui, text_ui, config, &[IntSettingId::UiFontWeight]);
+}
+
+/// Per-role size, weight and font rows. Values equal to the built-in default are stored as
+/// "no override", so only changed roles end up in the config file.
+fn render_typography_settings(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    config: &mut Config,
+    available_ui_fonts: &[UiFontFamily],
+    available_ui_font_labels: &[String],
+) {
+    render_settings_subgroup(
+        ui,
+        text_ui,
+        "Text styles",
+        "Size, weight, and font for each kind of text. These stack with the UI font size and weight above.",
+    );
+    let mut font_labels: Vec<&str> = vec!["Launcher UI font (default)"];
+    font_labels.extend(available_ui_font_labels.iter().map(String::as_str));
+
+    for role in config::TextRole::ALL {
+        let defaults = role.defaults();
+        let current = config.typography().override_for(role);
+        let mut size = current.size.unwrap_or(defaults.size);
+        let mut weight = current.weight.unwrap_or(defaults.weight);
+        let mut font_index = current
+            .font_family
+            .as_deref()
+            .and_then(|name| {
+                available_ui_fonts
+                    .iter()
+                    .position(|font| font.matches_name(name))
+                    .map(|index| index + 1)
+            })
+            .unwrap_or(0);
+        let previous_font_index = font_index;
+
+        let mut heading_style = style::body(ui);
+        heading_style.weight = 700;
+        heading_style.wrap = false;
+        let _ = text_ui.label(
+            ui,
+            ("typography_role_heading", role.slug()),
+            role.label(),
+            &heading_style,
+        );
+        let mut changed = false;
+        ui.push_id(("typography_role", role.slug()), |ui| {
+            changed |= settings_widgets::float_stepper_row(
+                text_ui,
+                ui,
+                "size",
+                "Size",
+                None,
+                &mut size,
+                config::ROLE_FONT_SIZE_MIN,
+                config::ROLE_FONT_SIZE_MAX,
+                config::ROLE_FONT_SIZE_STEP,
+            )
+            .changed();
+            changed |= settings_widgets::int_stepper_row(
+                text_ui,
+                ui,
+                "weight",
+                "Weight",
+                Some("Font weight from 100 (thin) to 900 (black), in steps of 100; 400 is regular and 700 is bold. Fonts that lack the chosen weight may look different. Default: 400."),
+                &mut weight,
+                config::UI_FONT_WEIGHT_MIN,
+                config::UI_FONT_WEIGHT_MAX,
+                config::UI_FONT_WEIGHT_STEP,
+            )
+            .changed();
+            changed |= settings_widgets::searchable_dropdown_row(
+                text_ui,
+                ui,
+                "font",
+                "Font",
+                None,
+                &mut font_index,
+                &font_labels,
+            )
+            .changed();
+            if text_ui
+                .button(ui, "reset", "Reset to default", &style::neutral_button(ui))
+                .clicked()
+            {
+                config.typography_mut().reset(role);
+                changed = false;
+            }
+        });
+        if changed || font_index != previous_font_index {
+            let font_family = font_index
+                .checked_sub(1)
+                .and_then(|index| available_ui_fonts.get(index))
+                .map(|font| font.label().to_owned());
+            config.typography_mut().set_override(
+                role,
+                config::RoleOverride {
+                    size: (size != defaults.size).then_some(size),
+                    weight: (weight != defaults.weight).then_some(weight),
+                    font_family,
+                },
+            );
+        }
+        ui.add_space(style::SPACE_MD);
+    }
 }
 
 fn render_graphics_adapter_settings(
@@ -646,8 +775,7 @@ fn render_graphics_adapter_settings(
 }
 
 fn supported_graphics_api_preferences(config: &Config) -> Vec<GraphicsApiPreference> {
-    let transparent_viewport =
-        config.window_blur_enabled() && window_effects::platform_supports_blur();
+    let transparent_viewport = config.window_transparency().is_translucent();
 
     GraphicsApiPreference::ALL
         .into_iter()
@@ -727,9 +855,7 @@ fn render_emoji_font_settings(
         ui,
         egui::Id::new("emoji_font_family_dropdown"),
         "Emoji Font",
-        Some(
-            "Font used for emoji characters. Noto Color Emoji is included and selected by default.",
-        ),
+        Some("Font used for emoji characters. Default: Noto Color Emoji (Included)."),
         &mut selected_index,
         &option_label_refs,
     );
@@ -755,7 +881,7 @@ fn render_text_rendering_path_setting(ui: &mut Ui, text_ui: &mut TextUi, config:
         "text_rendering_path",
         "Text Rendering Path",
         Some(
-            "Controls how glyphs are rasterized for the launcher UI. Auto keeps the default path. SDF/MSDF are mainly useful for testing the new text pipeline.",
+            "Controls how glyphs are rasterized for the launcher UI. Auto keeps the default path. SDF/MSDF are mainly useful for testing the new text pipeline. Default: Auto.",
         ),
         &mut selected_index,
         &option_labels,
@@ -781,7 +907,7 @@ fn render_svg_aa_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config)
         "svg_aa_mode",
         "SVG Anti-Aliasing",
         Some(
-            "Controls supersampled SVG rasterization for launcher icons. Changes apply immediately.",
+            "Controls supersampled SVG rasterization for launcher icons. Changes apply immediately. Default: Balanced (SSAA 2x).",
         ),
         &mut selected,
         &labels,
@@ -808,7 +934,9 @@ fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut C
         ui,
         "skins_preview_texel_aa_mode",
         "Skin Preview Texel Edge AA",
-        Some("Controls texel-boundary smoothing in the skin shader itself."),
+        Some(
+            "Smooths the hard pixel edges between skin texels inside the skin shader, on top of the post anti-aliasing below. Off keeps crisp pixel-art edges. Default: Off.",
+        ),
         &mut texel_selected,
         &texel_labels,
     );
@@ -834,7 +962,7 @@ fn render_skin_preview_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut C
         "skins_preview_aa_mode",
         "Skin Preview Post Anti-Aliasing",
         Some(
-            "MSAA, SMAA, FXAA, TAA, and FXAA + TAA all run on the GPU after the scene is rendered. Changes apply immediately.",
+            "How the skin preview is smoothed. MSAA samples the scene itself (see MSAA Samples); SMAA and FXAA are post-process filters; TAA blends frames over time; Off is fastest. Changes apply immediately. Default: FXAA (Post).",
         ),
         &mut selected,
         &labels,
@@ -859,7 +987,7 @@ fn render_skin_preview_motion_blur_settings(
         ui,
         "Enable Skin Preview Motion Blur",
         Some(
-            "Uses multi-sample temporal shutter accumulation in the 3D skin preview. Applies immediately.",
+            "Blurs the moving 3D skin preview by blending several moments across the shutter interval. Applies immediately. Default: Off.",
         ),
         &mut enabled,
     );
@@ -925,7 +1053,9 @@ fn render_skin_preview_motion_blur_settings(
         ui,
         sample_spec.id,
         sample_spec.label,
-        Some("Higher sample counts smooth the blur at the cost of more GPU work in the preview."),
+        Some(
+            "How many snapshots of the skin preview are blended across the shutter interval (2\u{2013}16). More samples make smoother blur and cost more GPU work. Default: 5.",
+        ),
         &mut sample_count,
         sample_spec.min,
         sample_spec.max,
@@ -937,70 +1067,59 @@ fn render_skin_preview_motion_blur_settings(
     ui.add_space(style::SPACE_MD);
 }
 
-fn render_window_blur_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
-    let setting = config::ToggleSettingId::WindowBlurEnabled.spec();
-
-    #[cfg(target_os = "macos")]
+fn render_window_transparency_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let setting = DropdownSettingId::WindowTransparency.spec();
+    let options = WindowTransparency::ALL;
+    let option_labels: Vec<&str> = options.iter().map(|option| option.label()).collect();
+    let mut selected_index = options
+        .iter()
+        .position(|option| *option == config.window_transparency())
+        .unwrap_or(0);
+    let response = settings_widgets::dropdown_row(
+        text_ui,
+        ui,
+        "window_transparency",
+        setting.label,
+        setting.info_tooltip,
+        &mut selected_index,
+        &option_labels,
+    );
+    if response.changed()
+        && let Some(next_mode) = options.get(selected_index).copied()
     {
-        if config.window_blur_enabled() {
-            config.set_window_blur_enabled(false);
-        }
-
-        let mut value = false;
-        let _ = ui.add_enabled_ui(false, |ui| {
-            settings_widgets::toggle_row(
-                text_ui,
-                ui,
-                setting.label,
-                setting.info_tooltip,
-                &mut value,
+        config.set_window_transparency(next_mode);
+        #[cfg(target_os = "windows")]
+        if next_mode.is_translucent()
+            && matches!(
+                config.graphics_api_preference(),
+                GraphicsApiPreference::Vulkan
             )
-        });
+        {
+            config.set_graphics_api_preference(GraphicsApiPreference::Dx12);
+        }
+    }
 
-        let note_style = style::muted(ui);
+    #[cfg(target_os = "windows")]
+    if config.window_transparency().is_translucent() {
         let _ = text_ui.label(
             ui,
-            "window_blur_macos_note",
-            "Temporarily disabled on macOS to keep startup on the stable path.",
-            &note_style,
+            "window_transparency_windows_graphics_api_note",
+            "Non-opaque window transparency uses the DirectX 12 renderer on Windows; Vulkan is unavailable while transparency is active.",
+            &style::muted(ui),
         );
-        ui.add_space(style::SPACE_MD);
-        return;
     }
 
-    #[cfg(not(target_os = "macos"))]
-    {
-        let mut value = config.window_blur_enabled();
-        let response = settings_widgets::toggle_row(
-            text_ui,
+    #[cfg(target_os = "macos")]
+    if config.window_transparency().uses_native_blur() {
+        let _ = text_ui.label(
             ui,
-            setting.label,
-            setting.info_tooltip,
-            &mut value,
+            "window_transparency_macos_blur_note",
+            "Native blur is currently downgraded to transparent mode on macOS at startup; macOS blur parameters are still saved in the macOS section.",
+            &style::muted(ui),
         );
-        if response.changed() {
-            config.set_window_blur_enabled(value);
-            #[cfg(target_os = "windows")]
-            if value
-                && matches!(
-                    config.graphics_api_preference(),
-                    GraphicsApiPreference::Vulkan
-                )
-            {
-                config.set_graphics_api_preference(GraphicsApiPreference::Dx12);
-            }
-        }
-        #[cfg(target_os = "windows")]
-        if config.window_blur_enabled() {
-            let _ = text_ui.label(
-                ui,
-                "window_blur_windows_graphics_api_note",
-                "Window blur uses the DirectX 12 renderer on Windows; Vulkan is unavailable while blur is enabled.",
-                &style::muted(ui),
-            );
-        }
-        ui.add_space(style::SPACE_MD);
     }
+
+    ui.add_space(style::SPACE_MD);
 }
 
 fn render_ui_opacity_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
@@ -1014,7 +1133,7 @@ fn render_ui_opacity_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Con
                 "ui_opacity_percent",
                 "UI Opacity",
                 Some(
-                    "Only active while native window blur is supported and enabled. 100% is fully opaque and 0% is fully transparent.",
+                    "Only active when Window Transparency is Transparent or Blurred. 100% is fully opaque UI chrome and 0% is fully transparent. Default: 100%.",
                 ),
                 &mut opacity_percent,
                 0,
@@ -1030,19 +1149,7 @@ fn render_ui_opacity_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Con
 }
 
 fn ui_opacity_setting_active(config: &Config) -> bool {
-    if !config.window_blur_enabled() || !crate::window_effects::platform_supports_blur() {
-        return false;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        true
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        true
-    }
+    config.window_transparency().is_translucent()
 }
 
 fn render_selected_toggles(
@@ -1141,7 +1248,9 @@ fn render_download_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Conf
         ui,
         "download_max_concurrent",
         "Max Concurrent Downloads",
-        Some("Maximum number of parallel downloads used by the launcher."),
+        Some(
+            "How many files the launcher downloads at the same time (1\u{2013}128) for game files, libraries and mods. Higher can be faster on fast connections but may trigger rate limits from download servers. Default: 8.",
+        ),
         &mut max_concurrent,
         DOWNLOAD_CONCURRENCY_MIN as i32,
         DOWNLOAD_CONCURRENCY_MAX as i32,
@@ -1157,7 +1266,9 @@ fn render_download_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Conf
         text_ui,
         ui,
         "Enable Download Speed Limit",
-        Some("Caps launcher download bandwidth using the value below."),
+        Some(
+            "Limits how fast the launcher downloads, using the value below. If the value is empty or not valid, no limit is applied. Default: Off.",
+        ),
         &mut speed_limit_enabled,
     );
     config.set_download_speed_limit_enabled(speed_limit_enabled);
@@ -1168,7 +1279,9 @@ fn render_download_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Conf
         ui,
         "download_speed_limit",
         "Download Speed Limit",
-        Some("Examples: 10mbps, 500kbps, 1gbps."),
+        Some(
+            "A number plus a unit in bits per second: Kbps, Mbps, Gbps or Tbps, for example 250Mbps. Decimals are allowed. Note this is bits, so 80Mbps is about 10 MB/s. A missing or unknown unit means no limit. Default: empty (no limit).",
+        ),
         config.download_speed_limit_mut(),
     );
     ui.add_space(style::SPACE_MD);
@@ -1339,7 +1452,9 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         ui,
         "download_max_concurrent",
         "Max concurrent downloads",
-        Some("Global cap on simultaneous download jobs. Default: 8."),
+        Some(
+            "How many files the launcher downloads at the same time (1\u{2013}128) for game files, libraries and mods. Higher can be faster on fast connections but may trigger rate limits from download servers. Default: 8.",
+        ),
         &mut max_concurrent_downloads,
         DOWNLOAD_CONCURRENCY_MIN as i32,
         DOWNLOAD_CONCURRENCY_MAX as i32,
@@ -1355,7 +1470,9 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         text_ui,
         ui,
         "Enable download speed limiter",
-        Some("When disabled, no bandwidth cap is applied."),
+        Some(
+            "Limits how fast the launcher downloads, using the value below. If the value is empty or not valid, no limit is applied. Default: Off.",
+        ),
         &mut speed_limit_enabled,
     );
     if speed_toggle_response.changed() {
@@ -1369,7 +1486,9 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         ui,
         "download_speed_limit",
         "Download speed limit",
-        Some("Format: <number><unit> where unit is Kbps, Mbps, Gbps, or Tbps (example: 250Mbps)."),
+        Some(
+            "A number plus a unit in bits per second: Kbps, Mbps, Gbps or Tbps, for example 250Mbps. Decimals are allowed. Note this is bits, so 80Mbps is about 10 MB/s. A missing or unknown unit means no limit. Default: empty (no limit).",
+        ),
         &mut speed_limit,
     );
     if speed_response.changed() {
@@ -1421,7 +1540,9 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         ui,
         "instance_defaults_memory_mib",
         "Default max memory allocation (MiB)",
-        Some("Amount of RAM allocated by default to new instances."),
+        Some(
+            "Maximum memory (Java -Xmx) for every instance that does not set its own memory in its instance settings. Changing it affects those instances the next time they launch. The slider stops at the RAM this computer has. Default: 4096 MiB.",
+        ),
         &mut default_memory,
         INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN,
         max_memory_mib,
@@ -1437,7 +1558,9 @@ fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &
         ui,
         "instance_defaults_cli_args",
         "Default CLI args",
-        Some("Extra JVM arguments applied to new instances (for example: -XX:+UseG1GC)."),
+        Some(
+            "Extra JVM arguments for every instance that does not set its own in its instance settings (for example: -XX:+UseZGC). An instance's own arguments replace these rather than adding to them. Applied the next time the instance launches. Default: empty (no extra arguments).",
+        ),
         config.default_instance_cli_args_mut(),
     );
     ui.add_space(10.0);

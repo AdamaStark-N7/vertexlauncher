@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::Arc,
 };
 
 use crate::{
@@ -26,17 +26,7 @@ pub(super) fn purge_activity_image_state(ctx: &egui::Context, state: &mut HomeTh
     }
     state.cache.clear();
     state.in_flight.clear();
-    state.results_tx = None;
-    state.results_rx = None;
-}
-
-fn ensure_instance_thumbnail_channel(state: &mut HomeThumbnailState) {
-    if state.results_tx.is_some() && state.results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, Option<Arc<[u8]>>)>();
-    state.results_tx = Some(tx);
-    state.results_rx = Some(Arc::new(Mutex::new(rx)));
+    state.results.reset();
 }
 
 pub(super) fn instance_thumbnail_cache_key(instance_id: &str, path: &Path) -> String {
@@ -63,10 +53,7 @@ pub(super) fn request_instance_thumbnail(
     if state.in_flight.contains(key.as_str()) {
         return;
     }
-    ensure_instance_thumbnail_channel(state);
-    let Some(tx) = state.results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.results.sender();
     state.in_flight.insert(key.clone());
     tokio_runtime::spawn_detached(async move {
         let bytes = match load_image_path_for_memory(path.clone()).await {
@@ -95,37 +82,10 @@ pub(super) fn request_instance_thumbnail(
 }
 
 pub(super) fn poll_instance_thumbnail_results(ctx: &egui::Context, state: &mut HomeThumbnailState) {
-    let Some(rx) = state.results_rx.as_ref() else {
-        return;
-    };
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    match rx.lock() {
-        Ok(receiver) => loop {
-            match receiver.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/home",
-                        "Home thumbnail worker disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        },
-        Err(_) => {
-            tracing::error!(
-                target: "vertexlauncher/home",
-                "Home thumbnail receiver mutex was poisoned."
-            );
-            should_reset_channel = true;
-        }
-    }
-    if should_reset_channel {
-        state.results_tx = None;
-        state.results_rx = None;
+    let drained = state.results.drain();
+    let updates = drained.items;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/home", "results worker channel stopped unexpectedly.");
         state.in_flight.clear();
     }
     for (key, bytes) in updates {

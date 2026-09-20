@@ -1,3 +1,6 @@
+use logged_fs::read_to_string as fs_read_to_string;
+use logged_fs::remove_file as fs_remove_file;
+use logged_fs::write as fs_write;
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -5,36 +8,6 @@ use crate::{
     CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, InstalledContentIdentity,
     MODPACK_STATE_FILE_NAME, ModpackInstallState,
 };
-
-#[track_caller]
-fn fs_read_to_string(path: &Path) -> std::io::Result<String> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = std::fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_write(path: &Path, raw: &str) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "write", path = %path.display());
-    let result = std::fs::write(path, raw);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "write", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_remove_file(path: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "remove_file", path = %path.display());
-    let result = std::fs::remove_file(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err);
-    }
-    result
-}
 
 #[must_use]
 pub fn content_manifest_path(instance_root: &Path) -> PathBuf {
@@ -307,7 +280,7 @@ mod tests {
                 modrinth_project_id: Some("AANobbMI".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
-                selected_version_id: Some("abc123".to_owned()),
+                selected_version_id: Some("abc723".to_owned()),
                 selected_version_name: Some("1.0.0".to_owned()),
                 selected_file_sha1: None,
                 selected_file_sha512: None,
@@ -348,7 +321,7 @@ mod tests {
                 modrinth_project_id: Some("AANobbMI".to_owned()),
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
-                selected_version_id: Some("abc123".to_owned()),
+                selected_version_id: Some("abc723".to_owned()),
                 selected_version_name: Some("1.0.0".to_owned()),
                 selected_file_sha1: None,
                 selected_file_sha512: None,

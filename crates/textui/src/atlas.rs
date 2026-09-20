@@ -197,6 +197,7 @@ pub(super) fn hash_text_fundamentals<H: Hasher>(fundamentals: &TextFundamentals,
     for feature in &fundamentals.feature_settings {
         feature.hash(state);
     }
+    fundamentals.font_family.hash(state);
     fundamentals.variation_settings.len().hash(state);
     for variation in &fundamentals.variation_settings {
         variation.hash(state);

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+config.workspace = true
 egui.workspace = true
 modal_host.workspace = true
 textui.workspace = true

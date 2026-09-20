@@ -28,7 +28,7 @@ use std::{
     hash::{Hash, Hasher},
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, mpsc},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use textui::TextUi;
@@ -81,9 +81,11 @@ mod instance_settings_modal;
 mod instance_version_detection;
 mod move_instance;
 mod platform;
+mod root_entries;
 mod runtime;
 mod runtime_prepare_operation;
 mod runtime_prepare_outcome;
+mod server_export_environment;
 
 pub use self::instance_presence_section::InstancePresenceSection;
 pub use instance_version_detection::{DetectedInstanceVersions, detect_instance_versions};
@@ -137,6 +139,7 @@ const MAX_INSTANCE_LOG_LINES: usize = 12_000;
 const INSTANCE_SCREENSHOT_COPY_BUTTON_SIZE: f32 = 28.0;
 const INSTANCE_TOP_TAB_ID_KEY: &str = "instance_top_tab_id";
 const INSTANCE_ROOT_COPY_BUTTON_SIZE: f32 = 28.0;
+const INSTANCE_GAME_SETTINGS_BUTTON_WIDTH: f32 = 140.0;
 
 fn absolute_path_for_clipboard(path: &Path) -> String {
     let absolute_path = if path.is_absolute() {
@@ -426,7 +429,9 @@ pub fn render(
         ui.spacing_mut().item_spacing.x = 6.0;
         let root_text = format!("Root: {}", instance_root_path.display());
         let root_label_style = style::muted_single_line(ui);
-        let reserved_button_width = INSTANCE_ROOT_COPY_BUTTON_SIZE + ui.spacing().item_spacing.x;
+        let reserved_button_width = INSTANCE_ROOT_COPY_BUTTON_SIZE
+            + INSTANCE_GAME_SETTINGS_BUTTON_WIDTH
+            + ui.spacing().item_spacing.x * 2.0;
         let max_root_text_width = (ui.available_width() - reserved_button_width).max(1.0);
         let display_root_text = truncate_single_line_text_with_ellipsis(
             text_ui,
@@ -442,7 +447,7 @@ pub fn render(
             &root_label_style,
         );
         if display_root_text != root_text {
-            root_response.on_hover_text(root_text.as_str());
+            let _ = crate::ui::style::hover_tip(ui, root_response, root_text.as_str());
         }
 
         let copy_button_id = format!("instance-root-copy-{instance_id}");
@@ -453,8 +458,9 @@ pub fn render(
             "Copy instance root path",
             false,
             INSTANCE_ROOT_COPY_BUTTON_SIZE,
-        )
-        .on_hover_text("Copy absolute instance root path");
+        );
+        let copy_response =
+            crate::ui::style::hover_tip(ui, copy_response, "Copy absolute instance root path");
         if copy_response.clicked() {
             ui.ctx()
                 .copy_text(absolute_path_for_clipboard(instance_root_path.as_path()));
@@ -463,6 +469,27 @@ pub fn render(
                 "Copied instance root path to the clipboard."
             );
         }
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if text_ui
+                .button(
+                    ui,
+                    ("instance_game_settings_open", instance_id),
+                    "Game settings",
+                    &style::neutral_button_with_min_size(
+                        ui,
+                        egui::vec2(INSTANCE_GAME_SETTINGS_BUTTON_WIDTH, style::CONTROL_HEIGHT),
+                    ),
+                )
+                .clicked()
+            {
+                crate::screens::game_settings::request_modal(
+                    ui.ctx(),
+                    &instance_snapshot,
+                    installations_root.as_path(),
+                );
+            }
+        });
     });
     ui.add_space(12.0);
 
@@ -484,6 +511,7 @@ pub fn render(
         instance_root_path.as_path(),
         selected_game_version_for_runtime.as_str(),
         config,
+        instances,
         external_install_active,
         auth,
         streamer_mode,
@@ -505,6 +533,7 @@ pub fn render(
         instances,
         config,
     );
+    crate::screens::game_settings::render_modal(ui.ctx(), text_ui, instances, config);
     render_move_instance_modal(
         ui.ctx(),
         text_ui,
@@ -697,8 +726,16 @@ where
         completed_steps: 0,
         total_steps: 1,
     });
-    let included_files = collect_server_export_files(instance_root, included_root_entries)?;
+    let mut included_files = collect_server_export_files(instance_root, included_root_entries)?;
     let manifest = managed_content::load_content_manifest(instance_root);
+    progress(vtmpack::VtmpackExportProgress {
+        message: "Checking which mods are client-only...".to_owned(),
+        completed_steps: 0,
+        total_steps: 1,
+    });
+    let client_only =
+        server_export_environment::find_client_only_mods(instance_root, &manifest, &included_files);
+    included_files.retain(|file| !client_only.excluded.contains(file));
     let unknowns = classify_curseforge_unknown_mods_for_server_export(
         instance_root,
         &manifest,
@@ -706,7 +743,10 @@ where
         included_files.len(),
     );
 
-    let required_java = runtime::required_java_major(instance.game_version.as_str()).map(|major| {
+    let required_java = config::JavaRuntimeVersion::required_major_for_game(
+        instance.game_version.as_str(),
+    )
+    .map(|major| {
         if force_java_21_minimum && major < 21 {
             21
         } else {
@@ -779,8 +819,14 @@ where
     zip.start_file("VERTEX_SERVER_BUILD_REPORT.txt", file_options)
         .map_err(|err| format!("failed to add VERTEX_SERVER_BUILD_REPORT.txt: {err}"))?;
     zip.write_all(
-        build_server_export_report(instance, included_root_entries, required_java, &unknowns)
-            .as_bytes(),
+        build_server_export_report(
+            instance,
+            included_root_entries,
+            required_java,
+            &unknowns,
+            &client_only,
+        )
+        .as_bytes(),
     )
     .map_err(|err| format!("failed to write server build report: {err}"))?;
     completed_steps += 1;
@@ -812,8 +858,9 @@ where
         total_steps,
     });
     Ok(format!(
-        "{} files included, {} CurseForge-managed unknown mods flagged.",
+        "{} files included, {} client-only mods left out, {} CurseForge-managed unknown mods flagged.",
         included_files.len(),
+        client_only.excluded.len(),
         unknowns.len()
     ))
 }
@@ -942,6 +989,7 @@ fn build_server_export_report(
     included_root_entries: &BTreeMap<String, bool>,
     required_java: Option<u8>,
     unknowns: &[String],
+    client_only: &server_export_environment::ClientOnlyMods,
 ) -> String {
     let mut report = String::new();
     report.push_str("Vertex Auto-Generated Server Package\n");
@@ -971,6 +1019,21 @@ fn build_server_export_report(
     } else {
         report.push_str("CurseForge unknowns (not found on Modrinth by hash):\n");
         for entry in unknowns {
+            report.push_str(format!("- {entry}\n").as_str());
+        }
+        report.push('\n');
+    }
+    if let Some(error) = &client_only.lookup_error {
+        report.push_str(format!(
+            "Client-only mod check skipped (Modrinth unreachable: {error}). All mods were included.\n\n"
+        ).as_str());
+    } else if client_only.descriptions.is_empty() {
+        report.push_str("Client-only mods left out:\n- none\n\n");
+    } else {
+        report.push_str(
+            "Client-only mods left out (Modrinth marks them as not running on servers):\n",
+        );
+        for entry in &client_only.descriptions {
             report.push_str(format!("- {entry}\n").as_str());
         }
         report.push('\n');
@@ -1098,12 +1161,6 @@ fn format_time_ago(timestamp_ms: Option<u64>, now_ms: u64) -> String {
     }
     let elapsed_years = elapsed_days / 365;
     format!("{elapsed_years}y ago")
-}
-
-fn apply_color_to_svg(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", &color_hex);
-    svg.into_bytes()
 }
 
 fn ensure_selected_modloader_is_supported(state: &mut InstanceScreenState, game_version: &str) {

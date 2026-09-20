@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::Arc;
 
 use crate::app::tokio_runtime;
 use shared_lru::ThreadSafeLru;
@@ -37,8 +37,7 @@ pub struct LazyImageBytes {
     states: ThreadSafeLru<String, LazyImageEntry>,
     frame_index: u64,
     generation: u64,
-    results_tx: Option<mpsc::Sender<(u64, String, Result<Arc<[u8]>, String>)>>,
-    results_rx: Option<Arc<Mutex<mpsc::Receiver<(u64, String, Result<Arc<[u8]>, String>)>>>>,
+    results: launcher_runtime::WorkerChannel<(u64, String, Result<Arc<[u8]>, String>)>,
 }
 
 impl Default for LazyImageBytes {
@@ -47,8 +46,7 @@ impl Default for LazyImageBytes {
             states: ThreadSafeLru::new(LAZY_IMAGE_MAX_BYTES),
             frame_index: 0,
             generation: 0,
-            results_tx: None,
-            results_rx: None,
+            results: Default::default(),
         }
     }
 }
@@ -61,37 +59,14 @@ impl LazyImageBytes {
     }
 
     pub fn poll(&mut self, ctx: &egui::Context) -> bool {
-        let mut updates = Vec::new();
-        let mut should_reset = false;
-        if let Some(rx) = self.results_rx.as_ref() {
-            match rx.lock() {
-                Ok(receiver) => loop {
-                    match receiver.try_recv() {
-                        Ok(update) => updates.push(update),
-                        Err(mpsc::TryRecvError::Empty) => break,
-                        Err(mpsc::TryRecvError::Disconnected) => {
-                            tracing::error!(
-                                target: "vertexlauncher/lazy_image",
-                                "Lazy image worker disconnected unexpectedly."
-                            );
-                            should_reset = true;
-                            break;
-                        }
-                    }
-                },
-                Err(_) => {
-                    tracing::error!(
-                        target: "vertexlauncher/lazy_image",
-                        "Lazy image receiver mutex was poisoned."
-                    );
-                    should_reset = true;
-                }
-            }
-        }
+        let drained = self.results.drain();
+        let updates = drained.items;
 
-        if should_reset {
-            self.results_tx = None;
-            self.results_rx = None;
+        if drained.disconnected {
+            tracing::error!(
+                target: "vertexlauncher/lazy_image",
+                "Lazy image worker channel stopped unexpectedly."
+            );
             // Remove entries stuck in Loading state — their in-flight tasks held the
             // old sender and can no longer deliver results. Dropping them lets the
             // next request() call re-dispatch on the new channel.
@@ -200,20 +175,7 @@ impl LazyImageBytes {
             };
         }
 
-        self.ensure_channel();
-        let Some(tx) = self.results_tx.as_ref().cloned() else {
-            let _ = self.states.write(|state| {
-                state.insert_without_eviction(
-                    key,
-                    LazyImageEntry {
-                        state: LazyImageBytesState::Failed,
-                        last_touched_frame: self.frame_index,
-                    },
-                    0,
-                );
-            });
-            return LazyImageBytesStatus::Failed;
-        };
+        let tx = self.results.sender();
 
         let _ = self.states.write(|state| {
             state.insert_without_eviction(
@@ -260,17 +222,7 @@ impl LazyImageBytes {
         }
         let _ = self.states.write(|state| state.clear());
         self.generation = self.generation.saturating_add(1);
-        self.results_tx = None;
-        self.results_rx = None;
-    }
-
-    fn ensure_channel(&mut self) {
-        if self.results_tx.is_some() && self.results_rx.is_some() {
-            return;
-        }
-        let (tx, rx) = mpsc::channel::<(u64, String, Result<Arc<[u8]>, String>)>();
-        self.results_tx = Some(tx);
-        self.results_rx = Some(Arc::new(Mutex::new(rx)));
+        self.results.reset();
     }
 
     fn trim_stale(&mut self, _ctx: &egui::Context) {

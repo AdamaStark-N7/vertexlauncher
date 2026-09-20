@@ -84,10 +84,14 @@ pub(super) fn render_export_vtmpack_modal(
                     );
                 }
                 ui.add_space(10.0);
-                ui.add(
-                    egui::ProgressBar::new(progress_fraction)
-                        .desired_width(ui.available_width())
-                        .show_percentage(),
+                crate::ui::components::progress_bar::progress_bar(
+                    ui,
+                    text_ui,
+                    "instance_export_progress_a",
+                    progress_fraction,
+                    false,
+                    (None, None),
+                    crate::ui::components::progress_bar::ProgressLabel::Percentage,
                 );
             } else {
                 let title_style = style::modal_title(ui);
@@ -119,7 +123,15 @@ pub(super) fn render_export_vtmpack_modal(
                     VtmpackProviderMode::ExcludeCurseForge,
                 ] {
                     let selected = state.export_vtmpack_options.provider_mode == provider_mode;
-                    if ui.radio(selected, provider_mode.label()).clicked() {
+                    if crate::ui::components::choice_controls::radio(
+                        ui,
+                        text_ui,
+                        ("instance_export_provider_mode", provider_mode.label()),
+                        provider_mode.label(),
+                        selected,
+                    )
+                    .clicked()
+                    {
                         state.export_vtmpack_options.provider_mode = provider_mode;
                     }
                 }
@@ -153,7 +165,15 @@ pub(super) fn render_export_vtmpack_modal(
                 ] {
                     let selected =
                         state.export_vtmpack_options.compression_mode == compression_mode;
-                    if ui.radio(selected, compression_mode.label()).clicked() {
+                    if crate::ui::components::choice_controls::radio(
+                        ui,
+                        text_ui,
+                        ("instance_export_compression_mode", compression_mode.label()),
+                        compression_mode.label(),
+                        selected,
+                    )
+                    .clicked()
+                    {
                         state.export_vtmpack_options.compression_mode = compression_mode;
                     }
                 }
@@ -188,7 +208,10 @@ pub(super) fn render_export_vtmpack_modal(
                 ui.add_space(8.0);
 
                 if let Some(instance_root) = instance_root.as_deref() {
-                    if !instance_root.is_dir() {
+                    let listing = state
+                        .export_vtmpack_root_entries
+                        .get(ui.ctx(), instance_root);
+                    if listing.loaded && !listing.root_exists {
                         let _ = text_ui.label(
                             ui,
                             ("instance_export_vtmpack_missing_root", instance_id),
@@ -199,9 +222,16 @@ pub(super) fn render_export_vtmpack_modal(
                             &body_style,
                         );
                     } else {
-                        let entries = list_exportable_root_entries(instance_root);
+                        let entries = listing.entries.clone();
                         ui.set_width(ui.available_width());
-                        if entries.is_empty() {
+                        if !listing.loaded {
+                            let _ = text_ui.label(
+                                ui,
+                                ("instance_export_vtmpack_loading_root", instance_id),
+                                "Reading instance files...",
+                                &body_style,
+                            );
+                        } else if entries.is_empty() {
                             let _ = text_ui.label(
                                 ui,
                                 ("instance_export_vtmpack_empty_root", instance_id),
@@ -215,7 +245,8 @@ pub(super) fn render_export_vtmpack_modal(
                                 .auto_shrink([false, true])
                                 .show(ui, |ui| {
                                     ui.set_width(ui.available_width());
-                                    for entry in entries {
+                                    for root_entry in entries.iter() {
+                                        let entry = root_entry.name.clone();
                                         let checked = state
                                             .export_vtmpack_options
                                             .included_root_entries
@@ -223,12 +254,18 @@ pub(super) fn render_export_vtmpack_modal(
                                             .or_insert_with(|| {
                                                 default_vtmpack_root_entry_selected(&entry)
                                             });
-                                        let label = if instance_root.join(entry.as_str()).is_dir() {
+                                        let label = if root_entry.is_dir {
                                             format!("{entry}/")
                                         } else {
                                             entry.clone()
                                         };
-                                        ui.checkbox(checked, label);
+                                        crate::ui::components::choice_controls::checkbox(
+                                            ui,
+                                            text_ui,
+                                            ("instance_export_vtmpack_entry", entry.as_str()),
+                                            label.as_str(),
+                                            checked,
+                                        );
                                     }
                                 });
                         }
@@ -280,61 +317,32 @@ pub(super) fn render_export_vtmpack_modal(
         state.show_export_vtmpack_modal = false;
     }
 
+    // Pickers run without blocking the UI. Patch export chains two of them (base pack, then
+    // output), so each stage has its own slot and results are handled below every frame.
+    let base_slot = ("vtmpack_patch_base_dialog", instance_id);
+    let patch_output_slot = ("vtmpack_patch_output_dialog", instance_id);
+    let pack_output_slot = ("vtmpack_output_dialog", instance_id);
     if export_requested {
         if let Some(instance) = instances.find(instance_id) {
-            let instance_root = instances::instance_root_path(&installations_root, instance);
             if state.export_vtmpack_patch_mode {
-                let selected_base = rfd::FileDialog::new()
-                    .set_title("Choose Base Modpack")
-                    .add_filter("Vertex Modpack", &[VTMPACK_EXTENSION])
-                    .pick_file();
-                let Some(base_path) = selected_base else {
-                    return;
-                };
-                let default_file_name = default_vtmpatch_file_name(instance.name.as_str());
-                let selected_output = rfd::FileDialog::new()
-                    .set_title("Generate Patch")
-                    .set_file_name(default_file_name.as_str())
-                    .add_filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION])
-                    .save_file();
-                if let Some(selected_path) = selected_output {
-                    let output_path = enforce_vtmpatch_extension(selected_path);
-                    request_vtmpatch_export(
-                        state,
-                        instance.name.clone(),
-                        instance_root,
-                        base_path,
-                        output_path,
-                        state.export_vtmpack_options.clone(),
-                    );
-                    state.show_export_vtmpack_modal = true;
-                }
+                crate::ui::file_dialog::open(
+                    ctx,
+                    base_slot,
+                    crate::ui::file_dialog::Pick::File,
+                    crate::ui::file_dialog::Dialog::new()
+                        .title("Choose Base Modpack")
+                        .filter("Vertex Modpack", &[VTMPACK_EXTENSION]),
+                );
             } else {
-                let default_file_name = default_vtmpack_file_name(instance.name.as_str());
-                let selected_output = rfd::FileDialog::new()
-                    .set_title("Export Modpack")
-                    .set_file_name(default_file_name.as_str())
-                    .add_filter("Vertex Modpack", &[VTMPACK_EXTENSION])
-                    .save_file();
-
-                if let Some(selected_path) = selected_output {
-                    let output_path = enforce_vtmpack_extension(selected_path);
-                    let pack_instance = VtmpackInstanceMetadata {
-                        id: instance.id.clone(),
-                        name: instance.name.clone(),
-                        game_version: instance.game_version.clone(),
-                        modloader: instance.modloader.clone(),
-                        modloader_version: instance.modloader_version.clone(),
-                    };
-                    request_vtmpack_export(
-                        state,
-                        pack_instance,
-                        instance_root,
-                        output_path,
-                        state.export_vtmpack_options.clone(),
-                    );
-                    state.show_export_vtmpack_modal = true;
-                }
+                crate::ui::file_dialog::open(
+                    ctx,
+                    pack_output_slot,
+                    crate::ui::file_dialog::Pick::SaveFile,
+                    crate::ui::file_dialog::Dialog::new()
+                        .title("Export Modpack")
+                        .file_name(default_vtmpack_file_name(instance.name.as_str()))
+                        .filter("Vertex Modpack", &[VTMPACK_EXTENSION]),
+                );
             }
         } else {
             state.status_message = Some("Instance was removed before export.".to_owned());
@@ -342,21 +350,59 @@ pub(super) fn render_export_vtmpack_modal(
         }
     }
 
+    if let Some(instance) = instances.find(instance_id) {
+        let instance_root = instances::instance_root_path(&installations_root, instance);
+        if let Some(base_path) =
+            crate::ui::file_dialog::take(ctx, base_slot).and_then(|paths| paths.into_iter().next())
+        {
+            state.export_patch_base_path = Some(base_path);
+            crate::ui::file_dialog::open(
+                ctx,
+                patch_output_slot,
+                crate::ui::file_dialog::Pick::SaveFile,
+                crate::ui::file_dialog::Dialog::new()
+                    .title("Generate Patch")
+                    .file_name(default_vtmpatch_file_name(instance.name.as_str()))
+                    .filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION]),
+            );
+        }
+        if let Some(selected_path) = crate::ui::file_dialog::take(ctx, patch_output_slot)
+            .and_then(|paths| paths.into_iter().next())
+            && let Some(base_path) = state.export_patch_base_path.take()
+        {
+            request_vtmpatch_export(
+                state,
+                instance.name.clone(),
+                instance_root.clone(),
+                base_path,
+                enforce_vtmpatch_extension(selected_path),
+                state.export_vtmpack_options.clone(),
+            );
+            state.show_export_vtmpack_modal = true;
+        }
+        if let Some(selected_path) = crate::ui::file_dialog::take(ctx, pack_output_slot)
+            .and_then(|paths| paths.into_iter().next())
+        {
+            let pack_instance = VtmpackInstanceMetadata {
+                id: instance.id.clone(),
+                name: instance.name.clone(),
+                game_version: instance.game_version.clone(),
+                modloader: instance.modloader.clone(),
+                modloader_version: instance.modloader_version.clone(),
+            };
+            request_vtmpack_export(
+                state,
+                pack_instance,
+                instance_root,
+                enforce_vtmpack_extension(selected_path),
+                state.export_vtmpack_options.clone(),
+            );
+            state.show_export_vtmpack_modal = true;
+        }
+    }
+
     state.show_export_vtmpack_modal =
         state.show_export_vtmpack_modal || state.export_vtmpack_in_flight;
-}
-
-fn ensure_vtmpack_export_channels(state: &mut InstanceScreenState) {
-    if state.export_vtmpack_progress_tx.is_none() || state.export_vtmpack_progress_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.export_vtmpack_progress_tx = Some(tx);
-        state.export_vtmpack_progress_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-    if state.export_vtmpack_results_tx.is_none() || state.export_vtmpack_results_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.export_vtmpack_results_tx = Some(tx);
-        state.export_vtmpack_results_rx = Some(Arc::new(Mutex::new(rx)));
-    }
 }
 
 fn request_vtmpack_export(
@@ -371,15 +417,8 @@ fn request_vtmpack_export(
         return;
     }
 
-    ensure_vtmpack_export_channels(state);
-    let Some(progress_tx) = state.export_vtmpack_progress_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start .vtmpack export progress channel.".to_owned());
-        return;
-    };
-    let Some(results_tx) = state.export_vtmpack_results_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start .vtmpack export result channel.".to_owned());
-        return;
-    };
+    let progress_tx = state.export_vtmpack_progress.sender();
+    let results_tx = state.export_vtmpack_results.sender();
 
     state.export_vtmpack_in_flight = true;
     state.export_vtmpack_output_path = Some(output_path.clone());
@@ -441,16 +480,8 @@ fn request_vtmpatch_export(
         return;
     }
 
-    ensure_vtmpack_export_channels(state);
-    let Some(progress_tx) = state.export_vtmpack_progress_tx.as_ref().cloned() else {
-        state.status_message =
-            Some("Failed to start .vtmpatch export progress channel.".to_owned());
-        return;
-    };
-    let Some(results_tx) = state.export_vtmpack_results_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start .vtmpatch export result channel.".to_owned());
-        return;
-    };
+    let progress_tx = state.export_vtmpack_progress.sender();
+    let results_tx = state.export_vtmpack_results.sender();
 
     state.export_vtmpack_in_flight = true;
     state.export_vtmpack_output_path = Some(output_path.clone());
@@ -501,38 +532,11 @@ fn request_vtmpatch_export(
 }
 
 pub(super) fn poll_vtmpack_export_progress(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.export_vtmpack_progress_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_export",
-                            "vtmpack export progress worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_export",
-                    "vtmpack export progress receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
+    let drained = state.export_vtmpack_progress.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_export", "export_vtmpack_progress worker channel stopped unexpectedly.");
     }
-
-    if should_reset_channel && !state.export_vtmpack_in_flight {
-        state.export_vtmpack_progress_tx = None;
-        state.export_vtmpack_progress_rx = None;
-    }
+    let updates = drained.items;
 
     if let Some(update) = updates.into_iter().last() {
         state.export_vtmpack_latest_progress = Some(update);
@@ -540,33 +544,11 @@ pub(super) fn poll_vtmpack_export_progress(state: &mut InstanceScreenState) {
 }
 
 pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.export_vtmpack_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_export",
-                            "vtmpack export result worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_export",
-                    "vtmpack export result receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
+    let drained = state.export_vtmpack_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_export", "export_vtmpack_results worker channel stopped unexpectedly.");
     }
+    let updates = drained.items;
 
     for update in updates {
         state.export_vtmpack_in_flight = false;
@@ -585,9 +567,17 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                         "Generated patch for {} — {} downloadable mod{}, {} bundled mod{}, {} changed config file{}, {} changed additional file{} — saved to {}",
                         update.instance_name,
                         stats.downloadable_mod_files,
-                        if stats.downloadable_mod_files == 1 { "" } else { "s" },
+                        if stats.downloadable_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.bundled_mod_files,
-                        if stats.bundled_mod_files == 1 { "" } else { "s" },
+                        if stats.bundled_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.config_files,
                         if stats.config_files == 1 { "" } else { "s" },
                         stats.additional_files,
@@ -609,9 +599,17 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                         "Patch generated — {} — {} downloadable mod{}, {} bundled mod{}",
                         output_file_name,
                         stats.downloadable_mod_files,
-                        if stats.downloadable_mod_files == 1 { "" } else { "s" },
+                        if stats.downloadable_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.bundled_mod_files,
-                        if stats.bundled_mod_files == 1 { "" } else { "s" },
+                        if stats.bundled_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                     );
                     state.status_message = Some(msg);
                 } else {
@@ -619,9 +617,17 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                         "Exported {} — {} downloadable mod{}, {} bundled mod{}, {} config file{}, {} additional file{} — saved to {}",
                         update.instance_name,
                         stats.downloadable_mod_files,
-                        if stats.downloadable_mod_files == 1 { "" } else { "s" },
+                        if stats.downloadable_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.bundled_mod_files,
-                        if stats.bundled_mod_files == 1 { "" } else { "s" },
+                        if stats.bundled_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.config_files,
                         if stats.config_files == 1 { "" } else { "s" },
                         stats.additional_files,
@@ -643,9 +649,17 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                         "Pack exported — {} — {} downloadable mod{}, {} bundled mod{}",
                         output_file_name,
                         stats.downloadable_mod_files,
-                        if stats.downloadable_mod_files == 1 { "" } else { "s" },
+                        if stats.downloadable_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                         stats.bundled_mod_files,
-                        if stats.bundled_mod_files == 1 { "" } else { "s" },
+                        if stats.bundled_mod_files == 1 {
+                            ""
+                        } else {
+                            "s"
+                        },
                     );
                     state.status_message = Some(msg);
                 }
@@ -659,7 +673,11 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
                     "{} export failed",
                     if update.is_patch { "vtmpatch" } else { "vtmpack" }
                 );
-                let ext = if update.is_patch { "vtmpatch" } else { "vtmpack" };
+                let ext = if update.is_patch {
+                    "vtmpatch"
+                } else {
+                    "vtmpack"
+                };
                 notification::error!(
                     "vtmpack/export",
                     "{} export failed — {}",
@@ -671,7 +689,7 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
         }
     }
 
-    if should_reset_channel && state.export_vtmpack_in_flight {
+    if drained.disconnected && state.export_vtmpack_in_flight {
         state.export_vtmpack_in_flight = false;
         state.export_vtmpack_latest_progress = None;
         state.export_vtmpack_output_path = None;
@@ -680,11 +698,9 @@ pub(super) fn poll_vtmpack_export_results(state: &mut InstanceScreenState) {
             Some("Failed to export: export task stopped unexpectedly.".to_owned());
     }
 
-    if should_reset_channel || !state.export_vtmpack_in_flight {
-        state.export_vtmpack_progress_tx = None;
-        state.export_vtmpack_progress_rx = None;
-        state.export_vtmpack_results_tx = None;
-        state.export_vtmpack_results_rx = None;
+    if drained.disconnected || !state.export_vtmpack_in_flight {
+        state.export_vtmpack_progress.reset();
+        state.export_vtmpack_results.reset();
     }
 }
 
@@ -817,10 +833,14 @@ pub(super) fn render_export_server_modal(
                     );
                 }
                 ui.add_space(10.0);
-                ui.add(
-                    egui::ProgressBar::new(progress_fraction)
-                        .desired_width(ui.available_width())
-                        .show_percentage(),
+                crate::ui::components::progress_bar::progress_bar(
+                    ui,
+                    text_ui,
+                    "instance_export_progress_b",
+                    progress_fraction,
+                    false,
+                    (None, None),
+                    crate::ui::components::progress_bar::ProgressLabel::Percentage,
                 );
             } else {
                 let _ = text_ui.label(
@@ -838,7 +858,10 @@ pub(super) fn render_export_server_modal(
                 ui.add_space(8.0);
 
                 if let Some(instance_root) = instance_root.as_deref() {
-                    let entries = list_exportable_root_entries(instance_root);
+                    let entries = state
+                        .export_server_root_entries
+                        .get(ui.ctx(), instance_root)
+                        .entries;
                     ui.set_width(ui.available_width());
                     egui::ScrollArea::vertical()
                         .id_salt(("instance_export_server_entries_scroll", instance_id))
@@ -846,19 +869,26 @@ pub(super) fn render_export_server_modal(
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            for entry in entries {
+                            for root_entry in entries.iter() {
+                                let entry = root_entry.name.clone();
                                 let checked = state
                                     .export_server_included_root_entries
                                     .entry(entry.clone())
                                     .or_insert_with(|| {
                                         default_server_root_entry_selected(entry.as_str())
                                     });
-                                let label = if instance_root.join(entry.as_str()).is_dir() {
+                                let label = if root_entry.is_dir {
                                     format!("{entry}/")
                                 } else {
                                     entry.clone()
                                 };
-                                ui.checkbox(checked, label);
+                                crate::ui::components::choice_controls::checkbox(
+                                    ui,
+                                    text_ui,
+                                    ("instance_export_server_entry", entry.as_str()),
+                                    label.as_str(),
+                                    checked,
+                                );
                             }
                         });
                 } else {
@@ -927,19 +957,6 @@ pub(super) fn render_export_server_modal(
         state.show_export_server_modal || state.export_server_in_flight;
 }
 
-fn ensure_server_export_channels(state: &mut InstanceScreenState) {
-    if state.export_server_progress_tx.is_none() || state.export_server_progress_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.export_server_progress_tx = Some(tx);
-        state.export_server_progress_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-    if state.export_server_results_tx.is_none() || state.export_server_results_rx.is_none() {
-        let (tx, rx) = mpsc::channel();
-        state.export_server_results_tx = Some(tx);
-        state.export_server_results_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-}
-
 fn request_server_export(
     state: &mut InstanceScreenState,
     instance: instances::InstanceRecord,
@@ -953,15 +970,8 @@ fn request_server_export(
         return;
     }
 
-    ensure_server_export_channels(state);
-    let Some(progress_tx) = state.export_server_progress_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start server export progress channel.".to_owned());
-        return;
-    };
-    let Some(results_tx) = state.export_server_results_tx.as_ref().cloned() else {
-        state.status_message = Some("Failed to start server export result channel.".to_owned());
-        return;
-    };
+    let progress_tx = state.export_server_progress.sender();
+    let results_tx = state.export_server_results.sender();
 
     state.export_server_in_flight = true;
     state.export_server_output_path = Some(output_path.clone());
@@ -1016,38 +1026,11 @@ fn request_server_export(
 }
 
 pub(super) fn poll_server_export_progress(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.export_server_progress_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_export",
-                            "Server export progress worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_export",
-                    "Server export progress receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
+    let drained = state.export_server_progress.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_export", "export_server_progress worker channel stopped unexpectedly.");
     }
-
-    if should_reset_channel && !state.export_server_in_flight {
-        state.export_server_progress_tx = None;
-        state.export_server_progress_rx = None;
-    }
+    let updates = drained.items;
 
     if let Some(update) = updates.into_iter().last() {
         state.export_server_latest_progress = Some(update);
@@ -1055,33 +1038,11 @@ pub(super) fn poll_server_export_progress(state: &mut InstanceScreenState) {
 }
 
 pub(super) fn poll_server_export_results(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.export_server_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_export",
-                            "Server export result worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_export",
-                    "Server export result receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
+    let drained = state.export_server_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_export", "export_server_results worker channel stopped unexpectedly.");
     }
+    let updates = drained.items;
 
     for update in updates {
         state.export_server_in_flight = false;
@@ -1109,7 +1070,7 @@ pub(super) fn poll_server_export_results(state: &mut InstanceScreenState) {
         }
     }
 
-    if should_reset_channel && state.export_server_in_flight {
+    if drained.disconnected && state.export_server_in_flight {
         state.export_server_in_flight = false;
         state.export_server_latest_progress = None;
         state.export_server_output_path = None;
@@ -1118,11 +1079,9 @@ pub(super) fn poll_server_export_results(state: &mut InstanceScreenState) {
             Some("Failed to export server zip: export task stopped unexpectedly.".to_owned());
     }
 
-    if should_reset_channel || !state.export_server_in_flight {
-        state.export_server_progress_tx = None;
-        state.export_server_progress_rx = None;
-        state.export_server_results_tx = None;
-        state.export_server_results_rx = None;
+    if drained.disconnected || !state.export_server_in_flight {
+        state.export_server_progress.reset();
+        state.export_server_results.reset();
     }
 }
 

@@ -79,18 +79,11 @@ pub fn render(
         |ui| {
             ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
 
-            let heading = LabelOptions {
-                font_size: 30.0,
-                line_height: 34.0,
-                weight: 700,
-                color: ui.visuals().text_color(),
-                wrap: false,
-                ..LabelOptions::default()
-            };
+            let heading = launcher_ui::ui::style::modal_title(ui);
             let body = LabelOptions {
                 color: ui.visuals().weak_text_color(),
                 wrap: true,
-                ..LabelOptions::default()
+                ..launcher_ui::ui::style::body(ui)
             };
 
             let _ = text_ui.label(

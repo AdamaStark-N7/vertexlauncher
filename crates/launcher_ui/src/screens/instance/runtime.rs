@@ -1,5 +1,8 @@
 use super::*;
 
+use crate::launch_settings::InstanceLaunchSettings;
+pub(super) use instances::normalize_optional;
+
 const RUNTIME_PREPARE_TASK_KIND: &str = "instance runtime prepare";
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const MODLOADER_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
@@ -145,6 +148,7 @@ pub(super) fn render_runtime_row(
     instance_root: &Path,
     game_version: &str,
     config: &Config,
+    instances: &InstanceStore,
     external_install_active: bool,
     auth: &PlayerAuthContext<'_>,
     streamer_mode: bool,
@@ -159,7 +163,7 @@ pub(super) fn render_runtime_row(
         stroke: ui.visuals().selection.stroke,
         ..ButtonOptions::default()
     };
-    let mut muted_style = LabelOptions::default();
+    let mut muted_style = crate::ui::style::body(ui);
     muted_style.color = ui.visuals().weak_text_color();
     muted_style.wrap = false;
     let instance_root_key = normalize_path_key(instance_root);
@@ -174,7 +178,10 @@ pub(super) fn render_runtime_row(
         .map(|a| a.player_name.clone())
         .or_else(|| auth.display_name().map(str::to_owned));
     let launch_player_uuid = auth.launch_auth.as_ref().map(|a| a.player_uuid.clone());
-    let launch_access_token = auth.launch_auth.as_ref().and_then(|a| a.access_token.clone());
+    let launch_access_token = auth
+        .launch_auth
+        .as_ref()
+        .and_then(|a| a.access_token.clone());
     let launch_xuid = auth.launch_auth.as_ref().and_then(|a| a.xuid.clone());
     let launch_user_type = auth.launch_auth.as_ref().map(|a| a.user_type.clone());
     let runtime_running_for_active_account = launch_account
@@ -239,13 +246,23 @@ pub(super) fn render_runtime_row(
                     state.status_message =
                         Some("Cannot launch: choose a Minecraft game version first.".to_owned());
                 } else {
-                    let max_memory_mib = if state.memory_override_enabled {
-                        state.memory_override_mib
-                    } else {
-                        config.default_instance_max_memory_mib()
-                    };
-                    let extra_jvm_args = normalize_optional(state.cli_args_input.as_str());
-                    let extra_env_vars = normalize_optional(state.env_vars_input.as_str());
+                    // Launch from the saved record (like the library and home screens do);
+                    // edits in the settings modal are autosaved shortly after they are made.
+                    let saved = instances.find(id);
+                    let InstanceLaunchSettings {
+                        max_memory_mib,
+                        extra_jvm_args,
+                        extra_env_vars,
+                        linux_set_opengl_driver,
+                        linux_use_zink_driver,
+                    } = InstanceLaunchSettings::resolve(
+                        config,
+                        saved.unwrap_or(&instances::InstanceRecord::default()),
+                    );
+                    let java_override_enabled =
+                        saved.is_some_and(|instance| instance.java_override_enabled);
+                    let java_override_runtime_major =
+                        saved.and_then(|instance| instance.java_override_runtime_major);
                     state.launch_username = launch_display_name
                         .as_deref()
                         .map(|value| {
@@ -268,8 +285,6 @@ pub(super) fn render_runtime_row(
                                 Some(trimmed.to_owned())
                             }
                         });
-                    let (linux_set_opengl_driver, linux_use_zink_driver) =
-                        super::effective_linux_graphics_settings_for_state(state, config);
                     request_runtime_prepare(
                         state,
                         RuntimePrepareOperation::Launch,
@@ -277,12 +292,11 @@ pub(super) fn render_runtime_row(
                         game_version.trim().to_owned(),
                         selected_modloader_value(state),
                         normalize_optional(state.modloader_version_input.as_str()),
-                        effective_required_java_major(config, game_version),
-                        choose_java_executable(
-                            config,
-                            state.java_override_enabled,
-                            state.java_override_runtime_major,
-                            effective_required_java_major(config, game_version),
+                        config.effective_required_java_major(game_version),
+                        config.choose_java_executable(
+                            java_override_enabled,
+                            java_override_runtime_major,
+                            config.effective_required_java_major(game_version),
                         ),
                         config.download_max_concurrent(),
                         config.parsed_download_speed_limit_bps(),
@@ -298,6 +312,7 @@ pub(super) fn render_runtime_row(
                         launch_xuid.clone(),
                         launch_user_type.clone(),
                         launch_account.clone(),
+                        Some(crate::sync_runner::SyncRunConfig::from_config(config)),
                     );
                 }
             }
@@ -503,7 +518,7 @@ pub(super) fn render_stop_runtime_button(
             stop_icon_color.g(),
             stop_icon_color.b()
         ),
-        apply_color_to_svg(assets::STOP_SVG, stop_icon_color),
+        crate::ui::svg_tint::tint_svg(assets::STOP_SVG, stop_icon_color),
     )
     .fit_to_exact_size(egui::vec2(icon_size, icon_size));
     let _ = ui.put(stop_icon_rect, stop_icon);
@@ -531,7 +546,7 @@ pub(super) fn render_runtime_avatar(
                 egui::TextureOptions::LINEAR,
             )
         {
-            let image = egui::Image::from_texture(&texture).fit_to_exact_size(rect.size());
+            let image = texture.image().fit_to_exact_size(rect.size());
             let _ = ui.put(rect, image);
         }
         return;
@@ -539,7 +554,7 @@ pub(super) fn render_runtime_avatar(
 
     let fallback = egui::Image::from_bytes(
         format!("bytes://instance/runtime-avatar-fallback/{id}.svg"),
-        apply_color_to_svg(assets::USER_SVG, color),
+        crate::ui::svg_tint::tint_svg(assets::USER_SVG, color),
     )
     .fit_to_exact_size(rect.size());
     let _ = ui.put(rect, fallback);
@@ -564,15 +579,6 @@ pub(super) fn selected_modloader_value(state: &InstanceScreenState) -> String {
             .copied()
             .unwrap_or(MODLOADER_OPTIONS[0])
             .to_owned()
-    }
-}
-
-pub(super) fn normalize_optional(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
     }
 }
 
@@ -653,10 +659,7 @@ pub(super) fn sync_version_catalog(
         return;
     }
 
-    ensure_version_catalog_channel(state);
-    let Some(tx) = state.version_catalog_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.version_catalog.sender();
 
     state.version_catalog_in_flight = true;
     state.version_catalog_error = None;
@@ -714,15 +717,6 @@ pub(super) fn sync_version_catalog(
     });
 }
 
-pub(super) fn ensure_version_catalog_channel(state: &mut InstanceScreenState) {
-    if state.version_catalog_results_tx.is_some() && state.version_catalog_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(VersionCatalogFilter, Result<VersionCatalog, String>)>();
-    state.version_catalog_results_tx = Some(tx);
-    state.version_catalog_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn apply_version_catalog(
     state: &mut InstanceScreenState,
     filter: VersionCatalogFilter,
@@ -770,41 +764,17 @@ pub(super) fn apply_version_catalog_error(
 }
 
 pub(super) fn poll_version_catalog(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.version_catalog_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_runtime",
-                            "Instance version catalog worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_runtime",
-                    "Instance version catalog receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
-
-    if should_reset_channel {
-        state.version_catalog_results_tx = None;
-        state.version_catalog_results_rx = None;
+    let drained = state.version_catalog.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/instance_runtime",
+            "Instance version catalog worker stopped unexpectedly."
+        );
         state.version_catalog_in_flight = false;
         state.version_catalog_error =
             Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
+    let updates = drained.items;
 
     for (filter, result) in updates {
         state.version_catalog_in_flight = false;
@@ -840,17 +810,6 @@ pub(super) fn modloader_versions_cache_key(loader_label: &str, game_version: &st
     )
 }
 
-pub(super) fn ensure_modloader_versions_channel(state: &mut InstanceScreenState) {
-    if state.modloader_versions_results_tx.is_some()
-        && state.modloader_versions_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, Result<Vec<String>, String>)>();
-    state.modloader_versions_results_tx = Some(tx);
-    state.modloader_versions_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn request_modloader_versions(
     state: &mut InstanceScreenState,
     loader_label: &str,
@@ -872,10 +831,7 @@ pub(super) fn request_modloader_versions(
         return;
     }
 
-    ensure_modloader_versions_channel(state);
-    let Some(tx) = state.modloader_versions_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.modloader_versions_results.sender();
 
     state.modloader_versions_in_flight.insert(key.clone());
     state.modloader_versions_status_key = Some(key.clone());
@@ -942,37 +898,11 @@ pub(super) fn request_modloader_versions(
 }
 
 pub(super) fn poll_modloader_versions(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.modloader_versions_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/instance_runtime",
-                            "Instance modloader-version worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_runtime",
-                    "Instance modloader-version receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
+    let drained = state.modloader_versions_results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
-        state.modloader_versions_results_tx = None;
-        state.modloader_versions_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_runtime", "modloader_versions_results worker channel stopped unexpectedly.");
         state.modloader_versions_in_flight.clear();
         state.modloader_versions_status =
             Some("Modloader version worker stopped unexpectedly.".to_owned());
@@ -1088,24 +1018,6 @@ pub(super) fn resolve_modloader_version_for_settings(
     }
 }
 
-pub(super) fn ensure_runtime_prepare_channel(state: &mut InstanceScreenState) {
-    if state.runtime_prepare_results_tx.is_some() && state.runtime_prepare_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, String, Result<RuntimePrepareOutcome, String>)>();
-    state.runtime_prepare_results_tx = Some(tx);
-    state.runtime_prepare_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
-pub(super) fn ensure_runtime_progress_channel(state: &mut InstanceScreenState) {
-    if state.runtime_progress_tx.is_some() && state.runtime_progress_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<InstallProgress>();
-    state.runtime_progress_tx = Some(tx);
-    state.runtime_progress_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) async fn reinstall_instance_profile_files(
     instance_root: &Path,
 ) -> Result<(), std::io::Error> {
@@ -1144,20 +1056,15 @@ pub(super) fn request_runtime_prepare(
     xuid: Option<String>,
     user_type: Option<String>,
     launch_account_name: Option<String>,
+    sync_run: Option<crate::sync_runner::SyncRunConfig>,
 ) {
     let game_version = game_version.trim().to_owned();
     if game_version.is_empty() || state.runtime_prepare_in_flight {
         return;
     }
 
-    ensure_runtime_prepare_channel(state);
-    ensure_runtime_progress_channel(state);
-    let Some(tx) = state.runtime_prepare_results_tx.as_ref().cloned() else {
-        return;
-    };
-    let Some(progress_tx) = state.runtime_progress_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.runtime_prepare_results.sender();
+    let progress_tx = state.runtime_progress.sender();
 
     state.runtime_prepare_in_flight = true;
     state.runtime_latest_progress = None;
@@ -1383,6 +1290,13 @@ pub(super) fn request_runtime_prepare(
                     "Instance runtime prepare completed ensure_game_files."
                 );
                 let launch = if operation == RuntimePrepareOperation::Launch {
+                    if let Some(sync_run) = sync_run {
+                        // Pull servers, history and hotbars into this instance before the game reads them.
+                        let _ = tokio_runtime::spawn_blocking(move || {
+                            crate::sync_runner::run_from_saved_store_blocking(&sync_run)
+                        })
+                        .await;
+                    }
                     let launch_request = LaunchRequest {
                         instance_root: instance_root.clone(),
                         game_version: game_version_for_task.clone(),
@@ -1478,28 +1392,11 @@ pub(super) fn request_runtime_prepare(
 }
 
 pub(super) fn poll_runtime_progress(state: &mut InstanceScreenState) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.runtime_progress_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => should_reset_channel = true,
-        }
+    let drained = state.runtime_progress.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/worker", "runtime_progress worker channel stopped unexpectedly.");
     }
-
-    if should_reset_channel {
-        state.runtime_progress_tx = None;
-        state.runtime_progress_rx = None;
-    }
+    let updates = drained.items;
 
     for progress in updates {
         state.runtime_latest_progress = Some(progress.clone());
@@ -1530,34 +1427,17 @@ pub(super) fn poll_runtime_prepare(
     instances: &mut InstanceStore,
     instance_id: &str,
 ) {
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    if let Some(rx) = state.runtime_prepare_results_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => should_reset_channel = true,
-        }
-    }
+    let drained = state.runtime_prepare_results.drain();
+    let updates = drained.items;
 
-    if should_reset_channel {
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/worker", "runtime_prepare_results worker channel stopped unexpectedly.");
         let prepare_user_key = state.runtime_prepare_user_key.take();
         if let Some(root) = state.runtime_prepare_instance_root.take() {
             console::set_instance_tab_loading(root.as_str(), prepare_user_key.as_deref(), false);
         }
-        state.runtime_prepare_results_tx = None;
-        state.runtime_prepare_results_rx = None;
         state.runtime_prepare_in_flight = false;
-        state.runtime_progress_tx = None;
-        state.runtime_progress_rx = None;
+        state.runtime_progress.reset();
     }
 
     for (game_version, instance_root_display, result) in updates {
@@ -1574,7 +1454,7 @@ pub(super) fn poll_runtime_prepare(
             Ok(outcome) => {
                 let operation = outcome.operation;
                 if let Some((runtime_major, path)) = outcome.configured_java
-                    && let Some(runtime) = java_runtime_from_major(runtime_major)
+                    && let Some(runtime) = JavaRuntimeVersion::from_major(runtime_major)
                 {
                     config.set_java_runtime_path_ref(runtime, Some(Path::new(path.as_str())));
                 }
@@ -1775,127 +1655,6 @@ pub(super) fn selected_game_version(state: &InstanceScreenState) -> &str {
         .get(state.selected_game_version_index)
         .map(|entry| entry.id.as_str())
         .unwrap_or_else(|| state.game_version_input.as_str())
-}
-
-pub(super) fn choose_java_executable(
-    config: &Config,
-    java_override_enabled: bool,
-    java_override_runtime_major: Option<u8>,
-    required_java_major: Option<u8>,
-) -> Option<String> {
-    if java_override_enabled
-        && let Some(override_major) = java_override_runtime_major
-        && let Some(runtime) = java_runtime_from_major(override_major)
-        && let Some(path) = config.java_runtime_path_ref(runtime)
-    {
-        let trimmed = path.as_os_str().to_string_lossy().trim().to_owned();
-        if !trimmed.is_empty() && path.exists() {
-            return Some(trimmed);
-        }
-    }
-
-    if let Some(runtime_major) = required_java_major
-        && let Some(runtime) = java_runtime_from_major(runtime_major)
-        && let Some(path) = config.java_runtime_path_ref(runtime)
-    {
-        let trimmed = path.as_os_str().to_string_lossy().trim().to_owned();
-        if !trimmed.is_empty() && path.exists() {
-            return Some(trimmed);
-        }
-    }
-    None
-}
-
-pub(super) fn required_java_major(game_version: &str) -> Option<u8> {
-    let parsed = parse_java_version_key(game_version)?;
-    let major = parsed.major;
-    let minor = parsed.minor;
-    let patch = parsed.patch;
-
-    if major != 1 {
-        // New versioning scheme (e.g. 26.x): Java version is major - 1
-        return major.checked_sub(1).and_then(|v| u8::try_from(v).ok());
-    }
-    if minor <= 16 {
-        return Some(8);
-    }
-    if minor == 17 {
-        return Some(16);
-    }
-    if minor >= 21 {
-        return u8::try_from(minor).ok();
-    }
-    if minor > 20 || (minor == 20 && patch >= 5) {
-        return Some(21);
-    }
-    Some(17)
-}
-
-#[derive(Clone, Copy)]
-pub(super) struct JavaVersionKey {
-    major: u32,
-    minor: u32,
-    patch: u32,
-}
-
-pub(super) fn parse_java_version_key(game_version: &str) -> Option<JavaVersionKey> {
-    let trimmed = game_version.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    if let Some((year, week)) = trimmed.split_once('w') {
-        let major = parse_ascii_u32_prefix(year)?;
-        if major >= 26 && parse_ascii_u32_prefix(week).is_some() {
-            return Some(JavaVersionKey {
-                major,
-                minor: 0,
-                patch: 0,
-            });
-        }
-    }
-
-    let mut parts = trimmed.split(['.', '-']);
-    let major = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let minor = parts.next().and_then(parse_ascii_u32_prefix)?;
-    let patch = parts.next().and_then(parse_ascii_u32_prefix).unwrap_or(0);
-    Some(JavaVersionKey {
-        major,
-        minor,
-        patch,
-    })
-}
-
-pub(super) fn parse_ascii_u32_prefix(value: &str) -> Option<u32> {
-    let digits_len = value
-        .as_bytes()
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .count();
-    if digits_len == 0 {
-        return None;
-    }
-    value.get(..digits_len)?.parse().ok()
-}
-
-pub(super) fn effective_required_java_major(config: &Config, game_version: &str) -> Option<u8> {
-    let required = required_java_major(game_version)?;
-    if config.force_java_21_minimum() && required < 21 {
-        Some(21)
-    } else {
-        Some(required)
-    }
-}
-
-pub(super) fn java_runtime_from_major(major: u8) -> Option<JavaRuntimeVersion> {
-    match major {
-        8 => Some(JavaRuntimeVersion::Java8),
-        16 => Some(JavaRuntimeVersion::Java16),
-        17 => Some(JavaRuntimeVersion::Java17),
-        21 => Some(JavaRuntimeVersion::Java21),
-        25 => Some(JavaRuntimeVersion::Java25),
-        _ => None,
-    }
 }
 
 pub(super) fn configured_java_path_options(config: &Config) -> Vec<(u8, String)> {

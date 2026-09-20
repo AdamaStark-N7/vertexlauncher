@@ -3,6 +3,7 @@ mod dialog;
 mod inputs;
 mod layout;
 mod tabs;
+pub mod typography;
 
 pub use buttons::{danger_button, primary_button, secondary_button, tab_button};
 pub use dialog::{DialogPreset, DialogResponse, dialog_options, show_dialog};

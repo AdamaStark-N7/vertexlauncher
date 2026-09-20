@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
-    sync::{Arc, Mutex, OnceLock, mpsc},
+    sync::{Mutex, OnceLock},
     time::Duration,
 };
 
@@ -170,7 +170,7 @@ fn render_discover_browse_content(
                 InputOptions {
                     desired_width: Some(ui.available_width()),
                     placeholder_text: Some("Search modpacks and press Enter".to_owned()),
-                    ..InputOptions::default()
+                    ..crate::ui::style::input_options(ui)
                 },
             );
             let mut search_submitted = false;
@@ -606,8 +606,6 @@ fn render_discover_tile(
     };
 
     let heading_style = LabelOptions {
-        font_size: 20.0,
-        line_height: 24.0,
         wrap: true,
         ..style::stat_label(ui)
     };
@@ -732,20 +730,10 @@ fn render_discover_tile(
     }
 }
 
-fn ensure_search_channel(state: &mut DiscoverState) {
-    if state.search_results_tx.is_some() && state.search_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<DiscoverSearchResult>();
-    state.search_results_tx = Some(tx);
-    state.search_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn request_search(state: &mut DiscoverState, show_cached_status: bool, mode: SearchMode) {
     if state.search_in_flight {
         return;
     }
-    ensure_search_channel(state);
     let request = current_request(state, mode);
     if let Some(snapshot) = state.cached_snapshots.get(&request).cloned() {
         apply_search_snapshot(state, &request, snapshot, mode);
@@ -756,9 +744,7 @@ fn request_search(state: &mut DiscoverState, show_cached_status: bool, mode: Sea
         return;
     }
 
-    let Some(tx) = state.search_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.search_results.sender();
     state.search_request_serial = state.search_request_serial.saturating_add(1);
     let request_serial = state.search_request_serial;
     state.search_in_flight = true;
@@ -812,67 +798,49 @@ fn trim_discover_search_cache(state: &mut DiscoverState) {
 }
 
 fn poll_search_results(state: &mut DiscoverState) {
-    let Some(rx) = state.search_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.search_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/discover",
             request_serial = state.search_request_serial,
-            "Discover search receiver mutex was poisoned."
+            "Discover search worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok(result) => {
-                if result.request_serial != state.search_request_serial {
-                    tracing::debug!(
-                        target: "vertexlauncher/discover",
-                        request_serial = result.request_serial,
-                        active_request_serial = state.search_request_serial,
-                        "Ignoring stale discover search result."
-                    );
-                    continue;
-                }
-                state.search_in_flight = false;
-                match result.outcome {
-                    Ok(snapshot) => {
-                        let mode = if result.request.page <= 1 {
-                            SearchMode::Replace
-                        } else {
-                            SearchMode::Append
-                        };
-                        apply_search_snapshot(state, &result.request, snapshot.clone(), mode);
-                        state.cached_snapshots.insert(result.request, snapshot);
-                        trim_discover_search_cache(state);
-                        state.status_message =
-                            Some(format!("Showing {} modpacks.", state.entries.len()));
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            target: "vertexlauncher/discover",
-                            request_serial = result.request_serial,
-                            error = %error,
-                            "Discover search failed."
-                        );
-                        state.status_message = Some(format!("Discover search failed: {error}"));
-                        state.entries.clear();
-                        state.warnings.clear();
-                    }
-                }
+        state.search_in_flight = false;
+        state.status_message = Some("Discover search worker stopped unexpectedly.".to_owned());
+    }
+    for result in drained.items {
+        if result.request_serial != state.search_request_serial {
+            tracing::debug!(
+                target: "vertexlauncher/discover",
+                request_serial = result.request_serial,
+                active_request_serial = state.search_request_serial,
+                "Ignoring stale discover search result."
+            );
+            continue;
+        }
+        state.search_in_flight = false;
+        match result.outcome {
+            Ok(snapshot) => {
+                let mode = if result.request.page <= 1 {
+                    SearchMode::Replace
+                } else {
+                    SearchMode::Append
+                };
+                apply_search_snapshot(state, &result.request, snapshot.clone(), mode);
+                state.cached_snapshots.insert(result.request, snapshot);
+                trim_discover_search_cache(state);
+                state.status_message = Some(format!("Showing {} modpacks.", state.entries.len()));
             }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
+            Err(error) => {
+                tracing::warn!(
                     target: "vertexlauncher/discover",
-                    request_serial = state.search_request_serial,
-                    "Discover search worker disconnected unexpectedly."
+                    request_serial = result.request_serial,
+                    error = %error,
+                    "Discover search failed."
                 );
-                state.search_in_flight = false;
-                state.status_message =
-                    Some("Discover search worker stopped unexpectedly.".to_owned());
-                break;
+                state.status_message = Some(format!("Discover search failed: {error}"));
+                state.entries.clear();
+                state.warnings.clear();
             }
         }
     }
@@ -884,7 +852,7 @@ fn current_request(state: &DiscoverState, mode: SearchMode) -> DiscoverSearchReq
     DiscoverSearchRequest {
         query: combined_query,
         tags: state.search_tags.clone(),
-        game_version: non_empty(state.game_version_filter.as_str()),
+        game_version: instances::normalize_optional(state.game_version_filter.as_str()),
         provider_filter: state.provider_filter,
         loader_filter: state.loader_filter,
         sort_mode: state.sort_mode,
@@ -1168,15 +1136,6 @@ fn normalize_search_key(value: &str) -> String {
         .collect::<String>()
 }
 
-fn non_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
 fn add_search_tag(search_tags: &mut Vec<String>, candidate: &str) -> bool {
     let Some(normalized) = normalize_search_tag(candidate) else {
         return false;
@@ -1222,11 +1181,8 @@ fn render_search_tag_chips(
 ) -> bool {
     let mut removed_index: Option<usize> = None;
     let tag_style = LabelOptions {
-        font_size: 14.0,
-        line_height: 18.0,
         color: ui.visuals().text_color(),
-        wrap: false,
-        ..style::body(ui)
+        ..style::caption(ui)
     };
     ui.add_space(style::SPACE_SM);
     ui.horizontal_wrapped(|ui| {
@@ -1235,7 +1191,7 @@ fn render_search_tag_chips(
             let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
             let stroke = egui::Stroke::new(1.0, ui.visuals().selection.bg_fill.gamma_multiply(0.7));
             let text_color = ui.visuals().text_color();
-            let themed_svg = themed_svg_bytes(assets::X_SVG, text_color);
+            let themed_svg = crate::ui::svg_tint::tint_svg(assets::X_SVG, text_color);
             let uri = format!(
                 "bytes://discover/tag-remove/{index}-{:02x}{:02x}{:02x}.svg",
                 text_color.r(),
@@ -1266,10 +1222,13 @@ fn render_search_tag_chips(
                         )
                         .frame(false)
                         .min_size(egui::vec2(22.0, 22.0));
-                        if ui
-                            .add(icon_button)
-                            .on_hover_text(format!("Remove tag: {tag}"))
-                            .clicked()
+                        let icon_response = ui.add(icon_button);
+                        if crate::ui::style::hover_tip(
+                            ui,
+                            icon_response,
+                            format!("Remove tag: {tag}"),
+                        )
+                        .clicked()
                         {
                             removed_index = Some(index);
                         }
@@ -1289,13 +1248,6 @@ fn render_search_tag_chips(
     } else {
         false
     }
-}
-
-fn themed_svg_bytes(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    String::from_utf8_lossy(svg_bytes)
-        .replace("currentColor", color_hex.as_str())
-        .into_bytes()
 }
 
 fn sized_dropdown_picker(
@@ -1324,10 +1276,7 @@ fn request_version_catalog(state: &mut DiscoverState) {
         return;
     }
 
-    ensure_version_catalog_channel(state);
-    let Some(tx) = state.version_catalog_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.version_catalog.sender();
 
     state.version_catalog_in_flight = true;
     tracing::info!(target: "vertexlauncher/discover", "Starting discover version catalog fetch.");
@@ -1360,52 +1309,18 @@ fn request_version_catalog(state: &mut DiscoverState) {
     });
 }
 
-fn ensure_version_catalog_channel(state: &mut DiscoverState) {
-    if state.version_catalog_tx.is_some() && state.version_catalog_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<Vec<MinecraftVersionEntry>, String>>();
-    state.version_catalog_tx = Some(tx);
-    state.version_catalog_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn poll_version_catalog(state: &mut DiscoverState) {
-    let mut should_reset_channel = false;
-    let mut updates = Vec::new();
-
-    if let Some(rx) = state.version_catalog_rx.as_ref() {
-        match rx.lock() {
-            Ok(receiver) => loop {
-                match receiver.try_recv() {
-                    Ok(update) => updates.push(update),
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        tracing::error!(
-                            target: "vertexlauncher/discover",
-                            "Discover version catalog worker disconnected unexpectedly."
-                        );
-                        should_reset_channel = true;
-                        break;
-                    }
-                }
-            },
-            Err(_) => {
-                tracing::error!(
-                    target: "vertexlauncher/discover",
-                    "Discover version catalog receiver mutex was poisoned."
-                );
-                should_reset_channel = true;
-            }
-        }
-    }
-
-    if should_reset_channel {
-        state.version_catalog_tx = None;
-        state.version_catalog_rx = None;
+    let drained = state.version_catalog.drain();
+    if drained.disconnected {
+        tracing::error!(
+            target: "vertexlauncher/discover",
+            "Discover version catalog worker stopped unexpectedly."
+        );
         state.version_catalog_in_flight = false;
         state.version_catalog_error =
             Some("Version catalog worker stopped unexpectedly.".to_owned());
     }
+    let updates = drained.items;
 
     for update in updates {
         state.version_catalog_in_flight = false;

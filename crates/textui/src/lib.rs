@@ -108,9 +108,9 @@ use crate::gpu::{
     CpuSceneAtlasPage, ResolvedTextGraphicsConfig, ResolvedTextRendererBackend, TextWgpuInstance,
     TextWgpuPreparedScene, TextWgpuSceneBatchSource, TextWgpuSceneCallback,
     allocate_cpu_scene_page_slot, blit_to_page, color_image_to_page_data, cpu_page_to_page_data,
-    default_gpu_scene_page_side, gpu_scene_approx_bytes, gpu_scene_page_batches_approx_bytes,
-    map_scene_quads_to_rect, paint_text_quads_fallback, quad_positions_from_min_size,
-    rect_from_points, rotated_quad_positions, uv_quad_points,
+    default_gpu_scene_page_side, fit_scene_page_side, gpu_scene_approx_bytes,
+    gpu_scene_page_batches_approx_bytes, map_scene_quads_to_rect, paint_text_quads_fallback,
+    quad_positions_from_min_size, rect_from_points, rotated_quad_positions, uv_quad_points,
 };
 use crate::input_runtime::apply_gamepad_scroll_if_focused;
 use crate::path_layout::{
@@ -242,6 +242,19 @@ impl TextUi {
     /// Replaces the per-frame input event buffer used by interactive widgets.
     pub fn set_frame_input_events(&mut self, frame_events: Vec<TextInputEvent>) {
         self.frame_events = frame_events;
+    }
+
+    /// Drops the rebuildable layout, scene and markdown caches (not the glyph atlas), so memory
+    /// used by a screen's text is returned when that screen goes away. Everything is rebuilt on
+    /// demand the next time the text is drawn.
+    pub fn release_layout_caches(&mut self) {
+        let _ = self.prepared_texts.write(|cache| cache.clear());
+        let _ = self.gpu_scene_cache.write(|cache| cache.clear());
+        let _ = self.gpu_scene_page_batch_cache.write(|cache| cache.clear());
+        let _ = self.gpu_scene_draw_batch_cache.write(|cache| cache.clear());
+        let _ = self.gpu_scene_glyph_cache.write(|cache| cache.clear());
+        self.markdown_cache.clear();
+        self.cpu_page_pool = Vec::new();
     }
 
     /// Clears any per-frame input events previously set by [`Self::set_frame_input_events`].
@@ -1460,7 +1473,11 @@ impl TextUi {
 
         if style.monospace {
             attrs = attrs.family(Family::Monospace);
-        } else if let Some(family) = self.ui_font_family.as_deref() {
+        } else if let Some(family) = fundamentals
+            .font_family
+            .as_deref()
+            .or(self.ui_font_family.as_deref())
+        {
             attrs = attrs.family(Family::Name(family));
         }
 

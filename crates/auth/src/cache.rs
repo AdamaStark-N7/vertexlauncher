@@ -1,3 +1,5 @@
+use logged_fs::read_to_string as fs_read_to_string;
+use logged_fs::remove_file as fs_remove_file;
 use std::fs;
 use std::path::{Path, PathBuf};
 use zeroize::Zeroizing;
@@ -14,17 +16,6 @@ use crate::{CachedAccount, CachedAccountsState};
 enum AccountsStateLocation {
     Disk,
     SecureStore,
-}
-
-#[track_caller]
-fn fs_read_to_string(path: impl AsRef<Path>) -> Result<String, AuthError> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    Ok(result?)
 }
 
 #[track_caller]
@@ -46,17 +37,6 @@ fn fs_write_string(path: impl AsRef<Path>, contents: &str) -> Result<(), AuthErr
         tracing::warn!(target: "vertexlauncher/io", op = "write_string", path = %path.display(), error = %err);
     }
     Ok(write_result?)
-}
-
-#[track_caller]
-fn fs_remove_file(path: impl AsRef<Path>) -> Result<(), AuthError> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "remove_file", path = %path.display());
-    let result = fs::remove_file(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err);
-    }
-    Ok(result?)
 }
 
 pub(crate) fn load_cached_accounts() -> Result<CachedAccountsState, AuthError> {

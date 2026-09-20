@@ -1,5 +1,8 @@
 use super::*;
 
+/// File-dialog slot for the skin picker.
+const SKIN_FILE_DIALOG: &str = "skins_pick_skin_file";
+
 #[derive(Clone)]
 pub(super) struct SkinManagerState {
     pub(super) active_profile_id: Option<String>,
@@ -502,20 +505,28 @@ impl SkinManagerState {
             .and_then(|cape| cape.texture_bytes.as_deref())
     }
 
-    pub(super) fn pick_skin_file(&mut self) {
+    /// Opens the skin picker without blocking; [`Self::poll_skin_file_dialog`] handles the pick.
+    pub(super) fn pick_skin_file(&mut self, ctx: &egui::Context) {
         if self.pick_skin_in_progress {
             return;
         }
+        crate::ui::file_dialog::open(
+            ctx,
+            SKIN_FILE_DIALOG,
+            crate::ui::file_dialog::Pick::File,
+            crate::ui::file_dialog::Dialog::new()
+                .title("Select Minecraft Skin")
+                .filter("PNG", &["png"]),
+        );
+    }
 
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("PNG", &["png"])
-            .set_title("Select Minecraft Skin")
-            .pick_file()
-        else {
-            return;
-        };
-
-        self.begin_loading_skin_from_path(path);
+    /// Starts loading the skin the user picked, once the dialog closes.
+    pub(super) fn poll_skin_file_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(path) = crate::ui::file_dialog::take(ctx, SKIN_FILE_DIALOG)
+            .and_then(|paths| paths.into_iter().next())
+        {
+            self.begin_loading_skin_from_path(path);
+        }
     }
 
     pub(super) fn begin_loading_skin_from_path(&mut self, path: PathBuf) {

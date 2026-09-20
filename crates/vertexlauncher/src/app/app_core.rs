@@ -1,6 +1,8 @@
 use super::*;
 
-pub(super) const DISCOVER_STATE_PURGE_DELAY: Duration = Duration::from_secs(4);
+/// How long a screen may stay inactive before its state is purged. Zero: as soon as the screen
+/// has been off screen for a full frame (see `screen_in_use`).
+pub(super) const DISCOVER_STATE_PURGE_DELAY: Duration = Duration::ZERO;
 
 #[derive(Default)]
 pub(super) struct ScreenPurgeTimer {
@@ -83,6 +85,15 @@ pub(super) struct VertexApp {
     pub(super) discover_purge_timer: ScreenPurgeTimer,
     pub(super) content_browser_purge_timer: ScreenPurgeTimer,
     pub(super) skins_purge_timer: ScreenPurgeTimer,
+    /// The screen that was active at the end of the previous frame. A screen counts as in use for
+    /// one extra frame after navigating away, so its last frame is fully painted before its
+    /// resources are freed.
+    pub(super) last_frame_screen: screens::AppScreen,
+    /// Screen and instance whose resources the frame sweep last saw.
+    pub(super) resource_scope: (screens::AppScreen, Option<String>),
+    /// Set when the scope changed; the sweep runs at the end of the next frame, once the new
+    /// screen has drawn and thereby marked everything it needs.
+    pub(super) resource_sweep_pending: bool,
     pub(super) show_create_instance_modal: bool,
     pub(super) create_instance_state: create_instance_modal::CreateInstanceState,
     pub(super) show_import_instance_modal: bool,
@@ -101,38 +112,29 @@ pub(super) struct VertexApp {
     pub(super) discover_curseforge_manual_download_preflight_request:
         Option<screens::DiscoverInstallRequest>,
     pub(super) discover_curseforge_manual_download_preflight_in_flight: bool,
-    pub(super) discover_curseforge_manual_download_preflight_tx: Option<
-        mpsc::Sender<
-            Result<Option<import_instance_modal::CurseForgeManualDownloadRequirement>, String>,
-        >,
-    >,
-    pub(super) discover_curseforge_manual_download_preflight_rx: Option<
-        mpsc::Receiver<
-            Result<Option<import_instance_modal::CurseForgeManualDownloadRequirement>, String>,
-        >,
+    pub(super) discover_curseforge_manual_download_preflight: launcher_runtime::WorkerChannel<
+        Result<Option<import_instance_modal::CurseForgeManualDownloadRequirement>, String>,
     >,
     pub(super) pending_curseforge_manual_download: Option<PendingCurseForgeManualDownloadState>,
-    pub(super) discover_install_progress_tx:
-        Option<mpsc::Sender<import_instance_modal::ImportProgress>>,
-    pub(super) discover_install_progress_rx:
-        Option<Arc<Mutex<mpsc::Receiver<import_instance_modal::ImportProgress>>>>,
-    pub(super) discover_install_results_tx:
-        Option<mpsc::Sender<import_instance_modal::ImportTaskResult>>,
-    pub(super) discover_install_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<import_instance_modal::ImportTaskResult>>>>,
+    pub(super) discover_install_progress:
+        launcher_runtime::WorkerChannel<import_instance_modal::ImportProgress>,
+    pub(super) discover_install_results:
+        launcher_runtime::WorkerChannel<import_instance_modal::ImportTaskResult>,
     pub(super) auth: AuthState,
     pub(super) startup_graphics: platform::StartupGraphicsConfig,
     pub(super) text_ui: TextUi,
     pub(super) config_save_in_flight: bool,
     pub(super) pending_config_save: Option<Config>,
-    pub(super) config_save_results_tx: Option<mpsc::Sender<Result<(), String>>>,
-    pub(super) config_save_results_rx: Option<mpsc::Receiver<Result<(), String>>>,
+    pub(super) config_save_results: launcher_runtime::WorkerChannel<Result<(), String>>,
+    pub(super) link_profile_results: launcher_runtime::WorkerChannel<(
+        PathBuf,
+        Result<screens::DetectedInstanceVersions, String>,
+    )>,
     pub(super) instance_store_save_in_flight: bool,
     pub(super) pending_instance_store_save: Option<InstanceStore>,
-    pub(super) instance_store_save_results_tx: Option<mpsc::Sender<Result<(), String>>>,
-    pub(super) instance_store_save_results_rx: Option<mpsc::Receiver<Result<(), String>>>,
-    pub(super) initial_install_results_tx: Option<mpsc::Sender<InitialInstanceInstallResult>>,
-    pub(super) initial_install_results_rx: Option<mpsc::Receiver<InitialInstanceInstallResult>>,
+    pub(super) instance_store_save_results: launcher_runtime::WorkerChannel<Result<(), String>>,
+    pub(super) initial_install_results:
+        launcher_runtime::WorkerChannel<InitialInstanceInstallResult>,
     pub(super) discord_presence: DiscordPresenceManager,
     pub(super) gamepad: Option<gamepad::GamepadNavigator>,
     pub(super) last_rendered_screen: Option<screens::AppScreen>,
@@ -147,6 +149,9 @@ pub(super) enum InitialInstanceInstallResult {
         error: String,
     },
 }
+
+/// File-dialog slot for "Link existing profile".
+const LINK_PROFILE_DIALOG: &str = "link_existing_profile";
 
 impl VertexApp {
     pub(super) fn new(cc: &eframe::CreationContext<'_>, config_state: LoadConfigResult) -> Self {
@@ -179,26 +184,31 @@ impl VertexApp {
 
         config.normalize();
         #[cfg(target_os = "macos")]
-        if config.window_blur_enabled() {
-            disable_window_blur_for_startup(
+        if config.window_transparency().uses_native_blur() {
+            downgrade_window_blur_for_startup(
                 cc,
                 &mut config,
                 config_loaded_from_disk,
-                "Window blur is temporarily disabled on macOS to keep launcher startup on the stable path.".to_owned(),
+                "Window blur is temporarily downgraded to transparent mode on macOS to keep launcher startup on the stable path.".to_owned(),
                 "macOS safety fallback",
             );
         }
         if let Err(error) = window_effects::apply(
             cc,
-            effective_window_blur_enabled(&config),
+            config.window_transparency(),
             config.windows_backdrop_type(),
+            config.linux_blur_protocol(),
+            config.macos_visual_effect_material(),
+            config.macos_visual_effect_blending_mode(),
+            config.macos_visual_effect_state(),
+            config.macos_visual_effect_emphasized(),
         ) {
-            disable_window_blur_for_startup(
+            downgrade_window_blur_for_startup(
                 cc,
                 &mut config,
                 config_loaded_from_disk,
                 format!(
-                    "Window blur is unsupported here and has been disabled. Restart may be required to fully apply the change. {error}"
+                    "Window blur is unsupported here and has been downgraded to transparent mode. Restart may be required to fully apply the change. {error}"
                 ),
                 "unsupported platform check",
             );
@@ -210,7 +220,7 @@ impl VertexApp {
         }
         let theme = theme_catalog.resolve(config.theme_id()).clone();
         let startup_graphics = platform::startup_graphics_config(
-            effective_window_blur_enabled(&config),
+            transparent_viewport_enabled(&config),
             config.graphics_api_preference(),
         );
 
@@ -218,6 +228,9 @@ impl VertexApp {
             TextUi::new_with_graphics_config(build_text_graphics_config(&config, startup_graphics));
         let _ =
             textui_adapter::begin_frame(&mut text_ui, &cc.egui_ctx, cc.wgpu_render_state.as_ref());
+        if let Some(render_state) = cc.wgpu_render_state.as_ref() {
+            launcher_ui::ui::components::gpu_texture::install(render_state);
+        }
         FontController::register_included_fonts(&mut text_ui);
 
         let instance_store = match load_store() {
@@ -253,6 +266,9 @@ impl VertexApp {
             discover_purge_timer: ScreenPurgeTimer::default(),
             content_browser_purge_timer: ScreenPurgeTimer::default(),
             skins_purge_timer: ScreenPurgeTimer::default(),
+            last_frame_screen: screens::AppScreen::Home,
+            resource_scope: (screens::AppScreen::Home, None),
+            resource_sweep_pending: false,
             show_create_instance_modal: false,
             create_instance_state: create_instance_modal::CreateInstanceState::default(),
             show_import_instance_modal: false,
@@ -266,26 +282,21 @@ impl VertexApp {
             curseforge_manual_download_preflight_rx: None,
             discover_curseforge_manual_download_preflight_request: None,
             discover_curseforge_manual_download_preflight_in_flight: false,
-            discover_curseforge_manual_download_preflight_tx: None,
-            discover_curseforge_manual_download_preflight_rx: None,
+            discover_curseforge_manual_download_preflight: Default::default(),
             pending_curseforge_manual_download: None,
-            discover_install_progress_tx: None,
-            discover_install_progress_rx: None,
-            discover_install_results_tx: None,
-            discover_install_results_rx: None,
+            discover_install_progress: Default::default(),
+            discover_install_results: Default::default(),
             auth: AuthState::load(streamer_mode_enabled),
             startup_graphics,
             text_ui,
             config_save_in_flight: false,
             pending_config_save: None,
-            config_save_results_tx: None,
-            config_save_results_rx: None,
+            config_save_results: Default::default(),
+            link_profile_results: Default::default(),
             instance_store_save_in_flight: false,
             pending_instance_store_save: None,
-            instance_store_save_results_tx: None,
-            instance_store_save_results_rx: None,
-            initial_install_results_tx: None,
-            initial_install_results_rx: None,
+            instance_store_save_results: Default::default(),
+            initial_install_results: Default::default(),
             discord_presence: DiscordPresenceManager::default(),
             gamepad: gamepad::GamepadNavigator::new(),
             last_rendered_screen: None,
@@ -358,6 +369,8 @@ impl VertexApp {
         ));
         let _ = textui_adapter::begin_frame(&mut self.text_ui, ctx, frame.wgpu_render_state());
         launcher_ui::ui::components::image_textures::begin_frame(ctx);
+        launcher_ui::ui::components::remote_tiled_image::begin_frame();
+        self.poll_link_existing_profile(ctx);
         poll_config_save_results(self);
         poll_instance_store_save_results(self);
         self.auth.poll();
@@ -389,6 +402,7 @@ impl VertexApp {
             .ensure_selected_font_is_available(&mut self.config);
         self.fonts
             .apply_from_config(ctx, &self.config, &mut self.text_ui);
+        ui::style::publish_typography(ctx, self.config.typography());
         let _ = self.handle_escape(ctx);
 
         let account_entries = self.auth.account_entries();
@@ -651,7 +665,7 @@ impl VertexApp {
             self.import_instance_state.error = None;
         }
         if sidebar_output.link_existing_profile_clicked {
-            self.link_existing_profile_folder();
+            self.link_existing_profile_folder(ctx);
         }
 
         let mut screen_output = screens::ScreenOutput::default();
@@ -774,7 +788,7 @@ impl VertexApp {
             self.active_screen = requested_screen;
         }
 
-        self.update_discover_lifecycle(ctx);
+        self.update_discover_lifecycle(ctx, frame.wgpu_render_state());
 
         if self.show_config_format_modal {
             match config_format_modal::render(
@@ -950,6 +964,9 @@ impl VertexApp {
                 || self.selected_instance_id != previous_selected_instance_id)
         {
             screens::purge_instance_screenshot_state(ctx, previous_selected_instance_id.as_deref());
+            // Also drop the rest of that instance's screen state (content lists, caches, ...);
+            // the inactivity purge only ever sees the currently selected instance.
+            screens::purge_inactive_instance_state(ctx, previous_selected_instance_id.as_deref());
         }
 
         self.discord_presence.update(
@@ -960,14 +977,51 @@ impl VertexApp {
             self.selected_instance_id.as_deref(),
         );
 
+        ui::style::flush_tooltips(&mut self.text_ui, ctx);
         ui::top_bar::handle_window_resize(ctx);
+        self.sweep_screen_resources(ctx);
     }
 
-    pub(super) fn update_discover_lifecycle(&mut self, ctx: &egui::Context) {
+    /// Releases every cached image that the current screen did not draw this frame, right after a
+    /// navigation, so nothing from the previous screen lingers.
+    fn sweep_screen_resources(&mut self, ctx: &egui::Context) {
+        if self.resource_sweep_pending {
+            self.resource_sweep_pending = false;
+            launcher_ui::ui::components::image_textures::release_untouched();
+            textui_egui::release_untouched(ctx);
+            self.text_ui.release_layout_caches();
+            launcher_ui::ui::components::remote_tiled_image::release_untouched(ctx);
+            // Drops egui's own decoded-image and bytes caches (icons, SVGs); they reload on demand.
+            ctx.forget_all_images();
+            // Hand the freed image buffers back to the OS instead of leaving them in the heap.
+            launcher_runtime::spawn_blocking_detached(launcher_runtime::release_memory_to_os);
+        }
+        let scope = (
+            self.active_screen,
+            (self.active_screen == screens::AppScreen::Instance)
+                .then(|| self.selected_instance_id.clone())
+                .flatten(),
+        );
+        if scope != self.resource_scope {
+            self.resource_scope = scope;
+            self.resource_sweep_pending = true;
+            ctx.request_repaint();
+        }
+        self.last_frame_screen = self.active_screen;
+    }
+
+    pub(super) fn update_discover_lifecycle(
+        &mut self,
+        ctx: &egui::Context,
+        render_state: Option<&eframe::egui_wgpu::RenderState>,
+    ) {
+        let active = self.active_screen;
+        let last = self.last_frame_screen;
+        let screen_in_use = |screen: screens::AppScreen| active == screen || last == screen;
         update_screen_purge_timer(
             ctx,
             &mut self.home_purge_timer,
-            self.active_screen == screens::AppScreen::Home,
+            screen_in_use(screens::AppScreen::Home),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 screens::purge_inactive_home_state(ctx);
@@ -980,7 +1034,7 @@ impl VertexApp {
         update_screen_purge_timer(
             ctx,
             &mut self.library_purge_timer,
-            self.active_screen == screens::AppScreen::Library,
+            screen_in_use(screens::AppScreen::Library),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 screens::purge_inactive_library_state(ctx);
@@ -993,7 +1047,7 @@ impl VertexApp {
         update_screen_purge_timer(
             ctx,
             &mut self.instance_purge_timer,
-            self.active_screen == screens::AppScreen::Instance,
+            screen_in_use(screens::AppScreen::Instance),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 screens::purge_inactive_instance_state(ctx, self.selected_instance_id.as_deref());
@@ -1007,7 +1061,7 @@ impl VertexApp {
         update_screen_purge_timer(
             ctx,
             &mut self.discover_purge_timer,
-            is_discover_screen(self.active_screen),
+            is_discover_screen(active) || is_discover_screen(last),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 self.discover_state.purge_inactive_state();
@@ -1020,7 +1074,7 @@ impl VertexApp {
         update_screen_purge_timer(
             ctx,
             &mut self.content_browser_purge_timer,
-            self.active_screen == screens::AppScreen::ContentBrowser,
+            screen_in_use(screens::AppScreen::ContentBrowser),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 self.content_browser_state.purge_inactive_state();
@@ -1033,10 +1087,13 @@ impl VertexApp {
         update_screen_purge_timer(
             ctx,
             &mut self.skins_purge_timer,
-            self.active_screen == screens::AppScreen::Skins,
+            screen_in_use(screens::AppScreen::Skins),
             DISCOVER_STATE_PURGE_DELAY,
             || {
                 screens::purge_inactive_skins_state(ctx);
+                if let Some(render_state) = render_state {
+                    screens::release_skins_gpu_resources(render_state);
+                }
                 tracing::info!(
                     target: "vertexlauncher/skins",
                     "Purged inactive skins state after timeout."
@@ -1086,26 +1143,53 @@ impl VertexApp {
             .collect();
     }
 
-    pub(super) fn link_existing_profile_folder(&mut self) {
-        let Some(path) = rfd::FileDialog::new()
-            .set_title("Link Existing Vertex Profile")
-            .pick_folder()
-        else {
-            return;
-        };
+    /// Asks the user for a profile folder to link. The dialog runs without blocking the UI;
+    /// [`Self::poll_link_existing_profile`] continues once it closes.
+    pub(super) fn link_existing_profile_folder(&mut self, ctx: &egui::Context) {
+        launcher_ui::ui::file_dialog::open(
+            ctx,
+            LINK_PROFILE_DIALOG,
+            launcher_ui::ui::file_dialog::Pick::Folder,
+            launcher_ui::ui::file_dialog::Dialog::new().title("Link Existing Vertex Profile"),
+        );
+    }
 
-        if self.instance_store.instances.iter().any(|instance| {
-            instance.instance_root_override.as_deref() == Some(path.as_path())
-                || instance_root_path(self.config.minecraft_installations_root_path(), instance)
-                    == path
-        }) {
-            notification::warn!(
-                "instance_link",
-                "That profile folder is already registered in Vertex."
-            );
-            return;
+    /// Advances linking: picked folder -> version detection on a worker -> registration.
+    pub(super) fn poll_link_existing_profile(&mut self, ctx: &egui::Context) {
+        if let Some(path) = launcher_ui::ui::file_dialog::take(ctx, LINK_PROFILE_DIALOG)
+            .and_then(|paths| paths.into_iter().next())
+        {
+            if self.instance_store.instances.iter().any(|instance| {
+                instance.instance_root_override.as_deref() == Some(path.as_path())
+                    || instance_root_path(self.config.minecraft_installations_root_path(), instance)
+                        == path
+            }) {
+                notification::warn!(
+                    "instance_link",
+                    "That profile folder is already registered in Vertex."
+                );
+            } else {
+                // Reading the profile's version files is filesystem work; keep it off the UI thread.
+                let tx = self.link_profile_results.sender();
+                let ctx = ctx.clone();
+                tokio_runtime::spawn_blocking_detached(move || {
+                    let detected = screens::detect_instance_versions(path.as_path())
+                        .map_err(|err| err.to_string());
+                    let _ = tx.send((path, detected));
+                    ctx.request_repaint();
+                });
+            }
         }
+        for (path, detected) in self.link_profile_results.drain().items {
+            self.finish_link_existing_profile(path, detected);
+        }
+    }
 
+    fn finish_link_existing_profile(
+        &mut self,
+        path: PathBuf,
+        detect_result: Result<screens::DetectedInstanceVersions, String>,
+    ) {
         let fallback_name = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1113,7 +1197,7 @@ impl VertexApp {
             .filter(|name| !name.is_empty())
             .unwrap_or("Linked Profile")
             .to_owned();
-        let detected_versions = match screens::detect_instance_versions(path.as_path()) {
+        let detected_versions = match detect_result {
             Ok(detected) => Some(detected),
             Err(err) => {
                 tracing::warn!(

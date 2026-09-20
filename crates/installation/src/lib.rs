@@ -1,7 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
 use std::io::{ErrorKind, Read, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;

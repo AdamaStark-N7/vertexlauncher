@@ -190,8 +190,9 @@ pub(super) fn render_skin_drop_zone(
         },
     );
     if response.clicked() && !state.pick_skin_in_progress && !received_drop {
-        state.pick_skin_file();
+        state.pick_skin_file(ui.ctx());
     }
+    state.poll_skin_file_dialog(ui.ctx());
 
     if received_drop && !state.pick_skin_in_progress {
         if let Some(file) = dropped_files.into_iter().next() {

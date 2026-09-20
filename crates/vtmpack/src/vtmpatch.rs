@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crate::export::non_empty;
 use managed_content::{
     CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, ManagedContentSource, content_manifest_path,
 };
@@ -1638,15 +1639,6 @@ fn normalize_pack_path(path: &Path) -> PathBuf {
         PathBuf::new()
     } else {
         PathBuf::from(normalized)
-    }
-}
-
-fn non_empty(s: &str) -> Option<String> {
-    let t = s.trim();
-    if t.is_empty() {
-        None
-    } else {
-        Some(t.to_owned())
     }
 }
 

@@ -1,23 +1,5 @@
 use super::*;
 
-pub(super) fn ensure_discover_install_channel(app: &mut VertexApp) {
-    if app.discover_install_results_tx.is_some() && app.discover_install_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<import_instance_modal::ImportTaskResult>();
-    app.discover_install_results_tx = Some(tx);
-    app.discover_install_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
-pub(super) fn ensure_discover_install_progress_channel(app: &mut VertexApp) {
-    if app.discover_install_progress_tx.is_some() && app.discover_install_progress_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<import_instance_modal::ImportProgress>();
-    app.discover_install_progress_tx = Some(tx);
-    app.discover_install_progress_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn start_discover_install_task(
     app: &mut VertexApp,
     request: screens::DiscoverInstallRequest,
@@ -43,23 +25,6 @@ pub(super) fn start_discover_install_task(
     spawn_discover_install_task(app, request);
 }
 
-pub(super) fn ensure_discover_curseforge_manual_download_preflight_channel(app: &mut VertexApp) {
-    if app
-        .discover_curseforge_manual_download_preflight_tx
-        .is_some()
-        && app
-            .discover_curseforge_manual_download_preflight_rx
-            .is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<
-        Result<Option<import_instance_modal::CurseForgeManualDownloadRequirement>, String>,
-    >();
-    app.discover_curseforge_manual_download_preflight_tx = Some(tx);
-    app.discover_curseforge_manual_download_preflight_rx = Some(rx);
-}
-
 pub(super) fn start_discover_curseforge_manual_download_preflight(
     app: &mut VertexApp,
     request: screens::DiscoverInstallRequest,
@@ -75,14 +40,7 @@ pub(super) fn start_discover_curseforge_manual_download_preflight(
             return;
         }
     };
-    ensure_discover_curseforge_manual_download_preflight_channel(app);
-    let Some(tx) = app
-        .discover_curseforge_manual_download_preflight_tx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
+    let tx = app.discover_curseforge_manual_download_preflight.sender();
     app.discover_state
         .begin_install("Checking CurseForge download restrictions...");
     app.discover_curseforge_manual_download_preflight_request = Some(request);
@@ -110,13 +68,13 @@ pub(super) fn poll_discover_curseforge_manual_download_preflight(app: &mut Verte
     if !app.discover_curseforge_manual_download_preflight_in_flight {
         return;
     }
-    let Some(rx) = app
-        .discover_curseforge_manual_download_preflight_rx
-        .as_ref()
+    let Some(result) = app
+        .discover_curseforge_manual_download_preflight
+        .drain()
+        .items
+        .into_iter()
+        .next()
     else {
-        return;
-    };
-    let Ok(result) = rx.try_recv() else {
         return;
     };
     app.discover_curseforge_manual_download_preflight_in_flight = false;
@@ -183,14 +141,8 @@ pub(super) fn spawn_discover_install_task(
     app: &mut VertexApp,
     request: screens::DiscoverInstallRequest,
 ) {
-    ensure_discover_install_channel(app);
-    ensure_discover_install_progress_channel(app);
-    let Some(tx) = app.discover_install_results_tx.as_ref().cloned() else {
-        return;
-    };
-    let Some(progress_tx) = app.discover_install_progress_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = app.discover_install_results.sender();
+    let progress_tx = app.discover_install_progress.sender();
 
     app.discover_state
         .begin_install(format!("Downloading {}...", request.version_name));
@@ -210,60 +162,35 @@ pub(super) fn spawn_discover_install_task(
 }
 
 pub(super) fn poll_discover_install_progress(app: &mut VertexApp) {
-    let Some(rx) = app.discover_install_progress_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = app.discover_install_progress.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/app/discover",
-            "Discover install progress receiver mutex was poisoned."
+            "Discover install progress worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok(progress) => {
-                app.discover_state.apply_install_progress(
-                    progress.message,
-                    progress.completed_steps,
-                    progress.total_steps,
-                );
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/app/discover",
-                    "Discover install progress worker disconnected unexpectedly."
-                );
-                break;
-            }
-        }
+    }
+    for progress in drained.items {
+        app.discover_state.apply_install_progress(
+            progress.message,
+            progress.completed_steps,
+            progress.total_steps,
+        );
     }
 }
 
 pub(super) fn poll_discover_install_result(app: &mut VertexApp) {
-    let Some(rx) = app.discover_install_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = app.discover_install_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/app/discover",
-            "Discover install result receiver mutex was poisoned."
+            "Discover install result worker disconnected unexpectedly."
         );
+        app.discover_state
+            .finish_install(Err("Install task stopped unexpectedly.".to_owned()));
         return;
-    };
-    let result = match receiver.try_recv() {
-        Ok(result) => result,
-        Err(mpsc::TryRecvError::Empty) => return,
-        Err(mpsc::TryRecvError::Disconnected) => {
-            tracing::error!(
-                target: "vertexlauncher/app/discover",
-                "Discover install result worker disconnected unexpectedly."
-            );
-            app.discover_state
-                .finish_install(Err("Install task stopped unexpectedly.".to_owned()));
-            return;
-        }
+    }
+    let Some(result) = drained.items.into_iter().next() else {
+        return;
     };
 
     match result {

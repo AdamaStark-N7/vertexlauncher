@@ -179,7 +179,7 @@ fn render_segments(
                 "Import profile",
                 "Link existing Vertex profile",
             ];
-            let create_menu_width = popup_menu_width(ui, &create_menu_labels);
+            let create_menu_width = popup_menu_width(ui, text_ui, &create_menu_labels);
             let _ = egui::Popup::menu(&create_response)
                 .id(ui.id().with("sidebar_create_instance_popup"))
                 .width(create_menu_width)
@@ -267,25 +267,16 @@ fn render_segments(
     }
 }
 
-fn popup_menu_width(ui: &Ui, labels: &[&str]) -> f32 {
+fn popup_menu_width(ui: &Ui, text_ui: &mut TextUi, labels: &[&str]) -> f32 {
     let button_padding = ui.spacing().button_padding.x * 2.0;
     let item_spacing = ui.spacing().item_spacing.x * 2.0;
     let window_margin =
         f32::from(ui.spacing().window_margin.left + ui.spacing().window_margin.right);
-    let button_font = egui::TextStyle::Button.resolve(ui.style());
+    let button_style = crate::ui::style::role(ui, config::TextRole::Button, false);
 
     let widest_label = labels
         .iter()
-        .map(|label| {
-            ui.painter()
-                .layout_no_wrap(
-                    (*label).to_owned(),
-                    button_font.clone(),
-                    ui.visuals().text_color(),
-                )
-                .size()
-                .x
-        })
+        .map(|label| text_ui.measure_text_size(ui, label, &button_style).x)
         .fold(0.0, f32::max);
 
     (widest_label + button_padding + item_spacing + window_margin).ceil()

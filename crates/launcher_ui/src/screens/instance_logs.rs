@@ -153,53 +153,29 @@ fn render_instance_log_viewer(
     }
 }
 
-fn ensure_instance_log_scan_channel(state: &mut InstanceScreenState) {
-    if state.log_scan_results_tx.is_some() && state.log_scan_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(u64, Vec<InstanceLogEntry>)>();
-    state.log_scan_results_tx = Some(tx);
-    state.log_scan_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn poll_instance_log_scan_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.log_scan_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.log_scan_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/instance",
-            "Instance log-scan receiver mutex was poisoned."
+            "Instance log-scan worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok((request_id, logs)) => {
-                if request_id != state.log_scan_request_serial {
-                    continue;
-                }
-                state.logs = logs;
-                if state
-                    .selected_log_path
-                    .as_ref()
-                    .is_some_and(|selected| !state.logs.iter().any(|entry| entry.path == *selected))
-                {
-                    state.selected_log_path = None;
-                }
-                state.last_log_scan_at = Some(Instant::now());
-                state.log_scan_in_flight = false;
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance",
-                    "Instance log-scan worker disconnected unexpectedly."
-                );
-                state.log_scan_in_flight = false;
-                break;
-            }
+        state.log_scan_in_flight = false;
+    }
+    for (request_id, logs) in drained.items {
+        if request_id != state.log_scan_request_serial {
+            continue;
         }
+        state.logs = logs;
+        if state
+            .selected_log_path
+            .as_ref()
+            .is_some_and(|selected| !state.logs.iter().any(|entry| entry.path == *selected))
+        {
+            state.selected_log_path = None;
+        }
+        state.last_log_scan_at = Some(Instant::now());
+        state.log_scan_in_flight = false;
     }
 }
 
@@ -212,10 +188,7 @@ pub(super) fn refresh_instance_logs(
         return;
     }
 
-    ensure_instance_log_scan_channel(state);
-    let Some(tx) = state.log_scan_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.log_scan_results.sender();
     state.log_scan_request_serial = state.log_scan_request_serial.saturating_add(1);
     let request_id = state.log_scan_request_serial;
     state.log_scan_in_flight = true;
@@ -296,67 +269,38 @@ pub(super) fn sync_selected_instance_log(state: &mut InstanceScreenState) {
     }
 }
 
-fn ensure_instance_log_load_channel(state: &mut InstanceScreenState) {
-    if state.log_load_results_tx.is_some() && state.log_load_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(
-        u64,
-        PathBuf,
-        Option<u64>,
-        Result<(Vec<String>, bool), String>,
-    )>();
-    state.log_load_results_tx = Some(tx);
-    state.log_load_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 pub(super) fn poll_instance_log_load_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.log_load_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.log_load_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/instance",
-            "Instance log-load receiver mutex was poisoned."
+            "Instance log-load worker disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok((request_id, path, modified_at_ms, result)) => {
-                if request_id != state.log_load_request_serial {
-                    continue;
-                }
-                state.log_load_in_flight = false;
-                state.requested_log_load_path = None;
-                state.requested_log_load_modified_at_ms = None;
-                state.loaded_log_path = Some(path.clone());
-                state.loaded_log_modified_at_ms = modified_at_ms;
-                match result {
-                    Ok((lines, truncated)) => {
-                        state.loaded_log_lines = lines;
-                        state.loaded_log_error = None;
-                        state.loaded_log_truncated = truncated;
-                    }
-                    Err(err) => {
-                        state.loaded_log_lines.clear();
-                        state.loaded_log_error = Some(err);
-                        state.loaded_log_truncated = false;
-                    }
-                }
+        state.log_load_in_flight = false;
+        state.requested_log_load_path = None;
+        state.requested_log_load_modified_at_ms = None;
+        state.loaded_log_error = Some("Log load worker stopped unexpectedly.".to_owned());
+        state.loaded_log_truncated = false;
+    }
+    for (request_id, path, modified_at_ms, result) in drained.items {
+        if request_id != state.log_load_request_serial {
+            continue;
+        }
+        state.log_load_in_flight = false;
+        state.requested_log_load_path = None;
+        state.requested_log_load_modified_at_ms = None;
+        state.loaded_log_path = Some(path.clone());
+        state.loaded_log_modified_at_ms = modified_at_ms;
+        match result {
+            Ok((lines, truncated)) => {
+                state.loaded_log_lines = lines;
+                state.loaded_log_error = None;
+                state.loaded_log_truncated = truncated;
             }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance",
-                    "Instance log-load worker disconnected unexpectedly."
-                );
-                state.log_load_in_flight = false;
-                state.requested_log_load_path = None;
-                state.requested_log_load_modified_at_ms = None;
-                state.loaded_log_error = Some("Log load worker stopped unexpectedly.".to_owned());
+            Err(err) => {
+                state.loaded_log_lines.clear();
+                state.loaded_log_error = Some(err);
                 state.loaded_log_truncated = false;
-                break;
             }
         }
     }
@@ -375,10 +319,7 @@ fn load_selected_instance_log(state: &mut InstanceScreenState) {
         return;
     };
 
-    ensure_instance_log_load_channel(state);
-    let Some(tx) = state.log_load_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.log_load_results.sender();
     let modified_at_ms = modified_millis(selected_log_path.as_path());
     state.log_load_request_serial = state.log_load_request_serial.saturating_add(1);
     let request_id = state.log_load_request_serial;

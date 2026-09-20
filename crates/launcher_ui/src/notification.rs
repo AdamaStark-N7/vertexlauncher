@@ -1,5 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
+use crate::ui::style;
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
@@ -440,7 +440,8 @@ pub fn render_popups(
                             Layout::left_to_right(egui::Align::TOP),
                             |ui| {
                                 let icon_size = 16.0;
-                                let icon = themed_svg_image(
+                                let icon = crate::ui::svg_tint::themed_svg_image(
+                                    "notification",
                                     &format!(
                                         "notif-icon-{}-{}",
                                         index,
@@ -458,11 +459,7 @@ pub fn render_popups(
                                 ui.add_space(6.0);
 
                                 if entry.count > 1 {
-                                    let mut count_style = LabelOptions::default();
-                                    count_style.color = ui.visuals().weak_text_color();
-                                    count_style.wrap = false;
-                                    count_style.font_size = 14.0;
-                                    count_style.line_height = 18.0;
+                                    let count_style = style::caption(ui);
                                     let _ = text_ui.label(
                                         ui,
                                         ("notif-count", index),
@@ -472,12 +469,8 @@ pub fn render_popups(
                                     ui.add_space(6.0);
                                 }
 
-                                let mut source_style = LabelOptions::default();
-                                source_style.color = ui.visuals().text_color();
+                                let mut source_style = style::stat_label(ui);
                                 source_style.wrap = true;
-                                source_style.weight = 700;
-                                source_style.font_size = 15.0;
-                                source_style.line_height = 20.0;
                                 let _ = text_ui.label(
                                     ui,
                                     ("notif-source", index),
@@ -493,11 +486,11 @@ pub fn render_popups(
                     });
 
                     ui.add_space(4.0);
-                    let mut message_style = LabelOptions::default();
-                    message_style.color = ui.visuals().text_color();
-                    message_style.wrap = true;
-                    message_style.font_size = 14.0;
-                    message_style.line_height = 18.0;
+                    let message_style = LabelOptions {
+                        color: ui.visuals().text_color(),
+                        wrap: true,
+                        ..style::caption(ui)
+                    };
                     if let Some(progress) = entry.progress {
                         ui.add_space(6.0);
                         let overlay = format!("{}  {:.0}%", entry.message, progress * 100.0);
@@ -544,30 +537,6 @@ pub fn render_popups(
     ctx.request_repaint();
 }
 
-fn themed_svg_image(
-    icon_id: &str,
-    svg_bytes: &[u8],
-    color: Color32,
-    icon_size: f32,
-) -> egui::Image<'static> {
-    let themed_svg = apply_svg_color(svg_bytes, color);
-    let mut hasher = DefaultHasher::new();
-    icon_id.hash(&mut hasher);
-    color.hash(&mut hasher);
-    let uri = format!(
-        "bytes://vertex-notification-icons/{:x}.svg",
-        hasher.finish()
-    );
-    egui::Image::from_bytes(uri, themed_svg).fit_to_exact_size(egui::vec2(icon_size, icon_size))
-}
-
-fn apply_svg_color(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    String::from_utf8_lossy(svg_bytes)
-        .replace("currentColor", &color_hex)
-        .into_bytes()
-}
-
 fn severity_accent_fill(ui: &egui::Ui, severity: Severity) -> Color32 {
     match severity {
         Severity::Log | Severity::Info => ui.visuals().selection.bg_fill,
@@ -600,11 +569,17 @@ fn notification_icon_button(
         egui::StrokeKind::Inside,
     );
 
-    let image = themed_svg_image(icon_id, svg_bytes, ui.visuals().text_color(), icon_size);
+    let image = crate::ui::svg_tint::themed_svg_image(
+        "notification",
+        icon_id,
+        svg_bytes,
+        ui.visuals().text_color(),
+        icon_size,
+    );
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
     let _ = ui.put(icon_rect, image);
 
-    response.on_hover_text(tooltip)
+    crate::ui::style::hover_tip(ui, response, tooltip)
 }
 
 #[macro_export]

@@ -81,46 +81,30 @@ pub(super) fn preferred_text_graphics_api(backends: wgpu::Backends) -> textui::T
     textui::TextGraphicsApi::Auto
 }
 
-pub(super) fn effective_window_blur_enabled(config: &Config) -> bool {
-    if !config.window_blur_enabled() || !window_effects::platform_supports_blur() {
-        return false;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        return true;
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        true
-    }
-}
-
 pub(super) fn transparent_viewport_enabled(config: &Config) -> bool {
-    effective_window_blur_enabled(config)
+    config.window_transparency().is_translucent()
 }
 
 pub(super) fn effective_ui_opacity_percent(config: &Config) -> u8 {
-    if effective_window_blur_enabled(config) {
+    if transparent_viewport_enabled(config) {
         config.ui_opacity_percent()
     } else {
         100
     }
 }
 
-pub(super) fn disable_window_blur_for_startup(
+pub(super) fn downgrade_window_blur_for_startup(
     cc: &eframe::CreationContext<'_>,
     config: &mut Config,
     config_loaded_from_disk: bool,
     message: String,
     save_context: &'static str,
 ) {
-    if !config.window_blur_enabled() {
+    if !config.window_transparency().uses_native_blur() {
         return;
     }
 
-    config.set_window_blur_enabled(false);
+    config.set_window_transparency(config::WindowTransparency::Transparent);
     cc.egui_ctx
         .send_viewport_cmd(egui::ViewportCommand::Transparent(
             transparent_viewport_enabled(config),
@@ -137,7 +121,7 @@ pub(super) fn disable_window_blur_for_startup(
         if let Err(save_error) = result {
             notification::warn!(
                 "config",
-                "Failed to persist disabled blur setting after {save_context}: {save_error}"
+                "Failed to persist downgraded blur setting after {save_context}: {save_error}"
             );
         }
     });

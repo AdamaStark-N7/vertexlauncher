@@ -38,107 +38,63 @@ pub use self::import_task_result::ImportTaskResult;
 pub(super) use self::launcher_kind::LauncherKind;
 pub use self::modal_action::ModalAction;
 
-pub(super) fn ensure_preview_channel(state: &mut ImportInstanceState) {
-    if state.preview_results_tx.is_none() || state.preview_results_rx.is_none() {
-        let (tx, rx) = mpsc::channel::<(u64, Result<ImportPreview, String>)>();
-        state.preview_results_tx = Some(tx);
-        state.preview_results_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-    if state.preview_progress_tx.is_none() || state.preview_progress_rx.is_none() {
-        let (tx, rx) = mpsc::channel::<(u64, String)>();
-        state.preview_progress_tx = Some(tx);
-        state.preview_progress_rx = Some(Arc::new(Mutex::new(rx)));
-    }
-}
-
 pub(super) fn poll_preview_results(state: &mut ImportInstanceState) {
-    if let Some(rx) = state.preview_progress_rx.as_ref().cloned()
-        && let Ok(receiver) = rx.lock()
-    {
-        loop {
-            match receiver.try_recv() {
-                Ok((request_serial, message)) => {
-                    if request_serial == state.preview_request_serial {
-                        state.preview_status_message = Some(message);
-                    }
-                }
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    state.preview_progress_tx = None;
-                    state.preview_progress_rx = None;
-                    break;
-                }
-            }
+    for (request_serial, message) in state.preview_progress.drain().items {
+        if request_serial == state.preview_request_serial {
+            state.preview_status_message = Some(message);
         }
     }
 
-    let Some(rx) = state.preview_results_rx.as_ref().cloned() else {
-        return;
-    };
-    let Ok(receiver) = rx.lock() else {
+    let drained = state.preview_results.drain();
+    if drained.disconnected {
         tracing::error!(
             target: "vertexlauncher/import_instance",
             request_serial = state.preview_request_serial,
-            "Import preview receiver mutex was poisoned."
+            "Import preview worker channel disconnected unexpectedly."
         );
-        return;
-    };
-    loop {
-        match receiver.try_recv() {
-            Ok((request_serial, result)) => {
-                if request_serial != state.preview_request_serial {
-                    tracing::debug!(
-                        target: "vertexlauncher/import_instance",
-                        request_serial,
-                        active_request_serial = state.preview_request_serial,
-                        "Ignoring stale import preview result."
-                    );
-                    continue;
-                }
-                state.preview_in_flight = false;
-                state.preview_status_message = None;
-                match result {
-                    Ok(preview) => {
-                        tracing::info!(
-                            target: "vertexlauncher/import_instance",
-                            request_serial,
-                            preview_kind = %preview.kind.label(),
-                            detected_name = %preview.detected_name,
-                            game_version = %preview.game_version,
-                            modloader = %preview.modloader,
-                            modloader_version = %preview.modloader_version,
-                            "Import preview completed."
-                        );
-                        if state.instance_name.trim().is_empty() {
-                            state.instance_name = preview.detected_name.clone();
-                        }
-                        state.preview = Some(preview);
-                        state.error = None;
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "vertexlauncher/import_instance",
-                            request_serial,
-                            error = %err,
-                            "Import preview failed."
-                        );
-                        state.preview = None;
-                        state.error = Some(err);
-                    }
-                }
-            }
-            Err(mpsc::TryRecvError::Empty) => break,
-            Err(mpsc::TryRecvError::Disconnected) => {
-                tracing::error!(
+        state.preview_in_flight = false;
+        state.error = Some("Import preview worker stopped unexpectedly.".to_owned());
+        state.preview_results.reset();
+    }
+    for (request_serial, result) in drained.items {
+        if request_serial != state.preview_request_serial {
+            tracing::debug!(
+                target: "vertexlauncher/import_instance",
+                request_serial,
+                active_request_serial = state.preview_request_serial,
+                "Ignoring stale import preview result."
+            );
+            continue;
+        }
+        state.preview_in_flight = false;
+        state.preview_status_message = None;
+        match result {
+            Ok(preview) => {
+                tracing::info!(
                     target: "vertexlauncher/import_instance",
-                    request_serial = state.preview_request_serial,
-                    "Import preview worker channel disconnected unexpectedly."
+                    request_serial,
+                    preview_kind = %preview.kind.label(),
+                    detected_name = %preview.detected_name,
+                    game_version = %preview.game_version,
+                    modloader = %preview.modloader,
+                    modloader_version = %preview.modloader_version,
+                    "Import preview completed."
                 );
-                state.preview_in_flight = false;
-                state.error = Some("Import preview worker stopped unexpectedly.".to_owned());
-                state.preview_results_tx = None;
-                state.preview_results_rx = None;
-                break;
+                if state.instance_name.trim().is_empty() {
+                    state.instance_name = preview.detected_name.clone();
+                }
+                state.preview = Some(preview);
+                state.error = None;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "vertexlauncher/import_instance",
+                    request_serial,
+                    error = %err,
+                    "Import preview failed."
+                );
+                state.preview = None;
+                state.error = Some(err);
             }
         }
     }

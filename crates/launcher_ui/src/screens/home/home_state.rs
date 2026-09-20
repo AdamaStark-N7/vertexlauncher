@@ -28,10 +28,8 @@ pub(crate) struct HomeState {
     pub(crate) screenshot_viewer: Option<ScreenshotViewerState>,
     pub(crate) pending_delete_screenshot_key: Option<String>,
     pub(crate) delete_screenshot_in_flight: bool,
-    pub(crate) delete_screenshot_results_tx:
-        Option<mpsc::Sender<(String, String, Result<(), String>)>>,
-    pub(crate) delete_screenshot_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<(), String>)>>>>,
+    pub(crate) delete_screenshot_results:
+        launcher_runtime::WorkerChannel<(String, String, Result<(), String>)>,
 }
 
 impl HomeState {
@@ -56,8 +54,7 @@ impl HomeState {
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;
-        self.delete_screenshot_results_tx = None;
-        self.delete_screenshot_results_rx = None;
+        self.delete_screenshot_results.reset();
         self.mark_screenshot_layout_dirty();
     }
 

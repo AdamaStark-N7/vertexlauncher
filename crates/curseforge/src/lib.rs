@@ -38,6 +38,19 @@ fn rate_limit_store() -> &'static Mutex<RateLimitState> {
     STORE.get_or_init(|| Mutex::new(RateLimitState::new()))
 }
 
+/// Upper bound on entries in each process-lifetime lookup cache; browsing would otherwise grow
+/// them without limit.
+const LOOKUP_CACHE_MAX_ENTRIES: usize = 2048;
+
+/// Inserts into a lookup cache, dropping the whole cache first when it is full. These caches only
+/// save network round-trips, so a cold restart is cheaper than tracking recency.
+fn insert_bounded<K: Eq + std::hash::Hash, V>(map: &mut HashMap<K, V>, key: K, value: V) {
+    if map.len() >= LOOKUP_CACHE_MAX_ENTRIES && !map.contains_key(&key) {
+        map.clear();
+    }
+    map.insert(key, value);
+}
+
 fn project_cache() -> &'static Mutex<HashMap<u64, Project>> {
     static STORE: OnceLock<Mutex<HashMap<u64, Project>>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -513,7 +526,7 @@ impl Client {
             && let Some(url) = file.download_url.clone()
         {
             if let Ok(mut url_cache) = download_url_cache().lock() {
-                url_cache.insert((project_id, file_id), Some(url.clone()));
+                insert_bounded(&mut url_cache, (project_id, file_id), Some(url.clone()));
             }
             return Ok(Some(url));
         }
@@ -555,7 +568,7 @@ impl Client {
             return Err(err);
         }
         if let Ok(mut cache) = download_url_cache().lock() {
-            cache.insert((project_id, file_id), url.clone());
+            insert_bounded(&mut cache, (project_id, file_id), url.clone());
         }
         if let Some(url) = url.clone() {
             update_cached_file_download_url(file_id, url);
@@ -778,7 +791,7 @@ fn take_cached_projects(project_ids: &[u64]) -> (Vec<Project>, Vec<u64>) {
 fn cache_projects(projects: &[Project]) {
     if let Ok(mut cache) = project_cache().lock() {
         for project in projects {
-            cache.insert(project.id, project.clone());
+            insert_bounded(&mut cache, project.id, project.clone());
         }
     }
 }
@@ -802,7 +815,7 @@ fn take_cached_files(file_ids: &[u64]) -> (Vec<File>, Vec<u64>) {
 fn cache_files(files: &[File]) {
     if let Ok(mut cache) = file_cache().lock() {
         for file in files {
-            cache.insert(file.id, file.clone());
+            insert_bounded(&mut cache, file.id, file.clone());
         }
     }
 }

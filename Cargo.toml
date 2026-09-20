@@ -11,7 +11,11 @@ members = [
     "crates/managed_content",
     "crates/modal_host",
     "crates/ui_foundation",
+    "crates/instance_sync",
+    "crates/mc_options",
     "crates/instances",
+    "crates/log_redaction",
+    "crates/logged_fs",
     "crates/launcher_runtime",
     "crates/launcher_ui",
     "crates/vertexlauncher",
@@ -71,7 +75,11 @@ config = { path = "crates/config" }
 content_resolver = { path = "crates/content_resolver" }
 curseforge = { path = "crates/curseforge" }
 installation = { path = "crates/installation" }
+instance_sync = { path = "crates/instance_sync" }
+mc_options = { path = "crates/mc_options" }
 instances = { path = "crates/instances" }
+log_redaction = { path = "crates/log_redaction" }
+logged_fs = { path = "crates/logged_fs" }
 launcher_runtime = { path = "crates/launcher_runtime" }
 launcher_ui = { path = "crates/launcher_ui" }
 managed_content = { path = "crates/managed_content" }

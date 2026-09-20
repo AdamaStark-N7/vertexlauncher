@@ -162,7 +162,7 @@ pub(super) fn render_move_instance_modal(
                                     "Choose an empty folder or enter a new destination path"
                                         .to_owned(),
                                 ),
-                                ..InputOptions::default()
+                                ..crate::ui::style::input_options(ui)
                             },
                         );
                         let browse_clicked = text_ui
@@ -173,10 +173,18 @@ pub(super) fn render_move_instance_modal(
                                 &action_button_style,
                             )
                             .clicked();
-                        if browse_clicked
-                            && let Some(picked) = rfd::FileDialog::new()
-                                .set_title("Choose Destination Folder")
-                                .pick_folder()
+                        let dialog_slot = ("move_instance_dest_dialog", instance_id);
+                        if browse_clicked {
+                            crate::ui::file_dialog::open(
+                                ui.ctx(),
+                                dialog_slot,
+                                crate::ui::file_dialog::Pick::Folder,
+                                crate::ui::file_dialog::Dialog::new()
+                                    .title("Choose Destination Folder"),
+                            );
+                        }
+                        if let Some(picked) = crate::ui::file_dialog::take(ui.ctx(), dialog_slot)
+                            .and_then(|paths| paths.into_iter().next())
                         {
                             state.move_instance_dest_input = picked.display().to_string();
                             return true;
@@ -316,10 +324,8 @@ pub(super) fn render_move_instance_modal(
                         let pct = (progress_fraction * 100.0) as u32;
                         let pct_text = format!("{pct}%");
                         let pct_style = LabelOptions {
-                            font_size: 15.0,
-                            line_height: 20.0,
                             color: weak_text_color,
-                            ..style::body_strong(ui)
+                            ..style::caption(ui)
                         };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let _ = text_ui.label(
@@ -348,10 +354,8 @@ pub(super) fn render_move_instance_modal(
                             &detail_style,
                         );
                         let files_style = LabelOptions {
-                            font_size: 13.0,
-                            line_height: 18.0,
                             color: weak_text_color,
-                            ..style::body(ui)
+                            ..style::caption(ui)
                         };
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let _ = text_ui.label(

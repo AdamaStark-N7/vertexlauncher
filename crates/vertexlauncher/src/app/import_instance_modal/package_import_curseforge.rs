@@ -65,7 +65,7 @@ pub(super) fn import_curseforge_pack(
         installations_root,
         NewInstanceSpec {
             name: request.instance_name.clone(),
-            description: non_empty(manifest.author.as_str())
+            description: instances::normalize_optional(manifest.author.as_str())
                 .map(|author| format!("Imported CurseForge pack by {author}.")),
             thumbnail_path: None,
             modloader: resolved.dependency_info.modloader.clone(),
@@ -197,7 +197,7 @@ pub(super) fn build_curseforge_base_manifest_from_resolved(
                 curseforge_project_id: Some(manifest_file.project_id),
                 selected_source: Some(ManagedContentSource::CurseForge),
                 selected_version_id: Some(manifest_file.file_id.to_string()),
-                selected_version_name: non_empty(file.display_name.as_str()),
+                selected_version_name: instances::normalize_optional(file.display_name.as_str()),
                 selected_file_sha1: None,
                 selected_file_sha512: None,
                 pack_managed: true,
@@ -499,10 +499,12 @@ pub(super) fn build_curseforge_install_state(
 ) -> ModpackInstallState {
     ModpackInstallState {
         format: "curseforge".to_owned(),
-        pack_name: non_empty(manifest.name.as_str())
+        pack_name: instances::normalize_optional(manifest.name.as_str())
             .unwrap_or_else(|| "CurseForge Pack".to_owned()),
-        version_id: non_empty(manifest.version.as_str()).unwrap_or_else(|| "unknown".to_owned()),
-        version_name: non_empty(manifest.version.as_str()).unwrap_or_else(|| "unknown".to_owned()),
+        version_id: instances::normalize_optional(manifest.version.as_str())
+            .unwrap_or_else(|| "unknown".to_owned()),
+        version_name: instances::normalize_optional(manifest.version.as_str())
+            .unwrap_or_else(|| "unknown".to_owned()),
         modrinth_project_id: None,
         curseforge_project_id: None,
         source: Some(ManagedContentSource::CurseForge),

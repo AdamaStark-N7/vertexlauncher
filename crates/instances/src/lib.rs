@@ -1,6 +1,10 @@
+use logged_fs::copy as fs_copy;
+use logged_fs::create_dir_all as fs_create_dir_all;
+use logged_fs::file_create as fs_file_create;
+use logged_fs::read_to_string as fs_read_to_string;
+use logged_fs::remove_dir_all as fs_remove_dir_all;
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
-use std::fs;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,82 +14,6 @@ use vertex_constants::instances::{
 };
 
 static NEXT_INSTANCE_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-/// Wrapper around `fs::read_to_string` with structured IO tracing.
-#[track_caller]
-fn fs_read_to_string(path: impl AsRef<Path>) -> std::io::Result<String> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    result
-}
-
-/// Wrapper around `fs::create_dir_all` with structured IO tracing.
-#[track_caller]
-fn fs_create_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display());
-    let result = fs::create_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-/// Wrapper around `File::create` with structured IO tracing.
-#[track_caller]
-fn fs_file_create(path: impl AsRef<Path>) -> std::io::Result<fs::File> {
-    let path = path.as_ref();
-    tracing::debug!(target: "vertexlauncher/io", op = "file_create", path = %path.display());
-    let result = fs::File::create(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "file_create", path = %path.display(), error = %err);
-    }
-    result
-}
-
-/// Wrapper around `fs::copy` with structured IO tracing.
-#[track_caller]
-fn fs_copy(from: impl AsRef<Path>, to: impl AsRef<Path>) -> std::io::Result<u64> {
-    let from = from.as_ref();
-    let to = to.as_ref();
-    tracing::debug!(
-        target: "vertexlauncher/io",
-        op = "copy",
-        from = %from.display(),
-        to = %to.display()
-    );
-    let result = fs::copy(from, to);
-    if let Err(err) = &result {
-        tracing::warn!(
-            target: "vertexlauncher/io",
-            op = "copy",
-            from = %from.display(),
-            to = %to.display(),
-            error = %err
-        );
-    }
-    result
-}
-
-/// Wrapper around `fs::remove_dir_all` with structured IO tracing.
-#[track_caller]
-fn fs_remove_dir_all(path: impl AsRef<Path>) -> std::io::Result<()> {
-    let path = path.as_ref();
-    tracing::debug!(
-        target: "vertexlauncher/io",
-        op = "remove_dir_all",
-        path = %path.display()
-    );
-    let result = fs::remove_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
 
 /// Persisted record describing a launcher instance.
 ///
@@ -155,6 +83,116 @@ impl Default for InstanceRecord {
 #[serde(default)]
 pub struct InstanceStore {
     pub instances: Vec<InstanceRecord>,
+    /// Per-server sync scope, keyed by [`normalize_server_key`].
+    pub server_sync_scopes: BTreeMap<String, ServerSyncScope>,
+    /// Worlds stored once in the shared worlds folder and linked into several instances.
+    pub synced_worlds: Vec<SyncedWorld>,
+    /// Which instances share in-game settings (and mod configs), and which parts.
+    pub game_settings_sync: GameSettingsSync,
+    /// Per-pack, per-instance "I know better" decisions about resource pack compatibility,
+    /// keyed by pack file name, then instance id.
+    pub resource_pack_overrides: BTreeMap<String, BTreeMap<String, PackOverride>>,
+}
+
+/// The user's verdict on whether a resource pack works in an instance, overriding what the
+/// pack's metadata says.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PackOverride {
+    /// Works here, whatever the metadata claims.
+    Allow,
+    /// Doesn't work here (or isn't wanted); never sync it in.
+    Deny,
+}
+
+/// Settings shared between opted-in instances, translated across game versions.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct GameSettingsSync {
+    /// Instances taking part; sync does nothing until at least two are listed.
+    pub instances: BTreeSet<String>,
+    /// Settings groups to keep in step (`video`, `audio`, `controls`, ...).
+    pub categories: BTreeSet<String>,
+    /// Mod configs to keep in step (`iris`, `distant_horizons`, `voxy`).
+    pub mod_configs: BTreeSet<String>,
+    /// Also share resource packs (and which are enabled) between the instances.
+    pub resource_packs: bool,
+}
+
+impl Default for GameSettingsSync {
+    fn default() -> Self {
+        let owned = |items: &[&str]| items.iter().map(|item| (*item).to_owned()).collect();
+        Self {
+            instances: BTreeSet::new(),
+            categories: owned(&[
+                "video",
+                "audio",
+                "controls",
+                "keybinds",
+                "chat",
+                "accessibility",
+                "skin",
+                "language",
+            ]),
+            mod_configs: owned(&["iris", "distant_horizons", "voxy"]),
+            resource_packs: false,
+        }
+    }
+}
+
+/// How an instance holds a synced world.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorldLinkMode {
+    /// `saves/<name>` is a symlink (junction on Windows) to the shared copy.
+    #[default]
+    Symlink,
+    /// Linking wasn't possible, so `saves/<name>` is a real copy refreshed at launch and exit.
+    Mirror,
+}
+
+/// A world shared between instances. Its data lives in `<synced worlds root>/<id>`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct SyncedWorld {
+    /// Stable id, also the storage folder name.
+    pub id: String,
+    /// Folder name under each member's `saves/`.
+    pub folder_name: String,
+    /// Member instance ids and how each holds the world.
+    pub members: BTreeMap<String, WorldLinkMode>,
+}
+
+/// Which instances a multiplayer server entry is kept in sync with.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "scope", content = "instance_ids", rename_all = "snake_case")]
+pub enum ServerSyncScope {
+    /// Use the launcher-wide default from settings.
+    #[default]
+    FollowDefault,
+    /// Never copy this server to other instances.
+    ThisInstanceOnly,
+    /// Keep this server in every instance.
+    AllInstances,
+    /// Keep this server in exactly the listed instances (plus wherever it already exists).
+    Selected(BTreeSet<String>),
+}
+
+/// Canonical key for a server address, shared by favorites and sync scopes.
+pub fn normalize_server_key(address: &str) -> String {
+    address.trim().to_ascii_lowercase()
+}
+
+impl ServerSyncScope {
+    /// Whether the server should exist in `instance_id`, given the launcher-wide default.
+    pub fn includes(&self, instance_id: &str, default_is_all: bool) -> bool {
+        match self {
+            Self::FollowDefault => default_is_all,
+            Self::ThisInstanceOnly => false,
+            Self::AllInstances => true,
+            Self::Selected(ids) => ids.contains(instance_id),
+        }
+    }
 }
 
 /// Inputs required to create a new instance record and directory layout.
@@ -211,6 +249,86 @@ impl InstanceStore {
     pub fn normalize(&mut self) {
         for instance in &mut self.instances {
             normalize_instance(instance);
+        }
+        for overrides in self.resource_pack_overrides.values_mut() {
+            overrides.retain(|id, _| self.instances.iter().any(|instance| instance.id == *id));
+        }
+        self.resource_pack_overrides
+            .retain(|_, overrides| !overrides.is_empty());
+        self.game_settings_sync
+            .instances
+            .retain(|id| self.instances.iter().any(|instance| instance.id == *id));
+        for world in &mut self.synced_worlds {
+            world
+                .members
+                .retain(|id, _| self.instances.iter().any(|instance| instance.id == *id));
+        }
+        // Drop references to deleted instances so stale ids never resurrect servers.
+        let known: BTreeSet<&str> = self.instances.iter().map(|i| i.id.as_str()).collect();
+        for scope in self.server_sync_scopes.values_mut() {
+            if let ServerSyncScope::Selected(ids) = scope {
+                ids.retain(|id| known.contains(id.as_str()));
+            }
+        }
+    }
+
+    /// The synced world that `saves/<folder_name>` of `instance_id` belongs to, if any.
+    pub fn synced_world_for(&self, instance_id: &str, folder_name: &str) -> Option<&SyncedWorld> {
+        self.synced_worlds.iter().find(|world| {
+            world.folder_name == folder_name && world.members.contains_key(instance_id)
+        })
+    }
+
+    /// Sets or clears (`None`) the user's verdict on `pack` for `instance_id`.
+    pub fn set_pack_override(
+        &mut self,
+        pack: &str,
+        instance_id: &str,
+        verdict: Option<PackOverride>,
+    ) {
+        match verdict {
+            Some(verdict) => {
+                self.resource_pack_overrides
+                    .entry(pack.to_owned())
+                    .or_default()
+                    .insert(instance_id.to_owned(), verdict);
+            }
+            None => {
+                if let Some(overrides) = self.resource_pack_overrides.get_mut(pack) {
+                    overrides.remove(instance_id);
+                    if overrides.is_empty() {
+                        self.resource_pack_overrides.remove(pack);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn pack_override(&self, pack: &str, instance_id: &str) -> Option<PackOverride> {
+        self.resource_pack_overrides
+            .get(pack)?
+            .get(instance_id)
+            .copied()
+    }
+
+    /// Sync scope for the server at `address`.
+    pub fn server_sync_scope(&self, address: &str) -> ServerSyncScope {
+        self.server_sync_scopes
+            .get(normalize_server_key(address).as_str())
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Sets the sync scope for a server; `FollowDefault` removes the explicit rule.
+    pub fn set_server_sync_scope(&mut self, address: &str, scope: ServerSyncScope) {
+        let key = normalize_server_key(address);
+        if key.is_empty() {
+            return;
+        }
+        if scope == ServerSyncScope::FollowDefault {
+            self.server_sync_scopes.remove(key.as_str());
+        } else {
+            self.server_sync_scopes.insert(key, scope);
         }
     }
 
@@ -898,6 +1016,11 @@ fn sanitize_root_name(value: &str) -> String {
 }
 
 /// Trims optional user input and drops it when empty.
+/// Trims `value`; `None` if nothing is left.
+pub fn normalize_optional(value: impl AsRef<str>) -> Option<String> {
+    normalize_optional_string(Some(value.as_ref()))
+}
+
 fn normalize_optional_string(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)

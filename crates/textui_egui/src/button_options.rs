@@ -1,5 +1,34 @@
 use egui::{Color32, Stroke, Vec2};
 
+/// Font size buttons are authored against; role typography scales relative to it.
+pub const DEFAULT_BUTTON_FONT_SIZE: f32 = 18.0;
+
+/// Launcher-wide button label typography, published once per frame with
+/// [`set_button_typography`] and applied when a button is drawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ButtonTypography {
+    pub font_size: f32,
+    pub line_height: f32,
+    pub weight: u16,
+    pub font_family: Option<String>,
+}
+
+fn button_typography_id() -> egui::Id {
+    egui::Id::new("textui_egui_button_typography")
+}
+
+pub fn set_button_typography(ctx: &egui::Context, typography: &ButtonTypography) {
+    let current = ctx.data(|data| data.get_temp::<ButtonTypography>(button_typography_id()));
+    if current.as_ref() != Some(typography) {
+        ctx.data_mut(|data| data.insert_temp(button_typography_id(), typography.clone()));
+        ctx.request_repaint();
+    }
+}
+
+pub(crate) fn button_typography(ctx: &egui::Context) -> Option<ButtonTypography> {
+    ctx.data(|data| data.get_temp::<ButtonTypography>(button_typography_id()))
+}
+
 #[derive(Clone, Debug)]
 pub struct ButtonOptions {
     pub font_size: f32,

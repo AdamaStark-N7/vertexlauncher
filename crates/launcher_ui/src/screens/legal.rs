@@ -102,9 +102,10 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                                 egui::StrokeKind::Inside,
                             );
 
-                            let icon_size = ui
-                                .text_style_height(&egui::TextStyle::Button)
-                                .clamp(14.0, 20.0);
+                            let icon_size =
+                                style::resolved_typography(ui, config::TextRole::Button)
+                                    .line_height
+                                    .clamp(14.0, 20.0);
                             let icon_rect = egui::Rect::from_min_size(
                                 egui::pos2(
                                     header_rect.left() + 8.0,
@@ -117,19 +118,20 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                             } else {
                                 ("legal-chevron-right", assets::CHEVRON_RIGHT_SVG)
                             };
-                            let icon =
-                                themed_svg_image(icon_id, icon_bytes, header_text_color, icon_size);
+                            let icon = crate::ui::svg_tint::themed_svg_image(
+                                "legal",
+                                icon_id,
+                                icon_bytes,
+                                header_text_color,
+                                icon_size,
+                            );
                             ui.put(icon_rect, icon);
 
                             let text_rect = egui::Rect::from_min_max(
                                 egui::pos2(icon_rect.right() + 8.0, header_rect.top()),
                                 egui::pos2(header_rect.right() - 8.0, header_rect.bottom()),
                             );
-                            let mut title_style = LabelOptions::default();
-                            title_style.font_size = 17.0;
-                            title_style.line_height = 22.0;
-                            title_style.weight = 700;
-                            title_style.wrap = false;
+                            let mut title_style = style::stat_label(ui);
                             title_style.color = header_text_color;
                             ui.scope_builder(egui::UiBuilder::new().max_rect(text_rect), |ui| {
                                 ui.with_layout(
@@ -154,10 +156,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                                 ui.add_space(style::SPACE_XS * openness);
                                 ui.scope(|ui| {
                                     ui.set_opacity(openness);
-                                    let mut weak = LabelOptions::default();
-                                    weak.color = ui.visuals().weak_text_color();
-                                    weak.font_size = 13.0;
-                                    weak.line_height = 16.0;
+                                    let mut weak = style::caption(ui);
                                     weak.wrap = true;
                                     let _ = text_ui.label(
                                         ui,
@@ -241,27 +240,4 @@ fn section_frame(ui: &Ui) -> Frame {
         ))
         .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
         .inner_margin(egui::Margin::same(style::SPACE_XL as i8))
-}
-
-fn themed_svg_image(
-    icon_id: &str,
-    svg_bytes: &[u8],
-    color: egui::Color32,
-    icon_size: f32,
-) -> egui::Image<'static> {
-    let themed_svg = apply_svg_color(svg_bytes, color);
-    let uri = format!(
-        "bytes://vertex-legal-icons/{icon_id}-{:02x}{:02x}{:02x}.svg",
-        color.r(),
-        color.g(),
-        color.b()
-    );
-    egui::Image::from_bytes(uri, themed_svg).fit_to_exact_size(egui::vec2(icon_size, icon_size))
-}
-
-fn apply_svg_color(svg_bytes: &[u8], color: egui::Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    String::from_utf8_lossy(svg_bytes)
-        .replace("currentColor", &color_hex)
-        .into_bytes()
 }

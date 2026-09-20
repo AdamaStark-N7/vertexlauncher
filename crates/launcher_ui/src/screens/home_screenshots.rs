@@ -212,16 +212,6 @@ fn spawn_screenshot_load_page(state: &mut HomeState, request_id: u64, page_size:
     }
 }
 
-fn ensure_delete_screenshot_channel(state: &mut HomeState) {
-    if state.delete_screenshot_results_tx.is_some() && state.delete_screenshot_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(String, String, Result<(), String>)>();
-    state.delete_screenshot_results_tx = Some(tx);
-    state.delete_screenshot_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn request_screenshot_delete(
     state: &mut HomeState,
     screenshot_key: String,
@@ -232,14 +222,11 @@ fn request_screenshot_delete(
         return;
     }
 
-    ensure_delete_screenshot_channel(state);
-    let Some(tx) = state.delete_screenshot_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.delete_screenshot_results.sender();
 
     state.delete_screenshot_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
-        let result = fs::remove_file(path.as_path()).map_err(|err| {
+        let result = tokio::fs::remove_file(path.as_path()).await.map_err(|err| {
             tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err, context = "delete home screenshot");
             format!("failed to remove {}: {err}", path.display())
         });
@@ -260,39 +247,11 @@ pub(super) fn poll_delete_screenshot_results(
     instances: &InstanceStore,
     config: &Config,
 ) {
-    let Some(rx) = state.delete_screenshot_results_rx.as_ref() else {
-        return;
-    };
+    let drained = state.delete_screenshot_results.drain();
+    let updates = drained.items;
 
-    let mut updates = Vec::new();
-    let mut should_reset_channel = false;
-    match rx.lock() {
-        Ok(receiver) => loop {
-            match receiver.try_recv() {
-                Ok(update) => updates.push(update),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    tracing::error!(
-                        target: "vertexlauncher/home",
-                        "Home screenshot-delete worker disconnected unexpectedly."
-                    );
-                    should_reset_channel = true;
-                    break;
-                }
-            }
-        },
-        Err(_) => {
-            tracing::error!(
-                target: "vertexlauncher/home",
-                "Home screenshot-delete receiver mutex was poisoned."
-            );
-            should_reset_channel = true;
-        }
-    }
-
-    if should_reset_channel {
-        state.delete_screenshot_results_tx = None;
-        state.delete_screenshot_results_rx = None;
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/home", "delete_screenshot_results worker channel stopped unexpectedly.");
         state.delete_screenshot_in_flight = false;
         notification::error!(
             "home/screenshots",
@@ -595,7 +554,8 @@ fn render_screenshot_tile(
             HOME_SCREENSHOT_TILE_TEXTURE_MAX_EDGE,
         ) {
             image_textures::ManagedTextureStatus::Ready(texture) => {
-                egui::Image::from_texture(&texture)
+                texture
+                    .image()
                     .fit_to_exact_size(rect.size())
                     .corner_radius(egui::CornerRadius::same(14))
                     .paint_at(ui, rect);
@@ -689,12 +649,16 @@ fn render_screenshot_tile(
         });
     });
 
-    image_response = image_response.on_hover_text(format!(
-        "{}\n{}\n{}",
-        screenshot.instance_name,
-        screenshot.file_name,
-        screenshot.path.display()
-    ));
+    image_response = crate::ui::style::hover_tip(
+        ui,
+        image_response,
+        format!(
+            "{}\n{}\n{}",
+            screenshot.instance_name,
+            screenshot.file_name,
+            screenshot.path.display()
+        ),
+    );
     action.open_viewer = image_response.clicked() && !overlay_clicked;
     action
 }
@@ -1031,21 +995,20 @@ pub(super) fn render_screenshot_viewer_modal(
             }
 
             if let Some(bytes) = image_bytes.as_ref() {
-                match image_textures::request_texture(
+                match image_textures::request_viewer_texture(
                     ui.ctx(),
                     image_key.clone(),
                     Arc::clone(bytes),
-                    TextureOptions::LINEAR,
                 ) {
-                    image_textures::ManagedTextureStatus::Ready(texture) => {
-                        egui::Image::from_texture(&texture)
-                            .fit_to_exact_size(image_rect.size())
-                            .maintain_aspect_ratio(false)
-                            .uv(viewer_uv_rect(viewer_state))
-                            .corner_radius(egui::CornerRadius::same(12))
-                            .paint_at(ui, image_rect);
+                    image_textures::ViewerTextureStatus::Ready(texture) => {
+                        texture.paint(
+                            ui,
+                            image_rect,
+                            viewer_uv_rect(viewer_state),
+                            egui::CornerRadius::same(12),
+                        );
                     }
-                    image_textures::ManagedTextureStatus::Loading => {
+                    image_textures::ViewerTextureStatus::Loading => {
                         ui.painter().rect_filled(
                             image_rect,
                             egui::CornerRadius::same(12),
@@ -1058,7 +1021,7 @@ pub(super) fn render_screenshot_viewer_modal(
                             "Loading screenshot...",
                         );
                     }
-                    image_textures::ManagedTextureStatus::Failed => {
+                    image_textures::ViewerTextureStatus::Failed => {
                         ui.painter().rect_filled(
                             image_rect,
                             egui::CornerRadius::same(12),
@@ -1331,7 +1294,7 @@ fn render_screenshot_overlay_button(
             metrics.screenshot_overlay_button_size,
         ),
     );
-    let themed_svg = apply_color_to_svg(icon_svg, icon_color);
+    let themed_svg = crate::ui::svg_tint::tint_svg(icon_svg, icon_color);
     let icon_color_key = format!(
         "{:02x}{:02x}{:02x}",
         icon_color.r(),

@@ -63,6 +63,21 @@ pub(super) fn render_installed_content_section(
         "Content Browser is unavailable while instance prep is running.";
     ui.add_space(12.0);
     ui.separator();
+    // The popup closes as soon as an entry is clicked, so dialog results are collected here,
+    // outside it, on every frame.
+    if let Some(paths) =
+        crate::ui::file_dialog::take(ui.ctx(), ("instance_add_local_dialog", instance_id))
+        && !paths.is_empty()
+    {
+        request_local_content_import(state, instance_root, paths);
+    }
+    if let Some(path) =
+        crate::ui::file_dialog::take(ui.ctx(), ("instance_apply_patch_dialog", instance_id))
+            .and_then(|paths| paths.into_iter().next())
+    {
+        request_vtmpatch_apply(state, instance_root, path);
+    }
+
     ui.add_space(10.0);
     poll_installed_content_scan_results(state);
     poll_content_hash_cache_load_results(state);
@@ -73,9 +88,11 @@ pub(super) fn render_installed_content_section(
     let (open_browser_response, add_menu_button) =
         render_joined_content_browser_controls(ui, text_ui, instance_id, !content_browser_locked);
     if content_browser_locked {
-        let _ = open_browser_response
-            .clone()
-            .on_disabled_hover_text(content_browser_locked_reason);
+        let _ = crate::ui::style::hover_tip(
+            ui,
+            open_browser_response.clone(),
+            content_browser_locked_reason,
+        );
     }
     if open_browser_response.clicked() {
         output.requested_screen = Some(AppScreen::ContentBrowser);
@@ -102,12 +119,12 @@ pub(super) fn render_installed_content_section(
                 })
                 .inner;
             if add_local_response.clicked() {
-                if let Some(selected_paths) = rfd::FileDialog::new()
-                    .set_title("Add Local Content")
-                    .pick_files()
-                {
-                    request_local_content_import(state, instance_root, selected_paths);
-                }
+                crate::ui::file_dialog::open(
+                    ui.ctx(),
+                    ("instance_add_local_dialog", instance_id),
+                    crate::ui::file_dialog::Pick::Files,
+                    crate::ui::file_dialog::Dialog::new().title("Add Local Content"),
+                );
             }
 
             let apply_patch_response = ui
@@ -121,13 +138,14 @@ pub(super) fn render_installed_content_section(
                 })
                 .inner;
             if apply_patch_response.clicked() {
-                if let Some(selected_path) = rfd::FileDialog::new()
-                    .set_title("Apply Vertex Patch")
-                    .add_filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION])
-                    .pick_file()
-                {
-                    request_vtmpatch_apply(state, instance_root, selected_path);
-                }
+                crate::ui::file_dialog::open(
+                    ui.ctx(),
+                    ("instance_apply_patch_dialog", instance_id),
+                    crate::ui::file_dialog::Pick::File,
+                    crate::ui::file_dialog::Dialog::new()
+                        .title("Apply Vertex Patch")
+                        .filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION]),
+                );
             }
 
             if text_ui
@@ -209,7 +227,7 @@ pub(super) fn render_installed_content_section(
                 "Search installed {} by name, file, version, or provider",
                 state.selected_content_tab.label().to_lowercase()
             )),
-            ..InputOptions::default()
+            ..crate::ui::style::input_options(ui)
         },
     );
     if search_response.changed() {
@@ -323,8 +341,10 @@ pub(super) fn render_installed_content_section(
         CONTENT_LOOKUP_BATCH_SIZE,
     );
     let delete_icon_color = ui.visuals().error_fg_color;
-    let delete_button_icon_svg = apply_color_to_svg(assets::TRASH_X_SVG, delete_icon_color);
-    let warning_icon_svg = apply_color_to_svg(assets::WARN_SVG, ui.visuals().warn_fg_color);
+    let delete_button_icon_svg =
+        crate::ui::svg_tint::tint_svg(assets::TRASH_X_SVG, delete_icon_color);
+    let warning_icon_svg =
+        crate::ui::svg_tint::tint_svg(assets::WARN_SVG, ui.visuals().warn_fg_color);
 
     let mut pending_delete: Option<(PathBuf, String)> = None;
     let mut pending_update: Option<(String, String, PathBuf)> = None;
@@ -512,30 +532,12 @@ pub(super) fn render_installed_content_section(
     flush_content_hash_cache(state, instance_root);
 }
 
-fn ensure_content_hash_cache_save_channel(state: &mut InstanceScreenState) {
-    if state.content_hash_cache_save_results_tx.is_some()
-        && state.content_hash_cache_save_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<(u64, Result<(), String>)>();
-    state.content_hash_cache_save_results_tx = Some(tx);
-    state.content_hash_cache_save_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn poll_content_hash_cache_save_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.content_hash_cache_save_results_rx.as_ref() else {
-        return;
-    };
-    let Ok(guard) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/instance_content",
-            "Content hash-cache save receiver mutex was poisoned while polling save results."
-        );
-        return;
-    };
-
-    while let Ok((saved_serial, result)) = guard.try_recv() {
+    let drained = state.content_hash_cache_save_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_content", "content_hash_cache_save_results receiver was poisoned; channel reset.");
+    }
+    for (saved_serial, result) in drained.items {
         state.content_hash_cache_save_in_flight = false;
         match result {
             Ok(()) => {
@@ -765,30 +767,12 @@ fn installed_content_count_label(matching: usize, total: usize, query: &str) -> 
     }
 }
 
-fn ensure_installed_content_scan_channel(state: &mut InstanceScreenState) {
-    if state.installed_content_cache.scan_results_tx.is_some()
-        && state.installed_content_cache.scan_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<InstalledContentScanResult>();
-    state.installed_content_cache.scan_results_tx = Some(tx);
-    state.installed_content_cache.scan_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn poll_installed_content_scan_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.installed_content_cache.scan_results_rx.as_ref() else {
-        return;
-    };
-    let Ok(guard) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/instance_content",
-            "Installed-content scan receiver mutex was poisoned."
-        );
-        return;
-    };
-
-    while let Ok(result) = guard.try_recv() {
+    let drained = state.installed_content_cache.scan_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_content", "scan_results receiver was poisoned; channel reset.");
+    }
+    for result in drained.items {
         if result.generation != state.installed_content_cache.scan_generation {
             continue;
         }
@@ -812,15 +796,7 @@ fn request_installed_content_scan(
     if state.installed_content_cache.scans_in_flight.contains(&tab) {
         return;
     }
-    ensure_installed_content_scan_channel(state);
-    let Some(tx) = state
-        .installed_content_cache
-        .scan_results_tx
-        .as_ref()
-        .cloned()
-    else {
-        return;
-    };
+    let tx = state.installed_content_cache.scan_results.sender();
 
     let generation = state.installed_content_cache.scan_generation;
     let instance_root = instance_root.to_path_buf();
@@ -994,8 +970,6 @@ fn render_installed_content_entry(
                                             (id_source, "name"),
                                             display_name,
                                             &LabelOptions {
-                                                font_size: 19.0,
-                                                line_height: 24.0,
                                                 wrap: true,
                                                 ..style::stat_label(ui)
                                             },
@@ -1190,7 +1164,7 @@ fn render_installed_content_action_button(
     let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
     let _ = ui.put(icon_rect, image);
 
-    response.on_hover_text(tooltip).clicked()
+    crate::ui::style::hover_tip(ui, response, tooltip).clicked()
 }
 
 use crate::ui::color::lerp_color32_oklab;
@@ -1267,10 +1241,8 @@ fn render_mod_enable_toggle(ui: &mut Ui, id: &str, enabled: bool, width: f32, he
     );
 
     let tooltip = if enabled { "Disable mod" } else { "Enable mod" };
-    response
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(tooltip)
-        .clicked()
+    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
+    crate::ui::style::hover_tip(ui, response, tooltip).clicked()
 }
 
 fn render_bulk_update_button(
@@ -1330,7 +1302,7 @@ fn render_bulk_update_button(
             egui::pos2(rect.min.x + 12.0, rect.center().y - (icon_size * 0.5)),
             egui::vec2(icon_size, icon_size),
         );
-        let refresh_icon_svg = apply_color_to_svg(assets::REFRESH_SVG, text_color);
+        let refresh_icon_svg = crate::ui::svg_tint::tint_svg(assets::REFRESH_SVG, text_color);
         let _ = ui.put(
             icon_rect,
             egui::Image::from_bytes(icon_uri, refresh_icon_svg)
@@ -1341,10 +1313,8 @@ fn render_bulk_update_button(
             egui::pos2(rect.right() - 10.0, rect.bottom()),
         );
         let label_style = LabelOptions {
-            font_size: 14.0,
-            line_height: 18.0,
             color: text_color,
-            ..style::body_strong(ui)
+            ..style::stat_label(ui)
         };
         ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
             ui.set_clip_rect(label_rect.intersect(ui.clip_rect()));
@@ -1358,13 +1328,16 @@ fn render_bulk_update_button(
             });
         });
 
-        response
-            .on_hover_text(if enabled {
+        crate::ui::style::hover_tip(
+            ui,
+            response,
+            if enabled {
                 tooltip
             } else {
                 "A content operation is already in progress."
-            })
-            .clicked()
+            },
+        )
+        .clicked()
     })
     .inner
 }
@@ -1395,7 +1368,7 @@ fn render_installed_content_badge(
                     line_height: INSTALLED_CONTENT_BADGE_LINE_HEIGHT,
                     color: text_color,
                     wrap: false,
-                    ..LabelOptions::default()
+                    ..crate::ui::style::body(ui)
                 },
             );
         });
@@ -1450,13 +1423,16 @@ fn render_installed_content_update_badge(
                 )
             })
             .inner;
-        response
-            .on_hover_text(if enabled {
+        crate::ui::style::hover_tip(
+            ui,
+            response,
+            if enabled {
                 "Update to this version"
             } else {
                 "A content operation is already in progress"
-            })
-            .clicked()
+            },
+        )
+        .clicked()
     })
     .inner
 }
@@ -1477,33 +1453,15 @@ fn render_installed_content_warning(
         egui::Image::from_bytes(uri, warning_icon_svg.to_vec())
             .fit_to_exact_size(egui::vec2(16.0, 16.0)),
     );
-    response.on_hover_text(warning_message);
-}
-
-fn ensure_content_hash_cache_load_channel(state: &mut InstanceScreenState) {
-    if state.content_hash_cache_load_results_tx.is_some()
-        && state.content_hash_cache_load_results_rx.is_some()
-    {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<Result<InstalledContentHashCache, String>>();
-    state.content_hash_cache_load_results_tx = Some(tx);
-    state.content_hash_cache_load_results_rx = Some(Arc::new(Mutex::new(rx)));
+    crate::ui::style::hover_tip(ui, response, warning_message);
 }
 
 fn poll_content_hash_cache_load_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.content_hash_cache_load_results_rx.as_ref() else {
-        return;
-    };
-    let Ok(guard) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/instance_content",
-            "Content hash-cache load receiver mutex was poisoned."
-        );
-        return;
-    };
-
-    while let Ok(result) = guard.try_recv() {
+    let drained = state.content_hash_cache_load_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_content", "content_hash_cache_load_results receiver was poisoned; channel reset.");
+    }
+    for result in drained.items {
         state.content_hash_cache_load_in_flight = false;
         if state.content_hash_cache.is_some() {
             continue;
@@ -1526,11 +1484,7 @@ fn ensure_content_hash_cache_loaded(state: &mut InstanceScreenState, instance_ro
     if state.content_hash_cache.is_some() || state.content_hash_cache_load_in_flight {
         return;
     }
-    ensure_content_hash_cache_load_channel(state);
-    let Some(tx) = state.content_hash_cache_load_results_tx.as_ref().cloned() else {
-        state.content_hash_cache = Some(InstalledContentHashCache::default());
-        return;
-    };
+    let tx = state.content_hash_cache_load_results.sender();
 
     let instance_root = instance_root.to_path_buf();
     state.content_hash_cache_load_in_flight = true;
@@ -1562,10 +1516,7 @@ fn flush_content_hash_cache(state: &mut InstanceScreenState, instance_root: &Pat
     let Some(cache) = state.content_hash_cache.clone() else {
         return;
     };
-    ensure_content_hash_cache_save_channel(state);
-    let Some(tx) = state.content_hash_cache_save_results_tx.as_ref().cloned() else {
-        return;
-    };
+    let tx = state.content_hash_cache_save_results.sender();
     let instance_root = instance_root.to_path_buf();
     let serial = state.content_hash_cache_serial;
     state.content_hash_cache_save_in_flight = true;
@@ -1629,15 +1580,6 @@ fn cached_truncated_description(
     truncated_description
 }
 
-fn ensure_content_lookup_channel(state: &mut InstanceScreenState) {
-    if state.content_lookup_results_tx.is_some() && state.content_lookup_results_rx.is_some() {
-        return;
-    }
-    let (tx, rx) = mpsc::channel::<ContentLookupResult>();
-    state.content_lookup_results_tx = Some(tx);
-    state.content_lookup_results_rx = Some(Arc::new(Mutex::new(rx)));
-}
-
 fn should_request_content_metadata_lookup(
     state: &mut InstanceScreenState,
     lookup_key: &str,
@@ -1692,10 +1634,7 @@ fn request_content_metadata_lookup_batch(
         return 0;
     }
 
-    ensure_content_lookup_channel(state);
-    let Some(tx) = state.content_lookup_results_tx.as_ref().cloned() else {
-        return 0;
-    };
+    let tx = state.content_lookup_results.sender();
 
     let mut work_items = Vec::new();
     for file in files {
@@ -1763,20 +1702,11 @@ fn request_content_metadata_lookup_batch(
 }
 
 pub(super) fn poll_content_lookup_results(state: &mut InstanceScreenState) {
-    let Some(rx) = state.content_lookup_results_rx.as_ref() else {
-        return;
-    };
-    let Ok(guard) = rx.lock() else {
-        tracing::error!(
-            target: "vertexlauncher/instance_content",
-            in_flight = state.content_lookup_in_flight.len(),
-            tracked_keys = state.content_lookup_latest_serial_by_key.len(),
-            "Instance content lookup receiver mutex was poisoned while polling metadata results."
-        );
-        return;
-    };
-
-    while let Ok(result) = guard.try_recv() {
+    let drained = state.content_lookup_results.drain();
+    if drained.disconnected {
+        tracing::error!(target: "vertexlauncher/instance_content", "content_lookup_results receiver was poisoned; channel reset.");
+    }
+    for result in drained.items {
         let cache = state
             .content_hash_cache
             .get_or_insert_with(InstalledContentHashCache::default);

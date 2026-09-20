@@ -94,20 +94,27 @@ const HOME_SCREENSHOT_OVERSCAN: f32 = 420.0;
 const HOME_THUMBNAIL_CACHE_MAX_BYTES: usize = 24 * 1024 * 1024;
 const HOME_THUMBNAIL_CACHE_STALE_FRAMES: u64 = 900;
 
+#[path = "home_grouping.rs"]
+mod home_grouping;
 #[path = "home_screenshots.rs"]
 mod home_screenshots;
 #[path = "home_server_ping.rs"]
 mod home_server_ping;
+#[path = "home_server_sync.rs"]
+mod home_server_sync;
 #[path = "home_support.rs"]
 mod home_support;
 #[path = "home_thumbnails.rs"]
 mod home_thumbnails;
+#[path = "home_world_sync.rs"]
+mod home_world_sync;
 
 use self::home_activity_result_channel::HomeActivityResultChannel;
 use self::home_activity_scan_instance::HomeActivityScanInstance;
 use self::home_activity_scan_request::HomeActivityScanRequest;
 use self::home_activity_scan_result::HomeActivityScanResult;
 use self::home_entry_ref::HomeEntryRef;
+use self::home_grouping::EntryInstance;
 pub use self::home_output::HomeOutput;
 pub use self::home_presence_section::HomePresenceSection;
 use self::home_screenshots::{
@@ -191,6 +198,7 @@ fn build_home_activity_scan_request(
     HomeActivityScanRequest {
         scanned_instance_count: instances.instances.len(),
         instances: activity_instances,
+        synced_worlds: instances.synced_worlds.clone(),
     }
 }
 
@@ -308,7 +316,13 @@ pub fn render(
                 metrics,
             );
 
-            if requested_rescan {
+            let world_sync_finished = ui
+                .ctx()
+                .data_mut(|data| {
+                    data.remove_temp::<bool>(egui::Id::new(home_world_sync::RESCAN_KEY))
+                })
+                .unwrap_or(false);
+            if requested_rescan || world_sync_finished {
                 refresh_home_state(&mut state, instances, config, true);
             }
 
@@ -374,6 +388,8 @@ pub fn render(
 
     render_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state, metrics);
     render_delete_screenshot_modal(ui.ctx(), text_ui, &mut state, instances, config, metrics);
+    home_server_sync::render_server_sync_modal(ui.ctx(), text_ui, instances, config);
+    home_world_sync::render_world_sync_modal(ui.ctx(), text_ui, instances, config);
     output.presence_section = state.active_tab.presence_section();
     ui.ctx().data_mut(|data| data.insert_temp(state_id, state));
     output
@@ -412,11 +428,8 @@ fn render_instance_usage(
     output: &mut HomeOutput,
     metrics: HomeUiMetrics,
 ) {
-    let mut title_style = LabelOptions::default();
-    title_style.font_size = 18.0;
-    title_style.line_height = 24.0;
-    title_style.weight = 700;
-    title_style.color = ui.visuals().text_color();
+    let mut title_style = crate::ui::style::body_strong(ui);
+    title_style.wrap = false;
     let _ = text_ui.label(ui, "home_usage_title", "Most Used Instances", &title_style);
     ui.add_space(6.0);
 
@@ -586,11 +599,8 @@ fn render_activity_feed(
     requested_rescan: &mut bool,
     metrics: HomeUiMetrics,
 ) {
-    let mut title_style = LabelOptions::default();
-    title_style.font_size = 18.0;
-    title_style.line_height = 24.0;
-    title_style.weight = 700;
-    title_style.color = ui.visuals().text_color();
+    let mut title_style = crate::ui::style::body_strong(ui);
+    title_style.wrap = false;
     let _ = text_ui.label(ui, "home_activity_title", "Worlds & Servers", &title_style);
     ui.add_space(6.0);
 
@@ -732,7 +742,11 @@ fn render_activity_entry_row_if_visible(
 ) {
     const ROW_GAP: f32 = 2.0;
     let row_height = activity_entry_row_height(ui, metrics, &entry);
-    let total_height = row_height + ROW_GAP;
+    let group = home_grouping::group_instances(&entry);
+    let buttons_layout =
+        home_grouping::instance_buttons_layout(ui, text_ui, group, ui.available_width());
+    let total_height = row_height + ROW_GAP + buttons_layout.total_height;
+    let is_world = matches!(entry, HomeEntryRef::World(_));
     let row_top = ui.cursor().top();
     let row_bottom = row_top + total_height;
     if row_bottom < viewport.top() || row_top > viewport.bottom() {
@@ -770,6 +784,26 @@ fn render_activity_entry_row_if_visible(
             metrics,
         ),
     }
+    if let Some(chosen) = home_grouping::render_instance_buttons(
+        ui,
+        text_ui,
+        id_source,
+        group,
+        &buttons_layout,
+        !auth.token_refresh_in_progress,
+    ) {
+        queue_launch_intent(
+            ui.ctx(),
+            PendingLaunchIntent {
+                nonce: current_time_millis(),
+                instance_id: chosen.instance_id.clone(),
+                quick_play_singleplayer: is_world.then(|| chosen.target.clone()),
+                quick_play_multiplayer: (!is_world).then(|| chosen.target.clone()),
+            },
+        );
+        output.selected_instance_id = Some(chosen.instance_id);
+        output.requested_screen = Some(AppScreen::Library);
+    }
     ui.add_space(ROW_GAP);
 }
 
@@ -791,10 +825,9 @@ fn render_world_row(
         activity_entry_min_row_height(ui, metrics, &name_label_options, &meta_label_options, 0.0);
     let mut star_clicked = false;
     let row_response = render_clickable_entry_row(ui, (id_source, "row"), row_height, |ui| {
-        if render_favorite_star_button(ui, (id_source, "world_star"), world.favorite)
-            .on_hover_text("Toggle world favorite")
-            .clicked()
-        {
+        let star_response =
+            render_favorite_star_button(ui, (id_source, "world_star"), world.favorite);
+        if crate::ui::style::hover_tip(ui, star_response, "Toggle world favorite").clicked() {
             star_clicked = true;
         }
         ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
@@ -825,12 +858,15 @@ fn render_world_row(
         );
     });
     if star_clicked {
-        let _ = set_world_favorite(
-            instances,
-            world.instance_id.as_str(),
-            world.world_id.as_str(),
-            !world.favorite,
-        );
+        // A favorite applies to every instance the world appears in.
+        for member in &world.instances {
+            let _ = set_world_favorite(
+                instances,
+                member.instance_id.as_str(),
+                member.target.as_str(),
+                !world.favorite,
+            );
+        }
         *requested_rescan = true;
         return;
     }
@@ -869,6 +905,11 @@ fn render_world_row(
                         "Copy Steam launch options",
                         assets::STEAM_SVG,
                     ),
+                    ContextMenuItem::new_with_icon(
+                        "world_sync_options",
+                        "Sync world…",
+                        assets::USERS_GROUP_SVG,
+                    ),
                 ],
             ),
         );
@@ -879,6 +920,9 @@ fn render_world_row(
         }
         Some("copy_world_steam_launch_options") => {
             copy_world_steam_launch_options(ui.ctx(), world, auth);
+        }
+        Some("world_sync_options") => {
+            home_world_sync::request_world_sync_modal(ui.ctx(), world, instances);
         }
         _ => {}
     }
@@ -946,10 +990,9 @@ fn render_server_row(
     );
     let mut star_clicked = false;
     let row_response = render_clickable_entry_row(ui, (id_source, "row"), row_height, |ui| {
-        if render_favorite_star_button(ui, (id_source, "server_star"), server.favorite)
-            .on_hover_text("Toggle server favorite")
-            .clicked()
-        {
+        let star_response =
+            render_favorite_star_button(ui, (id_source, "server_star"), server.favorite);
+        if crate::ui::style::hover_tip(ui, star_response, "Toggle server favorite").clicked() {
             star_clicked = true;
         }
         ui.add_space(ACTIVITY_ENTRY_CONTENT_GAP);
@@ -997,12 +1040,14 @@ fn render_server_row(
         );
     });
     if star_clicked {
-        let _ = set_server_favorite(
-            instances,
-            server.instance_id.as_str(),
-            server.favorite_id.as_str(),
-            !server.favorite,
-        );
+        for member in &server.instances {
+            let _ = set_server_favorite(
+                instances,
+                member.instance_id.as_str(),
+                server.favorite_id.as_str(),
+                !server.favorite,
+            );
+        }
         *requested_rescan = true;
         return;
     }
@@ -1041,6 +1086,11 @@ fn render_server_row(
                         "Copy Steam launch options",
                         assets::STEAM_SVG,
                     ),
+                    ContextMenuItem::new_with_icon(
+                        "server_sync_options",
+                        "Sync options…",
+                        assets::USERS_GROUP_SVG,
+                    ),
                 ],
             ),
         );
@@ -1051,6 +1101,9 @@ fn render_server_row(
         }
         Some("copy_server_steam_launch_options") => {
             copy_server_steam_launch_options(ui.ctx(), server, auth);
+        }
+        Some("server_sync_options") => {
+            home_server_sync::request_server_sync_modal(ui.ctx(), server, instances);
         }
         _ => {}
     }
@@ -1435,7 +1488,8 @@ fn render_entry_thumbnail(
             {
                 ui.put(
                     image_rect,
-                    egui::Image::from_texture(&texture)
+                    texture
+                        .image()
                         .fit_to_exact_size(egui::vec2(image_size, image_size)),
                 );
                 return;
@@ -1444,7 +1498,7 @@ fn render_entry_thumbnail(
 
         ui.with_layout(Layout::top_down(egui::Align::Center), |ui| {
             ui.add_space(((height - ENTRY_ICON_SIZE) * 0.5).max(0.0));
-            let themed_svg = apply_color_to_svg(icon_svg, ui.visuals().text_color());
+            let themed_svg = crate::ui::svg_tint::tint_svg(icon_svg, ui.visuals().text_color());
             let uri = format!("bytes://home/entry-thumb/{:?}.svg", ui.id().with(id_source));
             ui.add(
                 egui::Image::from_bytes(uri, themed_svg)
@@ -1538,12 +1592,6 @@ fn modal_default_focus_requested(ctx: &egui::Context, id_source: impl std::hash:
         data.insert_temp(key, frame);
         !matches!(last_seen, Some(previous) if previous.saturating_add(1) >= frame)
     })
-}
-
-fn apply_color_to_svg(svg_bytes: &[u8], color: Color32) -> Vec<u8> {
-    let color_hex = format!("#{:02x}{:02x}{:02x}", color.r(), color.g(), color.b());
-    let svg = String::from_utf8_lossy(svg_bytes).replace("currentColor", color_hex.as_str());
-    svg.into_bytes()
 }
 
 fn apply_star_fill_and_stroke_svg(svg_bytes: &[u8], fill: Color32, stroke: Color32) -> Vec<u8> {
@@ -1657,6 +1705,18 @@ fn collect_worlds_from_request(request: &HomeActivityScanRequest) -> Vec<WorldEn
                 thumbnail_png: read_world_thumbnail(path.join("icon.png").as_path()),
                 last_used_at_ms,
                 favorite: instance.favorite_world_ids.iter().any(|id| id == &world_id),
+                group_key: world_group_key(
+                    request,
+                    instance.instance_id.as_str(),
+                    world_id.as_str(),
+                    path.as_path(),
+                ),
+                instances: vec![EntryInstance {
+                    instance_id: instance.instance_id.clone(),
+                    instance_name: instance.instance_name.clone(),
+                    target: world_id.clone(),
+                    favorite: instance.favorite_world_ids.iter().any(|id| id == &world_id),
+                }],
             });
         }
     }
@@ -1666,7 +1726,28 @@ fn collect_worlds_from_request(request: &HomeActivityScanRequest) -> Vec<WorldEn
             .cmp(&a.last_used_at_ms.unwrap_or(0))
             .then_with(|| a.world_name.cmp(&b.world_name))
     });
-    worlds
+    home_grouping::collapse_worlds(worlds)
+}
+
+/// Worlds are the same when they share a synced-world id, or resolve to the same folder
+/// (for example through a symlink).
+fn world_group_key(
+    request: &HomeActivityScanRequest,
+    instance_id: &str,
+    folder: &str,
+    path: &Path,
+) -> String {
+    if let Some(synced) = request
+        .synced_worlds
+        .iter()
+        .find(|world| world.folder_name == folder && world.members.contains_key(instance_id))
+    {
+        return format!("synced:{}", synced.id);
+    }
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn read_world_thumbnail(path: &Path) -> Option<Arc<[u8]>> {

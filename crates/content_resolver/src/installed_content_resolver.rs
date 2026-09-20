@@ -1,3 +1,8 @@
+use logged_fs::create_dir_all as fs_create_dir_all;
+use logged_fs::read_dir as fs_read_dir;
+use logged_fs::read_to_string as fs_read_to_string;
+use logged_fs::remove_file as fs_remove_file;
+use logged_fs::write as fs_write;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -15,56 +20,6 @@ use crate::{
     InstalledContentKind, InstalledContentResolutionKind, InstalledContentUpdate,
     ResolveInstalledContentRequest, ResolveInstalledContentResult, ResolvedInstalledContent,
 };
-
-#[track_caller]
-fn fs_read_dir(path: &Path) -> std::io::Result<std::fs::ReadDir> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_dir", path = %path.display());
-    let result = std::fs::read_dir(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_dir", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_read_to_string(path: &Path) -> std::io::Result<String> {
-    tracing::debug!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display());
-    let result = std::fs::read_to_string(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "read_to_string", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_create_dir_all(path: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display());
-    let result = std::fs::create_dir_all(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "create_dir_all", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_write(path: &Path, raw: String) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "write", path = %path.display());
-    let result = std::fs::write(path, raw);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "write", path = %path.display(), error = %err);
-    }
-    result
-}
-
-#[track_caller]
-fn fs_remove_file(path: &Path) -> std::io::Result<()> {
-    tracing::debug!(target: "vertexlauncher/io", op = "remove_file", path = %path.display());
-    let result = std::fs::remove_file(path);
-    if let Err(err) = &result {
-        tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err);
-    }
-    result
-}
 
 /// Maximum number of entries kept in each session-scoped lookup cache.
 /// Prevents unbounded growth when the user browses a very large mod library.
@@ -189,10 +144,7 @@ impl InstalledContentResolver {
                 .as_ref()
                 .map(|identity| identity.name.clone())
                 .unwrap_or_else(|| {
-                    derive_installed_lookup_query(
-                        lookup_path.as_path(),
-                        lookup_file_name.as_str(),
-                    )
+                    derive_installed_lookup_query(lookup_path.as_path(), lookup_file_name.as_str())
                 });
             let (fallback_lookup_query, fallback_lookup_key) = if managed_identity.is_some() {
                 (None, None)

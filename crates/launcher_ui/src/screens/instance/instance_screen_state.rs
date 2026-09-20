@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, mpsc};
 
 #[derive(Clone, Debug)]
 pub(super) struct MoveInstanceProgress {
@@ -125,6 +124,8 @@ pub(super) struct InstanceScreenState {
     pub(super) linux_set_opengl_driver: bool,
     pub(super) linux_use_zink_driver: bool,
     pub(super) discord_rich_presence_mod_installed: bool,
+    pub(super) runtime_overrides_saved_fingerprint: Option<String>,
+    pub(super) runtime_overrides_dirty_since: Option<(String, std::time::Instant)>,
     pub(super) selected_content_tab: InstalledContentKind,
     pub(super) installed_content_page_size: usize,
     pub(super) installed_content_page: usize,
@@ -134,54 +135,42 @@ pub(super) struct InstanceScreenState {
     pub(super) content_metadata_cache: HashMap<String, Option<ResolvedInstalledContent>>,
     pub(super) content_hash_cache: Option<InstalledContentHashCache>,
     pub(super) content_hash_cache_load_in_flight: bool,
-    pub(super) content_hash_cache_load_results_tx:
-        Option<mpsc::Sender<Result<InstalledContentHashCache, String>>>,
-    pub(super) content_hash_cache_load_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<Result<InstalledContentHashCache, String>>>>>,
+    pub(super) content_hash_cache_load_results:
+        launcher_runtime::WorkerChannel<Result<InstalledContentHashCache, String>>,
     pub(super) content_hash_cache_dirty: bool,
     pub(super) content_hash_cache_dirty_since: Option<Instant>,
     pub(super) content_hash_cache_serial: u64,
     pub(super) content_hash_cache_save_in_flight: bool,
-    pub(super) content_hash_cache_save_results_tx: Option<mpsc::Sender<(u64, Result<(), String>)>>,
-    pub(super) content_hash_cache_save_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(u64, Result<(), String>)>>>>,
+    pub(super) content_hash_cache_save_results:
+        launcher_runtime::WorkerChannel<(u64, Result<(), String>)>,
     pub(super) content_apply_in_flight: bool,
-    pub(super) content_apply_results_tx: Option<mpsc::Sender<ContentApplyResult>>,
-    pub(super) content_apply_results_rx: Option<Arc<Mutex<mpsc::Receiver<ContentApplyResult>>>>,
+    pub(super) content_apply_results: launcher_runtime::WorkerChannel<ContentApplyResult>,
     pub(super) content_lookup_in_flight: HashSet<String>,
     pub(super) content_lookup_request_serial: u64,
     pub(super) content_lookup_latest_serial_by_key: HashMap<String, u64>,
     pub(super) content_lookup_retry_after_by_key: HashMap<String, Instant>,
     pub(super) content_lookup_failure_count_by_key: HashMap<String, u8>,
-    pub(super) content_lookup_results_tx: Option<mpsc::Sender<ContentLookupResult>>,
-    pub(super) content_lookup_results_rx: Option<Arc<Mutex<mpsc::Receiver<ContentLookupResult>>>>,
+    pub(super) content_lookup_results: launcher_runtime::WorkerChannel<ContentLookupResult>,
     pub(super) available_game_versions: Vec<MinecraftVersionEntry>,
     pub(super) selected_game_version_index: usize,
     pub(super) loader_support: LoaderSupportIndex,
     pub(super) loader_versions: LoaderVersionIndex,
     pub(super) modloader_versions_cache: BTreeMap<String, Vec<String>>,
     pub(super) modloader_versions_in_flight: HashSet<String>,
-    pub(super) modloader_versions_results_tx:
-        Option<mpsc::Sender<(String, Result<Vec<String>, String>)>>,
-    pub(super) modloader_versions_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, Result<Vec<String>, String>)>>>>,
+    pub(super) modloader_versions_results:
+        launcher_runtime::WorkerChannel<(String, Result<Vec<String>, String>)>,
     pub(super) modloader_versions_status_key: Option<String>,
     pub(super) modloader_versions_status: Option<String>,
     pub(super) incompatible_modloader_version_warning_key: Option<String>,
     pub(super) version_catalog_filter: Option<VersionCatalogFilter>,
     pub(super) version_catalog_error: Option<String>,
     pub(super) version_catalog_in_flight: bool,
-    pub(super) version_catalog_results_tx:
-        Option<mpsc::Sender<(VersionCatalogFilter, Result<VersionCatalog, String>)>>,
-    pub(super) version_catalog_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(VersionCatalogFilter, Result<VersionCatalog, String>)>>>>,
+    pub(super) version_catalog:
+        launcher_runtime::WorkerChannel<(VersionCatalogFilter, Result<VersionCatalog, String>)>,
     pub(super) runtime_prepare_in_flight: bool,
-    pub(super) runtime_prepare_results_tx:
-        Option<mpsc::Sender<(String, String, Result<RuntimePrepareOutcome, String>)>>,
-    pub(super) runtime_prepare_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<RuntimePrepareOutcome, String>)>>>>,
-    pub(super) runtime_progress_tx: Option<mpsc::Sender<InstallProgress>>,
-    pub(super) runtime_progress_rx: Option<Arc<Mutex<mpsc::Receiver<InstallProgress>>>>,
+    pub(super) runtime_prepare_results:
+        launcher_runtime::WorkerChannel<(String, String, Result<RuntimePrepareOutcome, String>)>,
+    pub(super) runtime_progress: launcher_runtime::WorkerChannel<InstallProgress>,
     pub(super) runtime_latest_progress: Option<InstallProgress>,
     pub(super) runtime_last_notification_at: Option<Instant>,
     pub(super) runtime_prepare_instance_root: Option<String>,
@@ -191,27 +180,21 @@ pub(super) struct InstanceScreenState {
     pub(super) last_screenshot_scan_at: Option<Instant>,
     pub(super) screenshot_scan_in_flight: bool,
     pub(super) screenshot_scan_request_serial: u64,
-    pub(super) screenshot_scan_results_tx:
-        Option<mpsc::Sender<(u64, Vec<InstanceScreenshotEntry>)>>,
-    pub(super) screenshot_scan_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(u64, Vec<InstanceScreenshotEntry>)>>>>,
+    pub(super) screenshot_scan_results:
+        launcher_runtime::WorkerChannel<(u64, Vec<InstanceScreenshotEntry>)>,
     pub(super) screenshot_images: LazyImageBytes,
     pub(super) screenshot_layout_revision: u64,
     pub(super) screenshot_masonry_layout_cache: Option<CachedVirtualMasonryLayout>,
     pub(super) screenshot_viewer: Option<InstanceScreenshotViewerState>,
     pub(super) pending_delete_screenshot_key: Option<String>,
     pub(super) delete_screenshot_in_flight: bool,
-    pub(super) delete_screenshot_results_tx:
-        Option<mpsc::Sender<(String, String, Result<(), String>)>>,
-    pub(super) delete_screenshot_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(String, String, Result<(), String>)>>>>,
+    pub(super) delete_screenshot_results:
+        launcher_runtime::WorkerChannel<(String, String, Result<(), String>)>,
     pub(super) logs: Vec<InstanceLogEntry>,
     pub(super) last_log_scan_at: Option<Instant>,
     pub(super) log_scan_in_flight: bool,
     pub(super) log_scan_request_serial: u64,
-    pub(super) log_scan_results_tx: Option<mpsc::Sender<(u64, Vec<InstanceLogEntry>)>>,
-    pub(super) log_scan_results_rx:
-        Option<Arc<Mutex<mpsc::Receiver<(u64, Vec<InstanceLogEntry>)>>>>,
+    pub(super) log_scan_results: launcher_runtime::WorkerChannel<(u64, Vec<InstanceLogEntry>)>,
     pub(super) selected_log_path: Option<PathBuf>,
     pub(super) loaded_log_path: Option<PathBuf>,
     pub(super) loaded_log_modified_at_ms: Option<u64>,
@@ -222,47 +205,32 @@ pub(super) struct InstanceScreenState {
     pub(super) log_load_request_serial: u64,
     pub(super) requested_log_load_path: Option<PathBuf>,
     pub(super) requested_log_load_modified_at_ms: Option<u64>,
-    pub(super) log_load_results_tx: Option<
-        mpsc::Sender<(
-            u64,
-            PathBuf,
-            Option<u64>,
-            Result<(Vec<String>, bool), String>,
-        )>,
-    >,
-    pub(super) log_load_results_rx: Option<
-        Arc<
-            Mutex<
-                mpsc::Receiver<(
-                    u64,
-                    PathBuf,
-                    Option<u64>,
-                    Result<(Vec<String>, bool), String>,
-                )>,
-            >,
-        >,
-    >,
+    pub(super) log_load_results: launcher_runtime::WorkerChannel<(
+        u64,
+        PathBuf,
+        Option<u64>,
+        Result<(Vec<String>, bool), String>,
+    )>,
     pub(super) show_settings_modal: bool,
     pub(super) show_export_vtmpack_modal: bool,
     pub(super) show_export_server_modal: bool,
     pub(super) export_vtmpack_patch_mode: bool,
+    /// Base pack chosen for a patch export, waiting for the output location dialog.
+    pub(super) export_patch_base_path: Option<PathBuf>,
+    pub(super) export_vtmpack_root_entries: super::root_entries::RootEntries,
+    pub(super) export_server_root_entries: super::root_entries::RootEntries,
     pub(super) export_vtmpack_options: VtmpackExportOptions,
     pub(super) export_vtmpack_in_flight: bool,
     pub(super) export_vtmpack_output_path: Option<PathBuf>,
-    pub(super) export_vtmpack_progress_tx: Option<mpsc::Sender<VtmpackExportProgress>>,
-    pub(super) export_vtmpack_progress_rx:
-        Option<Arc<Mutex<mpsc::Receiver<VtmpackExportProgress>>>>,
+    pub(super) export_vtmpack_progress: launcher_runtime::WorkerChannel<VtmpackExportProgress>,
     pub(super) export_vtmpack_latest_progress: Option<VtmpackExportProgress>,
-    pub(super) export_vtmpack_results_tx: Option<mpsc::Sender<VtmpackExportOutcome>>,
-    pub(super) export_vtmpack_results_rx: Option<Arc<Mutex<mpsc::Receiver<VtmpackExportOutcome>>>>,
+    pub(super) export_vtmpack_results: launcher_runtime::WorkerChannel<VtmpackExportOutcome>,
     pub(super) export_server_included_root_entries: BTreeMap<String, bool>,
     pub(super) export_server_in_flight: bool,
     pub(super) export_server_output_path: Option<PathBuf>,
-    pub(super) export_server_progress_tx: Option<mpsc::Sender<VtmpackExportProgress>>,
-    pub(super) export_server_progress_rx: Option<Arc<Mutex<mpsc::Receiver<VtmpackExportProgress>>>>,
+    pub(super) export_server_progress: launcher_runtime::WorkerChannel<VtmpackExportProgress>,
     pub(super) export_server_latest_progress: Option<VtmpackExportProgress>,
-    pub(super) export_server_results_tx: Option<mpsc::Sender<ServerExportOutcome>>,
-    pub(super) export_server_results_rx: Option<Arc<Mutex<mpsc::Receiver<ServerExportOutcome>>>>,
+    pub(super) export_server_results: launcher_runtime::WorkerChannel<ServerExportOutcome>,
     pub(super) show_move_instance_modal: bool,
     pub(super) show_move_instance_progress_modal: bool,
     pub(super) move_instance_dest_input: String,
@@ -276,10 +244,8 @@ pub(super) struct InstanceScreenState {
     pub(super) move_instance_last_layout_log_at: Option<Instant>,
     pub(super) move_instance_pending_result: Option<MoveInstanceResult>,
     pub(super) move_instance_progress_visible_until: Option<Instant>,
-    pub(super) move_instance_progress_tx: Option<mpsc::Sender<MoveInstanceProgress>>,
-    pub(super) move_instance_progress_rx: Option<Arc<Mutex<mpsc::Receiver<MoveInstanceProgress>>>>,
-    pub(super) move_instance_results_tx: Option<mpsc::Sender<MoveInstanceResult>>,
-    pub(super) move_instance_results_rx: Option<Arc<Mutex<mpsc::Receiver<MoveInstanceResult>>>>,
+    pub(super) move_instance_progress: launcher_runtime::WorkerChannel<MoveInstanceProgress>,
+    pub(super) move_instance_results: launcher_runtime::WorkerChannel<MoveInstanceResult>,
     pub(super) launch_username: Option<String>,
     pub(super) launch_user_key: Option<String>,
 }
@@ -317,6 +283,8 @@ impl InstanceScreenState {
             linux_set_opengl_driver,
             linux_use_zink_driver,
             discord_rich_presence_mod_installed: instance.discord_rich_presence_mod_installed,
+            runtime_overrides_saved_fingerprint: None,
+            runtime_overrides_dirty_since: None,
             selected_content_tab: InstalledContentKind::Mods,
             installed_content_page_size: INSTALLED_CONTENT_PAGE_SIZES[1],
             installed_content_page: 1,
@@ -326,45 +294,37 @@ impl InstanceScreenState {
             content_metadata_cache: HashMap::new(),
             content_hash_cache: None,
             content_hash_cache_load_in_flight: false,
-            content_hash_cache_load_results_tx: None,
-            content_hash_cache_load_results_rx: None,
+            content_hash_cache_load_results: Default::default(),
             content_hash_cache_dirty: false,
             content_hash_cache_dirty_since: None,
             content_hash_cache_serial: 0,
             content_hash_cache_save_in_flight: false,
-            content_hash_cache_save_results_tx: None,
-            content_hash_cache_save_results_rx: None,
+            content_hash_cache_save_results: Default::default(),
             content_apply_in_flight: false,
-            content_apply_results_tx: None,
-            content_apply_results_rx: None,
+            content_apply_results: Default::default(),
             content_lookup_in_flight: HashSet::new(),
             content_lookup_request_serial: 0,
             content_lookup_latest_serial_by_key: HashMap::new(),
             content_lookup_retry_after_by_key: HashMap::new(),
             content_lookup_failure_count_by_key: HashMap::new(),
-            content_lookup_results_tx: None,
-            content_lookup_results_rx: None,
+            content_lookup_results: Default::default(),
             available_game_versions: Vec::new(),
             selected_game_version_index: 0,
             loader_support: LoaderSupportIndex::default(),
             loader_versions: LoaderVersionIndex::default(),
             modloader_versions_cache: BTreeMap::new(),
             modloader_versions_in_flight: HashSet::new(),
-            modloader_versions_results_tx: None,
-            modloader_versions_results_rx: None,
+            modloader_versions_results: Default::default(),
             modloader_versions_status_key: None,
             modloader_versions_status: None,
             incompatible_modloader_version_warning_key: None,
             version_catalog_filter: None,
             version_catalog_error: None,
             version_catalog_in_flight: false,
-            version_catalog_results_tx: None,
-            version_catalog_results_rx: None,
+            version_catalog: Default::default(),
             runtime_prepare_in_flight: false,
-            runtime_prepare_results_tx: None,
-            runtime_prepare_results_rx: None,
-            runtime_progress_tx: None,
-            runtime_progress_rx: None,
+            runtime_prepare_results: Default::default(),
+            runtime_progress: Default::default(),
             runtime_latest_progress: None,
             runtime_last_notification_at: None,
             runtime_prepare_instance_root: None,
@@ -374,22 +334,19 @@ impl InstanceScreenState {
             last_screenshot_scan_at: None,
             screenshot_scan_in_flight: false,
             screenshot_scan_request_serial: 0,
-            screenshot_scan_results_tx: None,
-            screenshot_scan_results_rx: None,
+            screenshot_scan_results: Default::default(),
             screenshot_images: LazyImageBytes::default(),
             screenshot_layout_revision: 0,
             screenshot_masonry_layout_cache: None,
             screenshot_viewer: None,
             pending_delete_screenshot_key: None,
             delete_screenshot_in_flight: false,
-            delete_screenshot_results_tx: None,
-            delete_screenshot_results_rx: None,
+            delete_screenshot_results: Default::default(),
             logs: Vec::new(),
             last_log_scan_at: None,
             log_scan_in_flight: false,
             log_scan_request_serial: 0,
-            log_scan_results_tx: None,
-            log_scan_results_rx: None,
+            log_scan_results: Default::default(),
             selected_log_path: None,
             loaded_log_path: None,
             loaded_log_modified_at_ms: None,
@@ -400,28 +357,26 @@ impl InstanceScreenState {
             log_load_request_serial: 0,
             requested_log_load_path: None,
             requested_log_load_modified_at_ms: None,
-            log_load_results_tx: None,
-            log_load_results_rx: None,
+            log_load_results: Default::default(),
             show_settings_modal: false,
             show_export_vtmpack_modal: false,
             show_export_server_modal: false,
             export_vtmpack_patch_mode: false,
+            export_patch_base_path: None,
+            export_vtmpack_root_entries: Default::default(),
+            export_server_root_entries: Default::default(),
             export_vtmpack_options: VtmpackExportOptions::default(),
             export_vtmpack_in_flight: false,
             export_vtmpack_output_path: None,
-            export_vtmpack_progress_tx: None,
-            export_vtmpack_progress_rx: None,
+            export_vtmpack_progress: Default::default(),
             export_vtmpack_latest_progress: None,
-            export_vtmpack_results_tx: None,
-            export_vtmpack_results_rx: None,
+            export_vtmpack_results: Default::default(),
             export_server_included_root_entries: BTreeMap::new(),
             export_server_in_flight: false,
             export_server_output_path: None,
-            export_server_progress_tx: None,
-            export_server_progress_rx: None,
+            export_server_progress: Default::default(),
             export_server_latest_progress: None,
-            export_server_results_tx: None,
-            export_server_results_rx: None,
+            export_server_results: Default::default(),
             show_move_instance_modal: false,
             show_move_instance_progress_modal: false,
             move_instance_dest_input: String::new(),
@@ -435,10 +390,8 @@ impl InstanceScreenState {
             move_instance_last_layout_log_at: None,
             move_instance_pending_result: None,
             move_instance_progress_visible_until: None,
-            move_instance_progress_tx: None,
-            move_instance_progress_rx: None,
-            move_instance_results_tx: None,
-            move_instance_results_rx: None,
+            move_instance_progress: Default::default(),
+            move_instance_results: Default::default(),
             launch_username: None,
             launch_user_key: None,
         }
@@ -458,14 +411,12 @@ impl InstanceScreenState {
         self.screenshots.clear();
         self.last_screenshot_scan_at = None;
         self.screenshot_scan_in_flight = false;
-        self.screenshot_scan_results_tx = None;
-        self.screenshot_scan_results_rx = None;
+        self.screenshot_scan_results.reset();
         self.screenshot_images.clear(ctx);
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;
-        self.delete_screenshot_results_tx = None;
-        self.delete_screenshot_results_rx = None;
+        self.delete_screenshot_results.reset();
         self.mark_screenshot_layout_dirty();
     }
 
@@ -482,39 +433,32 @@ impl InstanceScreenState {
         self.content_hash_cache_dirty_since = None;
         self.content_hash_cache_serial = 0;
         self.content_hash_cache_save_in_flight = false;
-        self.content_hash_cache_save_results_tx = None;
-        self.content_hash_cache_save_results_rx = None;
+        self.content_hash_cache_save_results.reset();
         self.content_apply_in_flight = false;
-        self.content_apply_results_tx = None;
-        self.content_apply_results_rx = None;
+        self.content_apply_results.reset();
         self.content_lookup_in_flight.clear();
         self.content_lookup_request_serial = 0;
         self.content_lookup_latest_serial_by_key.clear();
         self.content_lookup_retry_after_by_key.clear();
         self.content_lookup_failure_count_by_key.clear();
-        self.content_lookup_results_tx = None;
-        self.content_lookup_results_rx = None;
+        self.content_lookup_results.reset();
         self.available_game_versions.clear();
         self.selected_game_version_index = 0;
         self.loader_support = LoaderSupportIndex::default();
         self.loader_versions = LoaderVersionIndex::default();
         self.modloader_versions_cache.clear();
         self.modloader_versions_in_flight.clear();
-        self.modloader_versions_results_tx = None;
-        self.modloader_versions_results_rx = None;
+        self.modloader_versions_results.reset();
         self.modloader_versions_status_key = None;
         self.modloader_versions_status = None;
         self.incompatible_modloader_version_warning_key = None;
         self.version_catalog_filter = None;
         self.version_catalog_error = None;
         self.version_catalog_in_flight = false;
-        self.version_catalog_results_tx = None;
-        self.version_catalog_results_rx = None;
+        self.version_catalog.reset();
         self.runtime_prepare_in_flight = false;
-        self.runtime_prepare_results_tx = None;
-        self.runtime_prepare_results_rx = None;
-        self.runtime_progress_tx = None;
-        self.runtime_progress_rx = None;
+        self.runtime_prepare_results.reset();
+        self.runtime_progress.reset();
         self.runtime_latest_progress = None;
         self.runtime_last_notification_at = None;
         self.runtime_prepare_instance_root = None;
@@ -524,22 +468,19 @@ impl InstanceScreenState {
         self.last_screenshot_scan_at = None;
         self.screenshot_scan_in_flight = false;
         self.screenshot_scan_request_serial = 0;
-        self.screenshot_scan_results_tx = None;
-        self.screenshot_scan_results_rx = None;
+        self.screenshot_scan_results.reset();
         self.screenshot_images.clear(ctx);
         self.screenshot_layout_revision = 0;
         self.screenshot_masonry_layout_cache = None;
         self.screenshot_viewer = None;
         self.pending_delete_screenshot_key = None;
         self.delete_screenshot_in_flight = false;
-        self.delete_screenshot_results_tx = None;
-        self.delete_screenshot_results_rx = None;
+        self.delete_screenshot_results.reset();
         self.logs.clear();
         self.last_log_scan_at = None;
         self.log_scan_in_flight = false;
         self.log_scan_request_serial = 0;
-        self.log_scan_results_tx = None;
-        self.log_scan_results_rx = None;
+        self.log_scan_results.reset();
         self.selected_log_path = None;
         self.loaded_log_path = None;
         self.loaded_log_modified_at_ms = None;
@@ -550,27 +491,23 @@ impl InstanceScreenState {
         self.log_load_request_serial = 0;
         self.requested_log_load_path = None;
         self.requested_log_load_modified_at_ms = None;
-        self.log_load_results_tx = None;
-        self.log_load_results_rx = None;
+        self.log_load_results.reset();
         self.show_settings_modal = false;
         self.show_export_vtmpack_modal = false;
         self.show_export_server_modal = false;
         self.export_vtmpack_patch_mode = false;
+        self.export_patch_base_path = None;
         self.export_vtmpack_in_flight = false;
         self.export_vtmpack_output_path = None;
-        self.export_vtmpack_progress_tx = None;
-        self.export_vtmpack_progress_rx = None;
+        self.export_vtmpack_progress.reset();
         self.export_vtmpack_latest_progress = None;
-        self.export_vtmpack_results_tx = None;
-        self.export_vtmpack_results_rx = None;
+        self.export_vtmpack_results.reset();
         self.export_server_included_root_entries.clear();
         self.export_server_in_flight = false;
         self.export_server_output_path = None;
-        self.export_server_progress_tx = None;
-        self.export_server_progress_rx = None;
+        self.export_server_progress.reset();
         self.export_server_latest_progress = None;
-        self.export_server_results_tx = None;
-        self.export_server_results_rx = None;
+        self.export_server_results.reset();
         self.show_move_instance_modal = false;
         self.show_move_instance_progress_modal = false;
         self.move_instance_dest_valid = false;
@@ -583,10 +520,8 @@ impl InstanceScreenState {
         self.move_instance_last_layout_log_at = None;
         self.move_instance_pending_result = None;
         self.move_instance_progress_visible_until = None;
-        self.move_instance_progress_tx = None;
-        self.move_instance_progress_rx = None;
-        self.move_instance_results_tx = None;
-        self.move_instance_results_rx = None;
+        self.move_instance_progress.reset();
+        self.move_instance_results.reset();
         self.launch_username = None;
         self.launch_user_key = None;
     }

@@ -14,4 +14,8 @@ pub(crate) struct WorldEntry {
     pub(crate) thumbnail_png: Option<Arc<[u8]>>,
     pub(crate) last_used_at_ms: Option<u64>,
     pub(crate) favorite: bool,
+    /// Identifies the underlying world folder; equal keys mean the same world.
+    pub(crate) group_key: String,
+    /// Every instance holding this world; more than one collapses into a single entry.
+    pub(crate) instances: Vec<EntryInstance>,
 }

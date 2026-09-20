@@ -111,7 +111,9 @@ pub(super) fn import_mrpack(
         installations_root,
         NewInstanceSpec {
             name: request.instance_name.clone(),
-            description: non_empty(manifest.summary.as_deref().unwrap_or_default()),
+            description: instances::normalize_optional(
+                manifest.summary.as_deref().unwrap_or_default(),
+            ),
             thumbnail_path: None,
             modloader: dependency_info.modloader.clone(),
             game_version: dependency_info.game_version.clone(),
@@ -229,7 +231,9 @@ pub(super) fn build_mrpack_base_manifest(
                 curseforge_project_id: None,
                 selected_source: Some(ManagedContentSource::Modrinth),
                 selected_version_id: Some(version.id),
-                selected_version_name: non_empty(version.version_number.as_str()),
+                selected_version_name: instances::normalize_optional(
+                    version.version_number.as_str(),
+                ),
                 selected_file_sha1: None,
                 selected_file_sha512: None,
                 pack_managed: true,
@@ -263,16 +267,17 @@ pub(super) fn build_mrpack_install_state(
     let resolved = resolve_mrpack_modpack_source(package_path);
     ModpackInstallState {
         format: "mrpack".to_owned(),
-        pack_name: non_empty(manifest.name.as_str()).unwrap_or_else(|| "Modpack".to_owned()),
+        pack_name: instances::normalize_optional(manifest.name.as_str())
+            .unwrap_or_else(|| "Modpack".to_owned()),
         version_id: resolved
             .as_ref()
             .map(|resolved| resolved.version_id.clone())
-            .or_else(|| non_empty(manifest.version_id.as_str()))
+            .or_else(|| instances::normalize_optional(manifest.version_id.as_str()))
             .unwrap_or_else(|| "unknown".to_owned()),
         version_name: resolved
             .as_ref()
-            .and_then(|resolved| non_empty(resolved.version_name.as_str()))
-            .or_else(|| non_empty(manifest.version_id.as_str()))
+            .and_then(|resolved| instances::normalize_optional(resolved.version_name.as_str()))
+            .or_else(|| instances::normalize_optional(manifest.version_id.as_str()))
             .unwrap_or_else(|| "unknown".to_owned()),
         modrinth_project_id: resolved
             .as_ref()
@@ -329,11 +334,11 @@ pub(super) fn parse_modrinth_download_source(url: &str) -> Option<ResolvedModrin
         if segment != "data" {
             continue;
         }
-        let project_id = non_empty(segments.next()?)?;
+        let project_id = instances::normalize_optional(segments.next()?)?;
         if segments.next()? != "versions" {
             return None;
         }
-        let version_id = non_empty(segments.next()?)?;
+        let version_id = instances::normalize_optional(segments.next()?)?;
         return Some(ResolvedModrinthDownloadSource {
             project_id,
             version_id,
@@ -1121,17 +1126,8 @@ pub(super) fn download_throttle_store(url: &str) -> &'static Mutex<Instant> {
     }
 }
 
-pub(super) fn non_empty(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
 pub(super) fn default_if_blank(value: &str, fallback: String) -> String {
-    non_empty(value).unwrap_or(fallback)
+    instances::normalize_optional(value).unwrap_or(fallback)
 }
 
 pub(super) fn normalize_minecraft_game_version(value: &str) -> Option<String> {
@@ -1148,6 +1144,14 @@ pub(super) fn normalize_minecraft_game_version(value: &str) -> Option<String> {
     None
 }
 
+/// Accepts the legacy `1.x` scheme and the year-based scheme (`26.x` onward).
+fn is_minecraft_release_major(major: &str) -> bool {
+    major == "1"
+        || (major.len() == 2
+            && major.chars().all(|ch| ch.is_ascii_digit())
+            && major.parse::<u32>().is_ok_and(|year| year >= 26))
+}
+
 pub(super) fn looks_like_minecraft_release_version(value: &str) -> bool {
     let mut segments = value.split('.');
     let Some(major) = segments.next() else {
@@ -1156,7 +1160,10 @@ pub(super) fn looks_like_minecraft_release_version(value: &str) -> bool {
     let Some(minor) = segments.next() else {
         return false;
     };
-    if major != "1" || minor.is_empty() || !minor.chars().all(|ch| ch.is_ascii_digit()) {
+    if !is_minecraft_release_major(major)
+        || minor.is_empty()
+        || !minor.chars().all(|ch| ch.is_ascii_digit())
+    {
         return false;
     }
     match segments.next() {
@@ -1169,8 +1176,9 @@ pub(super) fn looks_like_minecraft_release_version(value: &str) -> bool {
 }
 
 pub(super) fn looks_like_minecraft_pre_release_version(value: &str) -> bool {
-    for marker in ["-pre", "-rc"] {
+    for marker in ["-pre", "-rc", "-snapshot"] {
         if let Some((base, suffix)) = value.split_once(marker) {
+            let suffix = suffix.strip_prefix('-').unwrap_or(suffix);
             return looks_like_minecraft_release_version(base)
                 && !suffix.is_empty()
                 && suffix.chars().all(|ch| ch.is_ascii_digit());
@@ -1291,6 +1299,7 @@ mod tests {
                 primary: true,
                 hashes: std::collections::HashMap::new(),
             }],
+            environment: modrinth::Environment::Unknown,
         };
 
         assert!(
@@ -1327,6 +1336,7 @@ mod tests {
                 primary: true,
                 hashes: std::collections::HashMap::new(),
             }],
+            environment: modrinth::Environment::Unknown,
         };
 
         assert!(
@@ -1351,6 +1361,18 @@ mod tests {
         );
         assert!(normalize_minecraft_game_version("fabric-loader-0.16.10-1.21.1").is_none());
         assert!(normalize_minecraft_game_version("2.4.0").is_none());
+        assert_eq!(
+            normalize_minecraft_game_version("26.3").as_deref(),
+            Some("26.3")
+        );
+        assert_eq!(
+            normalize_minecraft_game_version("26.1.2").as_deref(),
+            Some("26.1.2")
+        );
+        assert_eq!(
+            normalize_minecraft_game_version("26.2-snapshot-3").as_deref(),
+            Some("26.2-snapshot-3")
+        );
     }
 
     #[test]
