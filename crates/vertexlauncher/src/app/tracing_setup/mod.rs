@@ -44,7 +44,7 @@ fn initialize_tracing() -> Option<PathBuf> {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
 
-    let app_layer = AppLogLayer { writer };
+    let app_layer = AppLogLayer::new(writer);
 
     let _ = tracing_subscriber::registry()
         .with(env_filter)

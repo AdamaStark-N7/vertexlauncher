@@ -63,18 +63,21 @@ impl DiscordPresenceManager {
         match desired.clone() {
             Some(next) => {
                 self.last_desired_presence = Some(next.clone());
-                log_presence_update_attempt(&next, should_resync);
-                if let Err(err) = self.set_presence(&next) {
-                    log_presence_update_failure(&next, &err);
-                } else {
+                if self.set_presence(&next).is_ok() {
+                    if self.active_presence.is_none() {
+                        tracing::info!(
+                            target: "vertexlauncher/discord_presence",
+                            "Discord Rich Presence started."
+                        );
+                    }
                     self.active_presence = Some(next);
                 }
             }
             None => {
                 if self.active_presence.is_some() {
-                    tracing::debug!(
+                    tracing::info!(
                         target: "vertexlauncher/discord_presence",
-                        "Clearing Discord Rich Presence because no eligible running instance remains."
+                        "Discord Rich Presence stopped."
                     );
                 }
                 self.clear_presence();
@@ -133,11 +136,6 @@ impl DiscordPresenceManager {
             .retain(|instance_id, _| active_instance_ids.contains(instance_id));
 
         if !config.discord_rich_presence_enabled() {
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                running_instances = active_instance_ids.len(),
-                "Discord Rich Presence is disabled in config."
-            );
             return None;
         }
 
@@ -146,20 +144,7 @@ impl DiscordPresenceManager {
         }
 
         if launcher_presence_blocked_by_mod {
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                running_instances = active_instance_ids.len(),
-                "Skipping launcher-owned Discord Rich Presence because a running instance provides its own Rich Presence mod."
-            );
             return None;
-        }
-
-        if !active_instance_ids.is_empty() {
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                running_instances = active_instance_ids.len(),
-                "No eligible launcher-owned in-game Discord Rich Presence source was found."
-            );
         }
 
         Some(self.menu_presence(menu_context, selected_instance_id, instances))
@@ -176,11 +161,9 @@ impl DiscordPresenceManager {
         match initial_attempt {
             Ok(()) => {
                 self.last_presence_sync_at = Some(Instant::now());
-                log_presence_update_success(desired, false);
                 Ok(())
             }
             Err(initial_err) => {
-                log_presence_reconnect(desired);
                 self.reset_client();
                 self.ensure_client_connected()?
                     .set_activity(activity)
@@ -190,7 +173,6 @@ impl DiscordPresenceManager {
                         )
                     })?;
                 self.last_presence_sync_at = Some(Instant::now());
-                log_presence_update_success(desired, true);
                 Ok(())
             }
         }
@@ -220,17 +202,9 @@ impl DiscordPresenceManager {
 
     fn clear_presence(&mut self) {
         let clear_failed = if let Some(client) = self.client.as_mut() {
-            if let Err(err) = client.clear_activity() {
-                tracing::warn!(
-                    target: "vertexlauncher/discord_presence",
-                    "Failed to clear Discord Rich Presence: {err}"
-                );
+            if client.clear_activity().is_err() {
                 true
             } else {
-                tracing::info!(
-                    target: "vertexlauncher/discord_presence",
-                    "Cleared Discord Rich Presence."
-                );
                 false
             }
         } else {
@@ -247,11 +221,6 @@ impl DiscordPresenceManager {
         if self.client.is_none() {
             prepare_discord_ipc_environment();
             self.client = Some(DiscordIpcClient::new(DISCORD_APPLICATION_ID));
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                application_id = DISCORD_APPLICATION_ID,
-                "Created Discord IPC client."
-            );
         }
 
         if self.connected {
@@ -265,10 +234,6 @@ impl DiscordPresenceManager {
 
         if should_retry {
             self.last_connect_attempt_at = Some(Instant::now());
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                "Attempting Discord IPC connection."
-            );
 
             let connect_result = {
                 let client = self
@@ -281,28 +246,13 @@ impl DiscordPresenceManager {
             connect_result.map_err(|err| {
                 let message = format!("failed to connect to Discord IPC: {err}");
                 self.last_connect_error = Some(message.clone());
-                tracing::warn!(
-                    target: "vertexlauncher/discord_presence",
-                    error = %message,
-                    "Discord IPC connection attempt failed."
-                );
                 message
             })?;
             self.connected = true;
             self.last_connect_error = None;
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                "Connected to Discord IPC."
-            );
         }
 
         if !self.connected {
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                retry_interval_secs = CONNECT_RETRY_INTERVAL.as_secs(),
-                previous_error = self.last_connect_error.as_deref().unwrap_or("unknown"),
-                "Skipping Discord IPC reconnect attempt because the retry interval has not elapsed."
-            );
             return Err(match self.last_connect_error.as_deref() {
                 Some(previous) => format!(
                     "Discord IPC reconnect is rate-limited; waiting before retrying after previous failure: {previous}"
@@ -320,10 +270,6 @@ impl DiscordPresenceManager {
         if let Some(client) = self.client.as_mut() {
             let _ = client.close();
         }
-        tracing::debug!(
-            target: "vertexlauncher/discord_presence",
-            "Resetting Discord IPC client state."
-        );
         self.client = None;
         self.connected = false;
         self.last_connect_attempt_at = None;
@@ -338,34 +284,17 @@ impl DiscordPresenceManager {
 
 #[cfg(target_os = "linux")]
 fn prepare_discord_ipc_environment() {
-    let runtime_dir = env::var("XDG_RUNTIME_DIR").ok();
     let candidate_dirs = discord_ipc_candidate_dirs();
-    let candidate_dir_display = candidate_dirs
-        .iter()
-        .map(|dir| dir.display().to_string())
-        .collect::<Vec<_>>();
 
     let Some(socket_dir) = find_discord_ipc_socket_dir(&candidate_dirs) else {
-        tracing::info!(
-            target: "vertexlauncher/discord_presence",
-            xdg_runtime_dir = runtime_dir.as_deref().unwrap_or(""),
-            candidate_dirs = ?candidate_dir_display,
-            "No visible Discord IPC socket was found in any candidate directory."
-        );
         return;
     };
 
-    let socket_dir_display = socket_dir.display().to_string();
     // SAFETY: This is called on the UI thread before each Discord IPC client creation.
     // We only update process env vars used by the `discord-rich-presence` crate's socket lookup.
     unsafe {
         env::set_var("TMPDIR", &socket_dir);
     }
-    tracing::info!(
-        target: "vertexlauncher/discord_presence",
-        socket_dir = %socket_dir_display,
-        "Prepared Discord IPC environment override."
-    );
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -490,117 +419,6 @@ fn menu_status(
         MenuPresenceContext::Screen(AppScreen::Console) => {
             ("Checking logs".to_owned(), "In the console")
         }
-    }
-}
-
-fn log_presence_update_attempt(desired: &DesiredPresence, should_resync: bool) {
-    match desired {
-        DesiredPresence::InGame {
-            instance_id,
-            instance_name,
-            started_at_unix_secs,
-        } => {
-            let details = format!("Playing {instance_name}");
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                instance_id = %instance_id,
-                instance_name = %instance_name,
-                started_at_unix_secs,
-                should_resync,
-                details = %details,
-                state = "Launched via Vertex",
-                "Updating in-game Discord Rich Presence."
-            )
-        }
-        DesiredPresence::Menu {
-            context,
-            selected_instance_name,
-        } => {
-            let (details, state) = menu_status(*context, selected_instance_name.as_deref());
-            tracing::info!(
-                target: "vertexlauncher/discord_presence",
-                context = ?context,
-                selected_instance_name = selected_instance_name.as_deref().unwrap_or(""),
-                should_resync,
-                details = %details,
-                state,
-                "Updating menu Discord Rich Presence."
-            )
-        }
-    }
-}
-
-fn log_presence_update_failure(desired: &DesiredPresence, err: &str) {
-    match desired {
-        DesiredPresence::InGame {
-            instance_id,
-            instance_name,
-            ..
-        } => tracing::warn!(
-            target: "vertexlauncher/discord_presence",
-            instance_id = %instance_id,
-            instance_name = %instance_name,
-            "Discord Rich Presence update failed: {err}"
-        ),
-        DesiredPresence::Menu {
-            context,
-            selected_instance_name,
-        } => tracing::warn!(
-            target: "vertexlauncher/discord_presence",
-            context = ?context,
-            selected_instance_name = selected_instance_name.as_deref().unwrap_or(""),
-            "Discord Rich Presence update failed: {err}"
-        ),
-    }
-}
-
-fn log_presence_update_success(desired: &DesiredPresence, after_reconnect: bool) {
-    match desired {
-        DesiredPresence::InGame {
-            instance_id,
-            instance_name,
-            ..
-        } => tracing::info!(
-            target: "vertexlauncher/discord_presence",
-            instance_id = %instance_id,
-            instance_name = %instance_name,
-            after_reconnect,
-            "Discord Rich Presence updated."
-        ),
-        DesiredPresence::Menu {
-            context,
-            selected_instance_name,
-        } => tracing::info!(
-            target: "vertexlauncher/discord_presence",
-            context = ?context,
-            selected_instance_name = selected_instance_name.as_deref().unwrap_or(""),
-            after_reconnect,
-            "Discord Rich Presence updated."
-        ),
-    }
-}
-
-fn log_presence_reconnect(desired: &DesiredPresence) {
-    match desired {
-        DesiredPresence::InGame {
-            instance_id,
-            instance_name,
-            ..
-        } => tracing::info!(
-            target: "vertexlauncher/discord_presence",
-            instance_id = %instance_id,
-            instance_name = %instance_name,
-            "Discord IPC session became stale; reconnecting and retrying in-game activity update."
-        ),
-        DesiredPresence::Menu {
-            context,
-            selected_instance_name,
-        } => tracing::info!(
-            target: "vertexlauncher/discord_presence",
-            context = ?context,
-            selected_instance_name = selected_instance_name.as_deref().unwrap_or(""),
-            "Discord IPC session became stale; reconnecting and retrying menu activity update."
-        ),
     }
 }
 

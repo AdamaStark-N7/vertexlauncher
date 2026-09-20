@@ -904,6 +904,8 @@ pub(super) fn render_modal(
             ),
         )
         .with_layer(modal::ModalLayer::Base)
+        // The body has its own vertical scroll; an outer one would fight it for the wheel.
+        .with_content_scroll(false)
         .with_dismiss_behavior(modal::DismissBehavior::EscapeAndScrim),
         |ui| {
             let _ = text_ui.label(

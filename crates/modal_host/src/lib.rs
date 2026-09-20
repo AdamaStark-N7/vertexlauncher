@@ -132,6 +132,8 @@ pub struct ModalOptions {
     pub layout: ModalLayout,
     pub blocks_lower_layers: bool,
     pub draw_scrim: bool,
+    /// Wrap the contents in a scroll area. Turn off for modals that manage their own scrolling.
+    pub content_scroll: bool,
 }
 
 impl ModalOptions {
@@ -143,6 +145,7 @@ impl ModalOptions {
             layout,
             blocks_lower_layers: true,
             draw_scrim: true,
+            content_scroll: true,
         }
     }
 
@@ -158,6 +161,11 @@ impl ModalOptions {
 
     pub fn with_scrim(mut self, draw_scrim: bool) -> Self {
         self.draw_scrim = draw_scrim;
+        self
+    }
+
+    pub fn with_content_scroll(mut self, content_scroll: bool) -> Self {
+        self.content_scroll = content_scroll;
         self
     }
 }
@@ -308,6 +316,7 @@ pub fn show_window<R>(
         options.id,
         order,
         modal_rect,
+        options.content_scroll,
         add_contents,
     ));
 
@@ -349,6 +358,7 @@ pub fn show_area<R>(
         options.id,
         order,
         modal_rect,
+        options.content_scroll,
         add_contents,
     ));
 
@@ -371,6 +381,7 @@ fn show_modal_contents<R>(
     id: Id,
     order: Order,
     modal_rect: Rect,
+    content_scroll: bool,
     add_contents: impl FnOnce(&mut egui::Ui) -> R,
 ) -> R {
     let mut inner = None;
@@ -390,6 +401,12 @@ fn show_modal_contents<R>(
             );
             // A little slack beyond the content area so focus outlines aren't cut off.
             content_ui.set_clip_rect(outer.shrink(4.0).intersect(ui.clip_rect()));
+            if !content_scroll {
+                content_ui.set_min_size(content_rect.size());
+                content_ui.set_max_size(content_rect.size());
+                inner = Some(add_contents(&mut content_ui));
+                return;
+            }
             let bar_width = content_ui.spacing().scroll.allocated_width();
             egui::ScrollArea::both()
                 .id_salt((id, "modal_content_scroll"))
