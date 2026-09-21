@@ -2,6 +2,7 @@ use super::content_lookup_result::ContentLookupResultEntry;
 use super::*;
 use content_resolver::detect_installed_content_kind;
 use std::collections::{BTreeMap, HashSet};
+use textui_egui::interaction;
 use textui_egui::truncate_single_line_text_with_ellipsis;
 use ui_foundation::tab_button;
 
@@ -1144,21 +1145,32 @@ fn render_installed_content_action_button(
     let icon_size = (height - 10.0).max(12.0);
     let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
     let visuals = ui.visuals();
-    let button_fill = if response.is_pointer_button_down_on() {
-        visuals.widgets.active.bg_fill
-    } else if response.hovered() {
-        visuals.widgets.hovered.bg_fill
-    } else {
-        visuals.extreme_bg_color
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let button_fill = interaction::FillPalette::new(
+        visuals.extreme_bg_color,
+        visuals.widgets.hovered.bg_fill,
+        visuals.widgets.active.bg_fill,
+        visuals.selection.bg_fill,
+        visuals.text_color(),
+    )
+    .fill(state, false);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(8), button_fill);
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        visuals.widgets.inactive.bg_stroke,
+        interaction::focus_stroke(
+            state,
+            visuals,
+            interaction::hover_stroke(
+                state,
+                visuals.widgets.inactive.bg_stroke,
+                visuals.widgets.hovered.bg_stroke,
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
+    interaction::paint_focus_ring(ui.painter(), visuals, state, rect, 8);
 
     let image = egui::Image::from_bytes(uri, themed_svg.to_vec())
         .fit_to_exact_size(egui::vec2(icon_size, icon_size));
@@ -1202,18 +1214,21 @@ fn render_mod_enable_toggle(ui: &mut Ui, id: &str, enabled: bool, width: f32, he
     let track_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(width - 6.0, track_h));
     let cr = egui::CornerRadius::same((track_h * 0.5) as u8);
     let visuals = ui.visuals();
+    let hover = interaction::InteractionState::of(ui.ctx(), &response, true);
 
-    // Track fill and stroke — interpolated in OKLab.
+    // Track fill and stroke — interpolated in OKLab, then lifted toward the text color on hover.
     let fill = lerp_color32_oklab(
         visuals.widgets.inactive.bg_fill,
         visuals.selection.bg_fill,
         pos,
-    );
+    )
+    .lerp_to_gamma(visuals.text_color(), 0.14 * hover.hover);
     let stroke_color = lerp_color32_oklab(
         visuals.widgets.inactive.bg_stroke.color,
         visuals.selection.stroke.color,
         pos,
-    );
+    )
+    .lerp_to_gamma(visuals.widgets.hovered.bg_stroke.color, hover.hover);
     let stroke_w = visuals.widgets.inactive.bg_stroke.width
         + (visuals.selection.stroke.width - visuals.widgets.inactive.bg_stroke.width) * pos;
 
@@ -1242,7 +1257,6 @@ fn render_mod_enable_toggle(ui: &mut Ui, id: &str, enabled: bool, width: f32, he
     );
 
     let tooltip = if enabled { "Disable mod" } else { "Enable mod" };
-    let response = response.on_hover_cursor(egui::CursorIcon::PointingHand);
     crate::ui::style::hover_tip(ui, response, tooltip).clicked()
 }
 
@@ -1272,25 +1286,32 @@ fn render_bulk_update_button(
         };
         let button_size = egui::vec2(ui.available_width().max(220.0), 34.0);
         let (rect, response) = ui.allocate_exact_size(button_size, sense);
-        let button_fill = if enabled {
-            if response.is_pointer_button_down_on() {
-                fill.gamma_multiply(0.9)
-            } else if response.hovered() {
-                fill.gamma_multiply(1.08)
-            } else {
-                fill
-            }
-        } else {
-            fill
-        };
+        let state = interaction::InteractionState::of(ui.ctx(), &response, enabled);
+        let button_fill = interaction::FillPalette::new(
+            fill,
+            fill.lerp_to_gamma(ui.visuals().text_color(), 0.14),
+            fill.gamma_multiply(0.9),
+            fill,
+            ui.visuals().text_color(),
+        )
+        .fill(state, false);
         ui.painter()
             .rect_filled(rect, egui::CornerRadius::same(8), button_fill);
         ui.painter().rect_stroke(
             rect,
             egui::CornerRadius::same(8),
-            ui.visuals().widgets.noninteractive.bg_stroke,
+            interaction::focus_stroke(
+                state,
+                ui.visuals(),
+                interaction::hover_stroke(
+                    state,
+                    ui.visuals().widgets.noninteractive.bg_stroke,
+                    ui.visuals().widgets.hovered.bg_stroke,
+                ),
+            ),
             egui::StrokeKind::Inside,
         );
+        interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
 
         let icon_size = 16.0;
         let icon_uri = format!(
@@ -1415,7 +1436,7 @@ fn render_installed_content_update_badge(
                         corner_radius: 6,
                         text_color,
                         fill,
-                        fill_hovered: fill.gamma_multiply(1.08),
+                        fill_hovered: style::hover_fill(ui, fill),
                         fill_active: fill.gamma_multiply(0.92),
                         fill_selected: fill,
                         stroke: egui::Stroke::new(1.0, stroke_color),

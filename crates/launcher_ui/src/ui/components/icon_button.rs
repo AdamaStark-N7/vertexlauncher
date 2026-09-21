@@ -1,6 +1,8 @@
 use egui::{Button, Color32, ColorImage, Image, Response, Stroke, TextureHandle, Ui, vec2};
 use image::{RgbaImage, imageops::FilterType};
 
+use textui_egui::interaction;
+
 use crate::ui::{motion, svg_aa};
 
 pub fn svg(
@@ -52,14 +54,21 @@ pub fn svg(
             1.0,
             ui.visuals().widgets.inactive.bg_stroke.color,
         ))
-        .fill(if selected {
-            ui.visuals().selection.bg_fill
-        } else {
-            ui.visuals().widgets.inactive.weak_bg_fill
-        });
+        .fill(interaction::FillPalette::from_visuals(ui.visuals()).fill(
+            interaction::InteractionState {
+                hover: hover_progress,
+                pressed: false,
+                focused: false,
+                enabled: true,
+            },
+            selected,
+        ));
 
     let response = ui.add_sized([button_size, button_size], button);
     let emphasis = response.hovered() || response.has_focus();
+    if response.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
     let progress = motion::progress(ui.ctx(), response.id.with("hover_anim"), emphasis);
     ui.ctx()
         .data_mut(|d| d.insert_temp(hover_progress_id, progress));

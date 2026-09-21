@@ -15,7 +15,7 @@ pub(super) fn render_model_selector_section(
     let half_width = ((ui.available_width() - model_button_gap) * 0.5).max(1.0);
     model_button_style.min_size = egui::vec2(half_width, style::CONTROL_HEIGHT);
     model_button_style.fill = ui.visuals().widgets.inactive.weak_bg_fill;
-    model_button_style.fill_hovered = ui.visuals().widgets.hovered.bg_fill.gamma_multiply(1.05);
+    model_button_style.fill_hovered = style::hover_fill(ui, ui.visuals().widgets.inactive.bg_fill);
     model_button_style.fill_active = ui.visuals().selection.bg_fill.gamma_multiply(0.92);
     model_button_style.fill_selected = ui.visuals().selection.bg_fill.gamma_multiply(0.78);
     model_button_style.stroke = ui.visuals().widgets.hovered.bg_stroke;

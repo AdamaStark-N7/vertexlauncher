@@ -4,8 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
+use config::NotificationEasing;
 use egui::{self, Color32, CornerRadius, Frame, Layout, Margin, Stroke};
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 
 use crate::{assets, privacy};
@@ -14,6 +16,14 @@ const NOTIFICATION_TTL: Duration = Duration::from_secs(7);
 const PROGRESS_NOTIFICATION_STALE_TTL: Duration = Duration::from_secs(14);
 const NOTIFICATION_MAX_STACK: usize = 8;
 const NOTIFICATION_EXPIRY_BAR_HEIGHT: f32 = 4.0;
+
+/// User-configurable presentation settings for notification popups.
+#[derive(Debug, Clone, Copy)]
+pub struct NotificationDisplaySettings {
+    pub expiry_bars_empty_left: bool,
+    pub fade_out: Duration,
+    pub easing: NotificationEasing,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Severity {
@@ -255,7 +265,7 @@ pub fn emit_replace(
     }
 }
 
-fn drain_notifications() {
+fn drain_notifications(fade_out: Duration) {
     let center = center();
     let Ok(rx) = center.rx.lock() else {
         tracing::error!(
@@ -316,12 +326,7 @@ fn drain_notifications() {
 
     let now = Instant::now();
     store.entries.retain(|entry| {
-        let ttl = if entry.progress.is_some() || entry.spinner {
-            PROGRESS_NOTIFICATION_STALE_TTL
-        } else {
-            NOTIFICATION_TTL
-        };
-        now.saturating_duration_since(entry.last_seen) < ttl
+        now.saturating_duration_since(entry.last_seen) < entry_ttl(entry) + fade_out
     });
     store.entries.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
     if store.entries.len() > NOTIFICATION_MAX_STACK {
@@ -329,13 +334,36 @@ fn drain_notifications() {
     }
 }
 
+fn entry_ttl(entry: &NotificationEntry) -> Duration {
+    if entry.progress.is_some() || entry.spinner {
+        PROGRESS_NOTIFICATION_STALE_TTL
+    } else {
+        NOTIFICATION_TTL
+    }
+}
+
+fn entry_fade_opacity(
+    entry: &NotificationEntry,
+    now: Instant,
+    settings: &NotificationDisplaySettings,
+) -> f32 {
+    let past_ttl = now
+        .saturating_duration_since(entry.last_seen)
+        .saturating_sub(entry_ttl(entry));
+    if past_ttl.is_zero() {
+        return 1.0;
+    }
+    let fade_progress = past_ttl.as_secs_f32() / settings.fade_out.as_secs_f32().max(f32::EPSILON);
+    1.0 - settings.easing.apply(fade_progress)
+}
+
 pub fn render_popups(
     ctx: &egui::Context,
     text_ui: &mut TextUi,
-    expiry_bars_empty_left: bool,
+    settings: &NotificationDisplaySettings,
     suppressed_progress_source: Option<&str>,
 ) {
-    drain_notifications();
+    drain_notifications(settings.fade_out);
 
     let entries = {
         let Ok(store) = center().store.lock() else {
@@ -384,6 +412,8 @@ pub fn render_popups(
                     .corner_radius(CornerRadius::same(10))
                     .inner_margin(Margin::same(10));
 
+                let previous_opacity = ui.opacity();
+                ui.set_opacity(previous_opacity * entry_fade_opacity(entry, now, settings));
                 frame.show(ui, |ui| {
                     if entry.progress.is_none() && !entry.spinner {
                         let elapsed = now.saturating_duration_since(entry.last_seen);
@@ -404,7 +434,7 @@ pub fn render_popups(
                         );
                         if expiry_progress > 0.0 {
                             let fill_width = bar_rect.width() * expiry_progress;
-                            let filled_rect = if expiry_bars_empty_left {
+                            let filled_rect = if settings.expiry_bars_empty_left {
                                 egui::Rect::from_min_max(
                                     egui::pos2(bar_rect.max.x - fill_width, bar_rect.min.y),
                                     bar_rect.max,
@@ -523,6 +553,7 @@ pub fn render_popups(
                         );
                     }
                 });
+                ui.set_opacity(previous_opacity);
             }
 
             if !dismissed_ids.is_empty()
@@ -554,20 +585,21 @@ fn notification_icon_button(
     let button_size = egui::vec2(22.0, 22.0);
     let icon_size = 12.0;
     let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-    let fill = if response.is_pointer_button_down_on() {
-        ui.visuals().widgets.active.bg_fill
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        ui.visuals().widgets.inactive.weak_bg_fill
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let fill = interaction::FillPalette::from_visuals(ui.visuals()).fill(state, false);
+    let stroke = interaction::hover_stroke(
+        state,
+        ui.visuals().widgets.noninteractive.bg_stroke,
+        ui.visuals().widgets.hovered.bg_stroke,
+    );
     ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
     ui.painter().rect_stroke(
         rect,
         CornerRadius::same(7),
-        ui.visuals().widgets.noninteractive.bg_stroke,
+        stroke,
         egui::StrokeKind::Inside,
     );
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 7);
 
     let image = crate::ui::svg_tint::themed_svg_image(
         "notification",

@@ -10,7 +10,7 @@ pub(super) fn render_save_section(ui: &mut Ui, text_ui: &mut TextUi, state: &mut
     let save_width = ui.available_width().min(viewport_width).max(1.0);
     save_style.min_size = egui::vec2(save_width, style::CONTROL_HEIGHT_LG);
     save_style.fill = ui.visuals().selection.bg_fill;
-    save_style.fill_hovered = ui.visuals().selection.bg_fill.gamma_multiply(1.15);
+    save_style.fill_hovered = style::hover_fill(ui, ui.visuals().selection.bg_fill);
     save_style.fill_active = ui.visuals().selection.bg_fill.gamma_multiply(0.92);
     save_style.text_color = ui.visuals().strong_text_color();
 

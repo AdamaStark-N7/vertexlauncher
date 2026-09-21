@@ -8,6 +8,7 @@ use egui::{
 use image::{ColorType, ImageEncoder, codecs::png::PngEncoder};
 use shared_lru::ThreadSafeLru;
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 use ui_foundation::{is_compact_width, popup_width};
 
@@ -186,6 +187,10 @@ pub fn render(
                         }
                     }
                     let popup_was_open = egui::Popup::is_id_open(ui.ctx(), profile_popup_id);
+                    if !popup_was_open {
+                        let _ =
+                            style::hover_tip(ui, profile_response.clone(), "Accounts and sign-in");
+                    }
 
                     let _ = egui::Popup::menu(&profile_response)
                         .id(profile_popup_id)
@@ -388,50 +393,51 @@ fn render_profile_button(
 
         let (rect, response) =
             ui.allocate_exact_size(egui::vec2(button_size, button_size), egui::Sense::click());
-        let has_focus = response.has_focus();
+        let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+        let radius = egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS);
         let fill = if profile_ui.auth_busy {
             ui.visuals().widgets.active.weak_bg_fill
-        } else if response.is_pointer_button_down_on() {
-            ui.visuals().widgets.active.weak_bg_fill
-        } else if response.hovered() || has_focus {
-            ui.visuals().widgets.hovered.weak_bg_fill
         } else {
-            ui.visuals().widgets.inactive.weak_bg_fill
+            interaction::FillPalette::from_visuals(ui.visuals()).fill(state, false)
         };
-        ui.painter().rect_filled(
-            rect,
-            egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS),
-            fill,
-        );
-        ui.painter().rect_stroke(
-            rect,
-            egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS),
-            if has_focus {
-                ui.visuals().selection.stroke
-            } else {
-                egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color)
-            },
-            egui::StrokeKind::Inside,
-        );
-        if has_focus {
-            ui.painter().rect_stroke(
-                rect.expand(2.0),
-                egui::CornerRadius::same(PROFILE_BUTTON_CORNER_RADIUS.saturating_add(2)),
-                egui::Stroke::new(
-                    (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                    ui.visuals().selection.stroke.color,
-                ),
-                egui::StrokeKind::Outside,
-            );
-        }
+        ui.painter().rect_filled(rect, radius, fill);
         if let image_textures::ManagedTextureStatus::Ready(texture) =
             image_textures::request_texture(ui.ctx(), key, rounded, egui::TextureOptions::LINEAR)
         {
-            let icon = texture
+            // Clip the avatar to the button's own rounded shape at its drawn size.
+            texture
                 .image()
-                .fit_to_exact_size(egui::vec2(button_size.max(1.0), button_size.max(1.0)));
-            let _ = ui.put(rect, icon);
+                .fit_to_exact_size(rect.size())
+                .corner_radius(radius)
+                .paint_at(ui, rect);
         }
+        // The avatar covers the whole button, so hover feedback is painted on top of it.
+        ui.painter().rect_filled(
+            rect,
+            radius,
+            egui::Color32::from_white_alpha((36.0 * state.hover) as u8),
+        );
+        ui.painter().rect_stroke(
+            rect,
+            radius,
+            interaction::focus_stroke(
+                state,
+                ui.visuals(),
+                interaction::hover_stroke(
+                    state,
+                    egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+                    ui.visuals().widgets.hovered.bg_stroke,
+                ),
+            ),
+            egui::StrokeKind::Inside,
+        );
+        interaction::paint_focus_ring(
+            ui.painter(),
+            ui.visuals(),
+            state,
+            rect,
+            PROFILE_BUTTON_CORNER_RADIUS,
+        );
         response
     } else if profile_ui.display_name.is_none() && profile_ui.auth_busy {
         render_profile_pending_button(ui, button_size)
@@ -576,25 +582,42 @@ fn render_active_user_terminal_button(
         text_color.b()
     );
     let icon_size = (button_height - 14.0).clamp(12.0, 18.0);
+    // The label follows the user's font settings, so size the button to it instead of assuming
+    // a fixed width: the button grows to fit the label (the short one when compact).
+    let label_style = LabelOptions {
+        color: text_color,
+        wrap: false,
+        ..style::stat_label(ui)
+    };
+    let chrome_width = 8.0 * 2.0 + icon_size + 6.0;
+    let full_label = "player active";
+    let short_label = "active";
+    let label = if compact { short_label } else { full_label };
+    let label_width = text_ui.measure_text_size(ui, label, &label_style).x;
+    let button_width = button_width.max((chrome_width + label_width).ceil());
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(button_width, button_height),
         egui::Sense::click(),
     );
-    let fill = if response.is_pointer_button_down_on() {
-        ui.visuals().widgets.active.weak_bg_fill
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.weak_bg_fill
-    } else {
-        ui.visuals().widgets.inactive.weak_bg_fill
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let fill = interaction::FillPalette::from_visuals(ui.visuals()).fill(state, false);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(8), fill);
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+        interaction::focus_stroke(
+            state,
+            ui.visuals(),
+            interaction::hover_stroke(
+                state,
+                egui::Stroke::new(1.0, ui.visuals().widgets.inactive.bg_stroke.color),
+                ui.visuals().widgets.hovered.bg_stroke,
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
 
     let inner_rect = rect.shrink2(egui::vec2(8.0, 4.0));
     ui.scope_builder(egui::UiBuilder::new().max_rect(inner_rect), |ui| {
@@ -611,22 +634,13 @@ fn render_active_user_terminal_button(
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.set_clip_rect(ui.max_rect());
-                    let label_style = LabelOptions {
-                        color: text_color,
-                        ..style::stat_label(ui)
-                    };
-                    let _ = text_ui.label(
-                        ui,
-                        "topbar_player_active_label",
-                        if compact { "active" } else { "player active" },
-                        &label_style,
-                    );
+                    let _ = text_ui.label(ui, "topbar_player_active_label", label, &label_style);
                 },
             );
         });
     });
 
-    response
+    style::hover_tip(ui, response, "Open the console of the game you are playing")
 }
 
 fn render_device_code_section(
@@ -708,20 +722,25 @@ fn render_device_code_section(
                         egui::vec2(copy_btn_size, code_row_height),
                         egui::Sense::click(),
                     );
-                    let base_fill = ui.visuals().widgets.noninteractive.bg_fill;
-                    let btn_fill = if btn_response.is_pointer_button_down_on() {
-                        ui.visuals().widgets.active.bg_fill
-                    } else if btn_response.hovered() {
-                        ui.visuals().widgets.hovered.bg_fill
-                    } else {
-                        base_fill
-                    };
-                    let stroke_color = ui.visuals().widgets.noninteractive.bg_stroke.color;
+                    let state = interaction::InteractionState::of(ui.ctx(), &btn_response, true);
+                    let btn_fill = interaction::FillPalette::new(
+                        ui.visuals().widgets.noninteractive.bg_fill,
+                        ui.visuals().widgets.hovered.bg_fill,
+                        ui.visuals().widgets.active.bg_fill,
+                        ui.visuals().selection.bg_fill,
+                        ui.visuals().text_color(),
+                    )
+                    .fill(state, false);
+                    let stroke = interaction::hover_stroke(
+                        state,
+                        egui::Stroke::new(1.0, ui.visuals().widgets.noninteractive.bg_stroke.color),
+                        ui.visuals().widgets.hovered.bg_stroke,
+                    );
                     ui.painter().rect(
                         btn_rect,
                         btn_radius,
                         btn_fill,
-                        egui::Stroke::new(1.0, stroke_color),
+                        stroke,
                         egui::StrokeKind::Inside,
                     );
                     // Paint icon centered in the button rect — paint_at bypasses the cursor
@@ -730,7 +749,7 @@ fn render_device_code_section(
                         egui::vec2(icon_size, icon_size),
                     );
                     egui::Image::from_bytes(uri, themed_svg).paint_at(ui, icon_rect);
-                    if btn_response.clicked() {
+                    if style::hover_tip(ui, btn_response, "Copy code").clicked() {
                         ui.ctx().copy_text(prompt.user_code.clone());
                     }
 
@@ -1291,7 +1310,7 @@ fn render_profile_popup(
     primary_button_style.min_size = egui::vec2(full_action_width, style::CONTROL_HEIGHT);
     primary_button_style.text_color = ui.visuals().text_color();
     primary_button_style.fill = ui.visuals().widgets.hovered.bg_fill;
-    primary_button_style.fill_hovered = ui.visuals().widgets.open.bg_fill;
+    primary_button_style.fill_hovered = style::hover_fill(ui, primary_button_style.fill);
     primary_button_style.fill_active = ui.visuals().widgets.active.bg_fill;
     primary_button_style.fill_selected = ui.visuals().widgets.open.bg_fill;
     primary_button_style.stroke = egui::Stroke::new(1.8, ui.visuals().widgets.open.bg_stroke.color);

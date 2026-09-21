@@ -1,4 +1,5 @@
 use super::*;
+use textui_egui::interaction;
 
 use crate::launch_settings::InstanceLaunchSettings;
 pub(super) use instances::normalize_optional;
@@ -157,7 +158,7 @@ pub(super) fn render_runtime_row(
         min_size: egui::vec2(120.0, 34.0),
         text_color: ui.visuals().widgets.active.fg_stroke.color,
         fill: ui.visuals().selection.bg_fill,
-        fill_hovered: ui.visuals().selection.bg_fill.gamma_multiply(1.1),
+        fill_hovered: style::hover_fill(ui, ui.visuals().selection.bg_fill),
         fill_active: ui.visuals().selection.bg_fill.gamma_multiply(0.9),
         fill_selected: ui.visuals().selection.bg_fill,
         stroke: ui.visuals().selection.stroke,
@@ -435,13 +436,17 @@ pub(super) fn render_modloader_selector(
                 button_style.fill_selected = ui.visuals().widgets.noninteractive.bg_fill;
             }
 
-            let response = text_ui.selectable_button(
-                ui,
-                ("instance_modloader_option", id, index),
-                option,
-                state.selected_modloader == index,
-                &button_style,
-            );
+            let response = ui
+                .add_enabled_ui(available, |ui| {
+                    text_ui.selectable_button(
+                        ui,
+                        ("instance_modloader_option", id, index),
+                        option,
+                        state.selected_modloader == index,
+                        &button_style,
+                    )
+                })
+                .inner;
             if let Some(reason) = unavailable_reason.as_deref() {
                 let tooltip_options = TooltipOptions::default();
                 text_ui.tooltip_for_response(
@@ -476,14 +481,25 @@ pub(super) fn render_stop_runtime_button(
         error_color.b(),
         36,
     );
-    let fill = if response.is_pointer_button_down_on() {
-        fill_base.gamma_multiply(0.85)
-    } else if response.hovered() {
-        fill_base.gamma_multiply(1.25)
-    } else {
-        fill_base
-    };
-    let stroke = egui::Stroke::new(style.stroke.width.max(1.0), error_color);
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let fill = interaction::FillPalette::new(
+        fill_base,
+        fill_base.gamma_multiply(1.25),
+        fill_base.gamma_multiply(0.85),
+        fill_base,
+        egui::Color32::WHITE,
+    )
+    .fill(state, false);
+    let idle_stroke = egui::Stroke::new(style.stroke.width.max(1.0), error_color);
+    let stroke = interaction::focus_stroke(
+        state,
+        ui.visuals(),
+        interaction::hover_stroke(
+            state,
+            idle_stroke,
+            interaction::emphasized_stroke(idle_stroke, egui::Color32::WHITE),
+        ),
+    );
 
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(style.corner_radius), fill);
@@ -493,6 +509,7 @@ pub(super) fn render_stop_runtime_button(
         stroke,
         egui::StrokeKind::Inside,
     );
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, style.corner_radius);
 
     let inner_rect = rect.shrink2(style.padding);
     let avatar_size = (inner_rect.height() - 2.0).clamp(12.0, 20.0);

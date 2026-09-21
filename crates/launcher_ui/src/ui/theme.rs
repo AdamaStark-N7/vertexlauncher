@@ -125,6 +125,9 @@ impl ThemeCatalog {
     }
 }
 
+/// How much of the text color is mixed into a widget's idle fill to get its hovered fill.
+const HOVER_FILL_TEXT_MIX: f32 = 0.14;
+
 impl Default for Theme {
     fn default() -> Self {
         Self::matrix_oled()
@@ -165,8 +168,10 @@ impl Theme {
         visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text);
         visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border_muted);
 
-        visuals.widgets.hovered.bg_fill = bg_light;
-        visuals.widgets.hovered.weak_bg_fill = bg_light;
+        // Hover must be visibly different from idle (see `textui_egui::interaction`).
+        let bg_hovered = bg_light.lerp_to_gamma(text, HOVER_FILL_TEXT_MIX);
+        visuals.widgets.hovered.bg_fill = bg_hovered;
+        visuals.widgets.hovered.weak_bg_fill = bg_hovered;
         visuals.widgets.hovered.fg_stroke = Stroke::new(1.0, text);
         visuals.widgets.hovered.bg_stroke = Stroke::new(1.0, border);
 
@@ -175,8 +180,8 @@ impl Theme {
         visuals.widgets.active.fg_stroke = Stroke::new(1.0, text);
         visuals.widgets.active.bg_stroke = Stroke::new(1.0, border);
 
-        visuals.widgets.open.bg_fill = bg_light;
-        visuals.widgets.open.weak_bg_fill = bg_light;
+        visuals.widgets.open.bg_fill = bg_hovered;
+        visuals.widgets.open.weak_bg_fill = bg_hovered;
         visuals.widgets.open.fg_stroke = Stroke::new(1.0, text);
         visuals.widgets.open.bg_stroke = Stroke::new(1.0, border);
 

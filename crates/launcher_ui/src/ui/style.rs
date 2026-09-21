@@ -183,6 +183,12 @@ pub fn muted_single_line(ui: &Ui) -> LabelOptions {
     style
 }
 
+/// The hovered version of a button fill: `base` lifted toward the text color. Use this for
+/// every custom button fill (primary, danger, chips) so hover is equally visible everywhere.
+pub fn hover_fill(ui: &Ui, base: Color32) -> Color32 {
+    base.lerp_to_gamma(ui.visuals().text_color(), 0.14)
+}
+
 pub fn neutral_button(ui: &Ui) -> ButtonOptions {
     ButtonOptions {
         text_color: ui.visuals().text_color(),

@@ -1,4 +1,5 @@
 use super::*;
+use textui_egui::interaction;
 
 #[path = "content_browser_ui/content_browser_ui_metrics.rs"]
 mod content_browser_ui_metrics;
@@ -688,6 +689,15 @@ fn render_result_tile(
         ui.make_persistent_id((id_source, "open_detail")),
         egui::Sense::click(),
     );
+    let tile_state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    interaction::paint_card_highlight(
+        ui.painter(),
+        ui.visuals(),
+        tile_state,
+        frame.response.rect,
+        10,
+        true,
+    );
     let ResultTileInnerOutcome {
         open_clicked: button_open_clicked,
         download_clicked: button_download_clicked,
@@ -782,6 +792,16 @@ fn render_search_tag_chips(
                         .frame(false)
                         .min_size(egui::vec2(22.0, 22.0));
                         let icon_response = ui.add(icon_button);
+                        let icon_state =
+                            interaction::InteractionState::of(ui.ctx(), &icon_response, true);
+                        interaction::paint_card_highlight(
+                            ui.painter(),
+                            ui.visuals(),
+                            icon_state,
+                            icon_response.rect,
+                            6,
+                            true,
+                        );
                         if crate::ui::style::hover_tip(
                             ui,
                             icon_response,
@@ -1369,14 +1389,16 @@ fn render_rounded_icon_button(
         egui::Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(button_size, sense);
+    let state = interaction::InteractionState::of_covered(ui.ctx(), &response, rect, enabled);
     let button_fill = if enabled {
-        if response.is_pointer_button_down_on() {
-            fill.gamma_multiply(0.9)
-        } else if response.hovered() {
-            fill.gamma_multiply(1.08)
-        } else {
-            fill
-        }
+        interaction::FillPalette::new(
+            fill,
+            fill.lerp_to_gamma(ui.visuals().text_color(), 0.14),
+            fill.gamma_multiply(0.9),
+            fill,
+            ui.visuals().text_color(),
+        )
+        .fill(state, false)
     } else {
         ui.visuals().widgets.inactive.weak_bg_fill
     };
@@ -1385,9 +1407,18 @@ fn render_rounded_icon_button(
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        ui.visuals().widgets.noninteractive.bg_stroke,
+        interaction::focus_stroke(
+            state,
+            ui.visuals(),
+            interaction::hover_stroke(
+                state,
+                ui.visuals().widgets.noninteractive.bg_stroke,
+                ui.visuals().widgets.hovered.bg_stroke,
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
 
     let image = egui::Image::from_bytes(uri, themed_svg)
         .fit_to_exact_size(egui::vec2(icon_size, icon_size));

@@ -2,6 +2,7 @@ use egui::{
     Area, Color32, Context, CornerRadius, CursorIcon, Id, Key, Order, Pos2, Rect, Sense, pos2, vec2,
 };
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 
 use crate::ui::{motion, style};
@@ -372,21 +373,25 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                                 Sense::click(),
                             );
 
+                            let state = interaction::InteractionState::of(ctx, &response, true);
                             let item_fill = if item.danger {
-                                if response.is_pointer_button_down_on() {
-                                    danger_active_fill
-                                } else if response.hovered() {
-                                    danger_hover_fill
-                                } else {
-                                    Color32::TRANSPARENT
-                                }
-                            } else if response.is_pointer_button_down_on() {
-                                active_fill
-                            } else if response.hovered() {
-                                hover_fill
+                                interaction::FillPalette::new(
+                                    Color32::TRANSPARENT,
+                                    danger_hover_fill,
+                                    danger_active_fill,
+                                    danger_hover_fill,
+                                    danger_color,
+                                )
                             } else {
-                                Color32::TRANSPARENT
-                            };
+                                interaction::FillPalette::new(
+                                    Color32::TRANSPARENT,
+                                    hover_fill,
+                                    active_fill,
+                                    hover_fill,
+                                    Color32::WHITE,
+                                )
+                            }
+                            .fill(state, false);
 
                             ui.painter().rect_filled(
                                 item_rect,
@@ -450,10 +455,6 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                                     },
                                 );
                             });
-
-                            if response.hovered() {
-                                ui.ctx().set_cursor_icon(CursorIcon::Default);
-                            }
 
                             if response.clicked() {
                                 selected_action = Some(item.action_id.clone());

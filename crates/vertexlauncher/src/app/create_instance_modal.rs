@@ -819,6 +819,7 @@ fn render_thumbnail_picker(
                 .hover_pos()
                 .is_some_and(|pos| frame_response.rect.contains(pos))
         });
+        let _ = textui_egui::interaction::InteractionState::of(ui.ctx(), &frame_response, true);
         let mut should_open_picker = frame_response.clicked();
         if pointer_in_preview {
             let overlay_size = egui::vec2(52.0, 52.0);

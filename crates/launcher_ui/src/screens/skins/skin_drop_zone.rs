@@ -1,4 +1,5 @@
 use super::*;
+use textui_egui::interaction;
 
 pub(super) fn render_skin_drop_zone(
     ui: &mut Ui,
@@ -25,22 +26,23 @@ pub(super) fn render_skin_drop_zone(
             .ctx()
             .pointer_latest_pos()
             .is_some_and(|pointer| rect.contains(pointer));
-    let focused = response.has_focus();
-    let pressed = response.is_pointer_button_down_on();
+    let zone_state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let focused = zone_state.focused;
     let fill = if hovering_drop {
         ui.visuals().selection.bg_fill.gamma_multiply(0.22)
-    } else if pressed {
-        ui.visuals().widgets.active.bg_fill.gamma_multiply(0.95)
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.92)
-    } else if focused {
-        ui.visuals().selection.bg_fill.gamma_multiply(0.12)
     } else {
-        ui.visuals()
-            .widgets
-            .inactive
-            .weak_bg_fill
-            .gamma_multiply(0.7)
+        interaction::FillPalette::new(
+            ui.visuals()
+                .widgets
+                .inactive
+                .weak_bg_fill
+                .gamma_multiply(0.7),
+            ui.visuals().widgets.hovered.bg_fill.gamma_multiply(0.92),
+            ui.visuals().widgets.active.bg_fill.gamma_multiply(0.95),
+            ui.visuals().selection.bg_fill,
+            ui.visuals().text_color(),
+        )
+        .fill(zone_state, false)
     };
     ui.painter().rect_filled(rect, CornerRadius::same(14), fill);
     paint_dotted_drop_zone_stroke(
@@ -48,23 +50,14 @@ pub(super) fn render_skin_drop_zone(
         rect.shrink(1.5),
         if hovering_drop || focused {
             ui.visuals().selection.stroke.color
-        } else if response.hovered() {
-            ui.visuals().widgets.hovered.bg_stroke.color
         } else {
-            ui.visuals().weak_text_color()
+            ui.visuals().weak_text_color().lerp_to_gamma(
+                ui.visuals().widgets.hovered.bg_stroke.color,
+                zone_state.hover,
+            )
         },
     );
-    if focused {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            CornerRadius::same(16),
-            Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), zone_state, rect, 14);
 
     let mut choose_style =
         style::neutral_button_with_min_size(ui, egui::vec2(220.0, style::CONTROL_HEIGHT));
@@ -138,22 +131,23 @@ pub(super) fn render_skin_drop_zone(
             let _ = text_ui.label(ui, "skins_drop_prompt_or", "or", &muted);
         },
     );
-    let button_fill = if pressed {
-        choose_style.fill_active
-    } else if response.hovered() {
-        choose_style.fill_hovered
-    } else if focused {
-        choose_style.fill_selected
-    } else {
-        choose_style.fill
-    };
-    let button_stroke = if focused {
-        ui.visuals().selection.stroke
-    } else if response.hovered() {
-        ui.visuals().widgets.hovered.bg_stroke
-    } else {
-        choose_style.stroke
-    };
+    let button_fill = interaction::FillPalette::new(
+        choose_style.fill,
+        choose_style.fill_hovered,
+        choose_style.fill_active,
+        choose_style.fill_selected,
+        choose_style.text_color,
+    )
+    .fill(zone_state, false);
+    let button_stroke = interaction::focus_stroke(
+        zone_state,
+        ui.visuals(),
+        interaction::hover_stroke(
+            zone_state,
+            choose_style.stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        ),
+    );
     ui.painter().rect_filled(
         button_rect,
         CornerRadius::same(choose_style.corner_radius),
@@ -165,17 +159,13 @@ pub(super) fn render_skin_drop_zone(
         button_stroke,
         egui::StrokeKind::Inside,
     );
-    if focused {
-        ui.painter().rect_stroke(
-            button_rect.expand(2.0),
-            CornerRadius::same(choose_style.corner_radius.saturating_add(2)),
-            Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(
+        ui.painter(),
+        ui.visuals(),
+        zone_state,
+        button_rect,
+        choose_style.corner_radius,
+    );
     ui.scope_builder(
         egui::UiBuilder::new()
             .max_rect(button_text_rect)

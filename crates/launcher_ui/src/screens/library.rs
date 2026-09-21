@@ -27,6 +27,7 @@ use installation::{
 };
 use instances::{InstanceRecord, InstanceStore, instance_root_path};
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 use ui_foundation::{
     DialogPreset, UiMetrics, danger_button, dialog_options, secondary_button, show_dialog,
@@ -612,7 +613,6 @@ fn render_runtime_action_button(
         ui.make_persistent_id(("library_runtime_action_button", instance_id)),
         egui::Sense::click(),
     );
-    let has_focus = response.has_focus();
     let (fill_base, stroke, text_color) = if runtime_running_for_active_account {
         let error = ui.visuals().error_fg_color;
         (
@@ -639,37 +639,36 @@ fn render_runtime_action_button(
             ui.visuals().widgets.active.fg_stroke.color,
         )
     };
-    let fill = if response.is_pointer_button_down_on() {
-        fill_base.gamma_multiply(0.9)
-    } else if response.hovered() || has_focus {
-        fill_base.gamma_multiply(1.1)
-    } else {
-        fill_base
-    };
+    let interactive = runtime_running_for_active_account
+        || !(launch_in_flight || install_in_flight || launch_disabled);
+    let state = interaction::InteractionState::of(ui.ctx(), &response, interactive);
+    let hover_text = ui.visuals().text_color();
+    let fill = interaction::FillPalette::new(
+        fill_base,
+        fill_base.lerp_to_gamma(hover_text, 0.14),
+        fill_base.gamma_multiply(0.9),
+        fill_base,
+        hover_text,
+    )
+    .fill(state, false);
 
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(8), fill);
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        if has_focus {
-            ui.visuals().selection.stroke
-        } else {
-            stroke
-        },
+        interaction::focus_stroke(
+            state,
+            ui.visuals(),
+            interaction::hover_stroke(
+                state,
+                stroke,
+                interaction::emphasized_stroke(stroke, hover_text),
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
-    if has_focus {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            egui::CornerRadius::same(10),
-            egui::Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
 
     let inner_rect = rect.shrink2(egui::vec2(8.0, 4.0));
     if runtime_running_for_active_account {
@@ -742,53 +741,49 @@ fn render_delete_instance_button(
         ui.make_persistent_id(("library_delete_instance_button", instance_id)),
         egui::Sense::click(),
     );
-    let has_focus = response.has_focus();
     let danger = ui.visuals().error_fg_color;
     let stroke_color = if disabled {
         ui.visuals().widgets.noninteractive.bg_stroke.color
     } else {
         danger
     };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, !disabled);
     let fill = if disabled {
         ui.visuals().widgets.noninteractive.bg_fill
-    } else if response.is_pointer_button_down_on() {
-        danger.gamma_multiply(0.88)
-    } else if response.hovered() || has_focus {
-        danger
     } else {
-        ui.visuals().widgets.inactive.bg_fill.gamma_multiply(0.18)
+        interaction::FillPalette::new(
+            ui.visuals().widgets.inactive.bg_fill.gamma_multiply(0.18),
+            danger,
+            danger.gamma_multiply(0.88),
+            danger,
+            egui::Color32::WHITE,
+        )
+        .fill(state, false)
     };
     let text_color = if disabled {
         ui.visuals().weak_text_color()
-    } else if response.hovered() || response.is_pointer_button_down_on() {
-        egui::Color32::WHITE
     } else {
-        danger
+        danger.lerp_to_gamma(egui::Color32::WHITE, state.hover)
     };
 
+    let idle_stroke = egui::Stroke::new(1.0, stroke_color);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(8), fill);
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(8),
-        if has_focus {
-            ui.visuals().selection.stroke
-        } else {
-            egui::Stroke::new(1.0, stroke_color)
-        },
+        interaction::focus_stroke(
+            state,
+            ui.visuals(),
+            interaction::hover_stroke(
+                state,
+                idle_stroke,
+                interaction::emphasized_stroke(idle_stroke, egui::Color32::WHITE),
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
-    if has_focus {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            egui::CornerRadius::same(10),
-            egui::Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
     let label_style = LabelOptions {
         color: text_color,
         wrap: false,

@@ -1,3 +1,4 @@
+// interaction: allow (the console viewport is a text-selection surface, not a button)
 use std::{
     borrow::Cow,
     collections::HashMap,

@@ -1,3 +1,4 @@
+// interaction: allow (the preview canvas is a drag-to-rotate surface, not a button)
 use super::super::*;
 
 pub(super) fn render_preview_canvas(

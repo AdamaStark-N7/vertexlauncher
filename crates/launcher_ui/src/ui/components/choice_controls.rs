@@ -2,6 +2,7 @@ use std::hash::Hash;
 
 use egui::{Rect, Response, Sense, Stroke, Ui, UiBuilder, Vec2, pos2};
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 
 use crate::ui::style;
@@ -17,11 +18,23 @@ pub fn radio(
     selected: bool,
 ) -> Response {
     choice_row(ui, text_ui, id_source, label, |ui, rect, response| {
-        let visuals = ui.style().interact_selectable(response, selected);
+        let state = interaction::InteractionState::of(ui.ctx(), response, ui.is_enabled());
+        let fill = interaction::FillPalette::from_visuals(ui.visuals()).fill(state, selected);
+        let stroke = interaction::hover_stroke(
+            state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        );
         let center = rect.center();
         let radius = rect.width() * 0.5 - 1.0;
-        ui.painter()
-            .circle(center, radius, visuals.bg_fill, visuals.bg_stroke);
+        ui.painter().circle(center, radius, fill, stroke);
+        interaction::paint_focus_ring(
+            ui.painter(),
+            ui.visuals(),
+            state,
+            rect,
+            (rect.width() * 0.5) as u8,
+        );
         if selected {
             ui.painter()
                 .circle_filled(center, radius * 0.5, ui.visuals().selection.stroke.color);
@@ -39,14 +52,21 @@ pub fn checkbox(
     checked: &mut bool,
 ) -> Response {
     let mut response = choice_row(ui, text_ui, id_source, label, |ui, rect, response| {
-        let visuals = ui.style().interact_selectable(response, *checked);
+        let state = interaction::InteractionState::of(ui.ctx(), response, ui.is_enabled());
+        let fill = interaction::FillPalette::from_visuals(ui.visuals()).fill(state, *checked);
+        let stroke = interaction::hover_stroke(
+            state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        );
         ui.painter().rect(
             rect.shrink(1.0),
             2.0,
-            visuals.bg_fill,
-            visuals.bg_stroke,
+            fill,
+            stroke,
             egui::StrokeKind::Inside,
         );
+        interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect.shrink(1.0), 2);
         if *checked {
             let stroke = Stroke::new(2.0, ui.visuals().selection.stroke.color);
             let w = rect.width();

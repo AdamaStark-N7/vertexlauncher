@@ -8,6 +8,7 @@ mod linux_blur_protocol;
 mod macos_visual_effect_blending_mode;
 mod macos_visual_effect_material;
 mod macos_visual_effect_state;
+mod notification_easing;
 mod setting_specs;
 mod skin_preview_aa_mode;
 mod skin_preview_texel_aa_mode;
@@ -28,6 +29,7 @@ pub use linux_blur_protocol::LinuxBlurProtocol;
 pub use macos_visual_effect_blending_mode::MacosVisualEffectBlendingMode;
 pub use macos_visual_effect_material::MacosVisualEffectMaterial;
 pub use macos_visual_effect_state::MacosVisualEffectState;
+pub use notification_easing::NotificationEasing;
 pub use setting_specs::{
     DropdownSettingId, DropdownSettingSpec, FloatSettingId, FloatSettingSpec, IntSettingId,
     IntSettingSpec, TextSettingId, TextSettingSpec, ToggleSettingId, ToggleSettingSpec,
@@ -69,6 +71,10 @@ pub const DOWNLOAD_CONCURRENCY_MAX: u32 = 128;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: u32 = 8;
 pub const FRAME_LIMIT_FPS_MIN: i32 = 30;
 pub const FRAME_LIMIT_FPS_MAX: i32 = 240;
+pub const NOTIFICATION_FADE_OUT_SECONDS_MIN: f32 = 0.0;
+pub const NOTIFICATION_FADE_OUT_SECONDS_MAX: f32 = 2.0;
+pub const NOTIFICATION_FADE_OUT_SECONDS_STEP: f32 = 0.05;
+pub const DEFAULT_NOTIFICATION_FADE_OUT_SECONDS: f32 = 0.25;
 pub const SKIN_PREVIEW_MSAA_SAMPLES_MIN: i32 = 1;
 pub const SKIN_PREVIEW_MSAA_SAMPLES_MAX: i32 = 8;
 pub const SKIN_PREVIEW_MSAA_SAMPLES_STEP: i32 = 1;
@@ -104,6 +110,14 @@ const fn default_macos_visual_effect_blending_mode() -> MacosVisualEffectBlendin
 
 const fn default_macos_visual_effect_state() -> MacosVisualEffectState {
     MacosVisualEffectState::Active
+}
+
+const fn default_notification_fade_out_seconds() -> f32 {
+    DEFAULT_NOTIFICATION_FADE_OUT_SECONDS
+}
+
+const fn default_notification_easing() -> NotificationEasing {
+    NotificationEasing::CubicInOut
 }
 
 const fn default_drag_scroll_enabled() -> bool {
@@ -230,6 +244,10 @@ pub struct Config {
     open_type_features_enabled: bool,
     open_type_features_to_enable: String,
     notification_expiry_bars_empty_left: bool,
+    #[serde(default = "default_notification_fade_out_seconds")]
+    notification_fade_out_seconds: f32,
+    #[serde(default = "default_notification_easing")]
+    notification_easing: NotificationEasing,
     ui_font_family: UiFontFamily,
     ui_emoji_font_family: UiEmojiFontFamily,
     text_rendering_path: TextRenderingPath,
@@ -653,6 +671,29 @@ impl Config {
         self.notification_expiry_bars_empty_left
     }
 
+    /// Returns how long, in seconds, a notification takes to fade out once it expires.
+    pub fn notification_fade_out_seconds(&self) -> f32 {
+        self.notification_fade_out_seconds
+    }
+
+    /// Sets the notification fade-out duration in seconds.
+    pub fn set_notification_fade_out_seconds(&mut self, seconds: f32) {
+        self.notification_fade_out_seconds = seconds.clamp(
+            NOTIFICATION_FADE_OUT_SECONDS_MIN,
+            NOTIFICATION_FADE_OUT_SECONDS_MAX,
+        );
+    }
+
+    /// Returns the easing curve used for the notification fade-out.
+    pub fn notification_easing(&self) -> NotificationEasing {
+        self.notification_easing
+    }
+
+    /// Sets the easing curve used for the notification fade-out.
+    pub fn set_notification_easing(&mut self, easing: NotificationEasing) {
+        self.notification_easing = easing;
+    }
+
     /// Returns configured UI font size in points.
     pub fn ui_font_size(&self) -> f32 {
         self.ui_font_size
@@ -896,6 +937,14 @@ impl Config {
             .ui_opacity_percent
             .clamp(UI_OPACITY_PERCENT_MIN, UI_OPACITY_PERCENT_MAX);
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
+        self.notification_fade_out_seconds = if self.notification_fade_out_seconds.is_finite() {
+            self.notification_fade_out_seconds.clamp(
+                NOTIFICATION_FADE_OUT_SECONDS_MIN,
+                NOTIFICATION_FADE_OUT_SECONDS_MAX,
+            )
+        } else {
+            DEFAULT_NOTIFICATION_FADE_OUT_SECONDS
+        };
         self.typography.normalize();
         self.skin_preview_motion_blur_amount = self.skin_preview_motion_blur_amount.clamp(
             SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
@@ -998,6 +1047,8 @@ impl Config {
             open_type_features_enabled,
             open_type_features_to_enable: _,
             notification_expiry_bars_empty_left,
+            notification_fade_out_seconds: _,
+            notification_easing: _,
             ui_font_family: _,
             ui_emoji_font_family: _,
             text_rendering_path: _,
@@ -1142,6 +1193,8 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             notification_expiry_bars_empty_left: _,
+            notification_fade_out_seconds: _,
+            notification_easing: _,
             ui_font_family,
             ui_emoji_font_family: _,
             text_rendering_path: _,
@@ -1215,6 +1268,8 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             notification_expiry_bars_empty_left: _,
+            notification_fade_out_seconds,
+            notification_easing: _,
             ui_font_family: _,
             ui_emoji_font_family: _,
             text_rendering_path: _,
@@ -1261,6 +1316,10 @@ impl Config {
 
         visit(FloatSettingId::UiFontSize.spec(), ui_font_size);
         visit(
+            FloatSettingId::NotificationFadeOutSeconds.spec(),
+            notification_fade_out_seconds,
+        );
+        visit(
             FloatSettingId::SkinPreviewMotionBlurAmount.spec(),
             skin_preview_motion_blur_amount,
         );
@@ -1296,6 +1355,8 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable: _,
             notification_expiry_bars_empty_left: _,
+            notification_fade_out_seconds: _,
+            notification_easing: _,
             ui_font_family: _,
             ui_emoji_font_family: _,
             text_rendering_path: _,
@@ -1378,6 +1439,8 @@ impl Config {
             open_type_features_enabled: _,
             open_type_features_to_enable,
             notification_expiry_bars_empty_left: _,
+            notification_fade_out_seconds: _,
+            notification_easing: _,
             ui_font_family: _,
             ui_emoji_font_family: _,
             text_rendering_path: _,
@@ -1471,6 +1534,8 @@ impl Default for Config {
             open_type_features_enabled: true,
             open_type_features_to_enable: String::new(),
             notification_expiry_bars_empty_left: false,
+            notification_fade_out_seconds: default_notification_fade_out_seconds(),
+            notification_easing: default_notification_easing(),
             ui_font_family: UiFontFamily::included_default(),
             ui_emoji_font_family: UiEmojiFontFamily::included_default(),
             text_rendering_path: TextRenderingPath::Auto,

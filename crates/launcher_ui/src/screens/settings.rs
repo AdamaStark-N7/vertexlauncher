@@ -2,8 +2,8 @@ use config::{
     Config, DOWNLOAD_CONCURRENCY_MAX, DOWNLOAD_CONCURRENCY_MIN, DropdownSettingId, FloatSettingId,
     GraphicsAdapterPreferenceType, GraphicsAdapterProfile, GraphicsApiPreference,
     INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
-    JavaRuntimeVersion, SkinPreviewAaMode, SkinPreviewTexelAaMode, SvgAaMode, TextRenderingPath,
-    UiEmojiFontFamily, UiFontFamily, WindowTransparency, parse_bitrate_to_bps,
+    JavaRuntimeVersion, NotificationEasing, SkinPreviewAaMode, SkinPreviewTexelAaMode, SvgAaMode,
+    TextRenderingPath, UiEmojiFontFamily, UiFontFamily, WindowTransparency, parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::{ensure_openjdk_runtime_async, purge_cache_async as purge_installation_cache};
@@ -113,8 +113,8 @@ fn render_settings_contents(
     render_settings_section(
         ui,
         text_ui,
-        "Appearance & Privacy",
-        "Theme, launcher chrome, and on-stream safety settings.",
+        "Appearance",
+        "Theme and launcher chrome settings.",
         |ui, text_ui| {
             render_theme_setting(
                 ui,
@@ -123,22 +123,66 @@ fn render_settings_contents(
                 available_themes,
                 available_theme_labels,
             );
-            render_skin_preview_setting(ui, text_ui, config);
-            render_svg_aa_setting(ui, text_ui, config);
             render_window_transparency_setting(ui, text_ui, config);
             render_ui_opacity_setting(ui, text_ui, config);
             render_selected_toggles(
                 ui,
                 text_ui,
                 config,
-                &[
-                    config::ToggleSettingId::StreamerModeEnabled,
-                    config::ToggleSettingId::NotificationExpiryBarsEmptyLeft,
-                    config::ToggleSettingId::SkinPreviewFreshFormatEnabled,
-                    config::ToggleSettingId::SkinPreview3dLayersEnabled,
-                    config::ToggleSettingId::DragScrollEnabled,
-                ],
+                &[config::ToggleSettingId::DragScrollEnabled],
             );
+        },
+    );
+
+    render_settings_section(
+        ui,
+        text_ui,
+        "Privacy",
+        "On-stream safety settings.",
+        |ui, text_ui| {
+            render_selected_toggles(
+                ui,
+                text_ui,
+                config,
+                &[config::ToggleSettingId::StreamerModeEnabled],
+            );
+        },
+    );
+
+    render_settings_section(
+        ui,
+        text_ui,
+        "Notifications",
+        "How notification popups expire and fade away.",
+        |ui, text_ui| {
+            render_selected_toggles(
+                ui,
+                text_ui,
+                config,
+                &[config::ToggleSettingId::NotificationExpiryBarsEmptyLeft],
+            );
+            render_selected_float_settings(
+                ui,
+                text_ui,
+                config,
+                &[FloatSettingId::NotificationFadeOutSeconds],
+            );
+            render_notification_easing_setting(ui, text_ui, config);
+            if text_ui
+                .button(
+                    ui,
+                    "settings_test_notification",
+                    "Test notification",
+                    &style::neutral_button(ui),
+                )
+                .clicked()
+            {
+                crate::notification::emit(
+                    crate::notification::Severity::Info,
+                    "Settings",
+                    "This is a test notification.",
+                );
+            }
         },
     );
 
@@ -188,7 +232,7 @@ fn render_settings_contents(
     render_settings_section(
         ui,
         text_ui,
-        "Social & Presence",
+        "Discord Rich Presence",
         "Discord integration and launcher-owned activity reporting.",
         |ui, text_ui| {
             render_selected_toggles(
@@ -226,6 +270,17 @@ fn render_settings_contents(
         "Graphics & Performance",
         "GPU, skin preview rendering, frame pacing, and download throughput behavior.",
         |ui, text_ui| {
+            render_skin_preview_setting(ui, text_ui, config);
+            render_svg_aa_setting(ui, text_ui, config);
+            render_selected_toggles(
+                ui,
+                text_ui,
+                config,
+                &[
+                    config::ToggleSettingId::SkinPreviewFreshFormatEnabled,
+                    config::ToggleSettingId::SkinPreview3dLayersEnabled,
+                ],
+            );
             render_skin_preview_motion_blur_settings(ui, text_ui, config);
             render_graphics_adapter_settings(ui, text_ui, config, settings_info);
             render_graphics_api_setting(ui, text_ui, config);
@@ -242,8 +297,8 @@ fn render_settings_contents(
     render_settings_section(
         ui,
         text_ui,
-        "Minecraft & Java",
-        "Version catalog behavior and shared runtime configuration.",
+        "Minecraft",
+        "Version catalog behavior and content provider access.",
         |ui, text_ui| {
             render_settings_subgroup(
                 ui,
@@ -261,12 +316,16 @@ fn render_settings_contents(
                     config::ToggleSettingId::ExperimentalVersionsEnabled,
                 ],
             );
-            render_settings_subgroup(
-                ui,
-                text_ui,
-                "Java Runtime",
-                "Shared Java behavior for launches that use managed runtime selection.",
-            );
+            render_curseforge_settings(ui, text_ui, config);
+        },
+    );
+
+    render_settings_section(
+        ui,
+        text_ui,
+        "Java",
+        "Shared Java behavior for launches that use managed runtime selection.",
+        |ui, text_ui| {
             render_selected_toggles(
                 ui,
                 text_ui,
@@ -274,7 +333,6 @@ fn render_settings_contents(
                 &[config::ToggleSettingId::ForceJava21Minimum],
             );
             render_java_runtime_settings(ui, text_ui, config);
-            render_curseforge_settings(ui, text_ui, config);
         },
     );
 
@@ -534,6 +592,7 @@ fn render_ui_font_settings(
             setting.id,
             FloatSettingId::SkinPreviewMotionBlurAmount
                 | FloatSettingId::SkinPreviewMotionBlurShutterFrames
+                | FloatSettingId::NotificationFadeOutSeconds
         ) {
             return;
         }
@@ -891,6 +950,63 @@ fn render_text_rendering_path_setting(ui: &mut Ui, text_ui: &mut TextUi, config:
     if response.changed() {
         if let Some(next) = options.get(selected_index).copied() {
             config.set_text_rendering_path(next);
+        }
+    }
+    ui.add_space(style::SPACE_MD);
+}
+
+fn render_selected_float_settings(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    config: &mut Config,
+    ids: &[FloatSettingId],
+) {
+    config.for_each_float_mut(|setting, value| {
+        if !ids.contains(&setting.id) {
+            return;
+        }
+        ui.push_id(setting.id, |ui| {
+            settings_widgets::float_stepper_row(
+                text_ui,
+                ui,
+                setting.id,
+                setting.label,
+                setting.info_tooltip,
+                value,
+                setting.min,
+                setting.max,
+                setting.step,
+            );
+        });
+        ui.add_space(style::SPACE_MD);
+    });
+}
+
+fn render_notification_easing_setting(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
+    let mut selected = NotificationEasing::ALL
+        .iter()
+        .position(|easing| *easing == config.notification_easing())
+        .unwrap_or(0);
+    let labels: Vec<&str> = NotificationEasing::ALL
+        .iter()
+        .map(|easing| easing.label())
+        .collect();
+
+    let response = settings_widgets::dropdown_row(
+        text_ui,
+        ui,
+        "notification_easing",
+        "Notification Fade Out Easing",
+        Some(
+            "The curve of the fade-out animation. Linear fades at a constant rate; Cubic and Exponential ease in, out, or both, and the Exponential curves are the most abrupt. Changes apply immediately. Default: Cubic In/Out.",
+        ),
+        &mut selected,
+        &labels,
+    );
+
+    if response.changed() {
+        if let Some(next) = NotificationEasing::ALL.get(selected).copied() {
+            config.set_notification_easing(next);
         }
     }
     ui.add_space(style::SPACE_MD);
@@ -1328,27 +1444,18 @@ fn render_curseforge_settings(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Co
 }
 
 fn render_instance_defaults_section(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
-    ui.add_space(style::SPACE_LG);
-    ui.separator();
-    ui.add_space(style::SPACE_LG);
+    render_settings_section(
+        ui,
+        text_ui,
+        "Instance Defaults",
+        "Used when creating new instances. You can still override values per instance.",
+        |ui, text_ui| render_instance_defaults_contents(ui, text_ui, config),
+    );
+}
 
-    let heading_style = style::section_heading(ui);
+fn render_instance_defaults_contents(ui: &mut Ui, text_ui: &mut TextUi, config: &mut Config) {
     let mut body_style = style::muted(ui);
     body_style.wrap = false;
-
-    let _ = text_ui.label(
-        ui,
-        "instance_defaults_heading",
-        "Instance Defaults",
-        &heading_style,
-    );
-    let _ = text_ui.label(
-        ui,
-        "instance_defaults_description",
-        "Used when creating new instances. You can still override values per instance.",
-        &body_style,
-    );
-    ui.add_space(style::SPACE_MD);
 
     let mut installations_root = config
         .minecraft_installations_root_path()

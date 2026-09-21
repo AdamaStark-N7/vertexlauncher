@@ -113,9 +113,7 @@ fn draw_cape_tile(
         ui.allocate_exact_size(egui::vec2(tile_width, CAPE_TILE_HEIGHT), Sense::click());
     let tile_rect = rect.shrink2(egui::vec2(0.0, style::SPACE_XS * 0.5));
 
-    let hover_t = ui
-        .ctx()
-        .animate_bool(response.id.with("cape_tile_hover"), response.hovered());
+    let hover_t = textui_egui::interaction::InteractionState::of(ui.ctx(), &response, true).hover;
     let press_t = ui.ctx().animate_bool(
         response.id.with("cape_tile_press"),
         response.is_pointer_button_down_on(),

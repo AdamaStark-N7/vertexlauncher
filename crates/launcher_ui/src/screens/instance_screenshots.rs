@@ -1,4 +1,5 @@
 use super::*;
+use textui_egui::interaction;
 
 #[path = "instance_screenshots/instance_screenshot_overlay_action.rs"]
 mod instance_screenshot_overlay_action;
@@ -190,7 +191,6 @@ fn render_instance_screenshot_tile(
     if tile_contains_pointer || overlay_was_active {
         overlay_result = render_instance_screenshot_overlay_action(
             ui,
-            text_ui,
             rect,
             "instance_gallery",
             screenshot,
@@ -211,11 +211,28 @@ fn render_instance_screenshot_tile(
     let overlay_active = tile_contains_pointer || overlay_result.contains_pointer;
     ui.ctx()
         .data_mut(|data| data.insert_temp(overlay_memory_id, overlay_active));
-    let stroke = if overlay_active {
-        ui.visuals().widgets.hovered.bg_stroke
-    } else {
-        ui.visuals().widgets.inactive.bg_stroke
+    let state = interaction::InteractionState {
+        hover: ui
+            .ctx()
+            .animate_bool(overlay_memory_id.with("hover_fade"), overlay_active),
+        pressed: false,
+        focused: false,
+        enabled: !viewer_open,
     };
+    if overlay_active && !viewer_open {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+    }
+    // Media tiles highlight with the stroke only, so the picture is not tinted.
+    let hovered_stroke = egui::Stroke::new(2.0, ui.visuals().widgets.hovered.bg_stroke.color);
+    let stroke = interaction::focus_stroke(
+        state,
+        ui.visuals(),
+        interaction::hover_stroke(
+            state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            hovered_stroke,
+        ),
+    );
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(14),
@@ -258,17 +275,19 @@ fn render_instance_screenshot_tile(
         });
     });
 
-    image_response = crate::ui::style::hover_tip(
-        ui,
-        image_response,
-        format!(
-            "{}\n{}x{}\n{}",
-            screenshot.file_name,
-            screenshot.width,
-            screenshot.height,
-            screenshot.path.display()
-        ),
-    );
+    if !overlay_result.contains_pointer {
+        image_response = crate::ui::style::hover_tip(
+            ui,
+            image_response,
+            format!(
+                "{}\n{}x{}\n{}",
+                screenshot.file_name,
+                screenshot.width,
+                screenshot.height,
+                screenshot.path.display()
+            ),
+        );
+    }
     action.open_viewer = image_response.clicked() && !overlay_clicked;
     action
 }
@@ -776,7 +795,6 @@ pub(super) fn render_instance_delete_screenshot_modal(
 
 fn render_instance_screenshot_overlay_action(
     ui: &mut Ui,
-    text_ui: &mut TextUi,
     tile_rect: egui::Rect,
     scope: &str,
     screenshot: &InstanceScreenshotEntry,
@@ -787,7 +805,6 @@ fn render_instance_screenshot_overlay_action(
     let mut result = InstanceScreenshotOverlayResult::default();
     let copy_result = render_instance_screenshot_overlay_button(
         ui,
-        text_ui,
         tile_rect,
         scope,
         screenshot_key.as_str(),
@@ -813,7 +830,6 @@ fn render_instance_screenshot_overlay_action(
     }
     let delete_result = render_instance_screenshot_overlay_button(
         ui,
-        text_ui,
         tile_rect,
         scope,
         screenshot_key.as_str(),
@@ -833,7 +849,6 @@ fn render_instance_screenshot_overlay_action(
 
 fn render_instance_screenshot_overlay_button(
     ui: &mut Ui,
-    text_ui: &mut TextUi,
     tile_rect: egui::Rect,
     scope: &str,
     screenshot_key: &str,
@@ -869,20 +884,27 @@ fn render_instance_screenshot_overlay_button(
         },
     );
     let button_contains_pointer = ui_pointer_over_rect(ui, button_rect);
-    let button_pressed = button_contains_pointer && ui.input(|input| input.pointer.primary_down());
-    let fill = if response.is_pointer_button_down_on() || button_pressed {
-        ui.visuals().widgets.active.bg_fill
-    } else if button_contains_pointer {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        egui::Color32::from_rgba_premultiplied(12, 16, 24, 210)
-    };
+    let button_state =
+        interaction::InteractionState::of_covered(ui.ctx(), &response, button_rect, enabled);
+    let overlay_idle = egui::Color32::from_rgba_premultiplied(12, 16, 24, 210);
+    let fill = interaction::FillPalette::new(
+        overlay_idle,
+        ui.visuals().widgets.hovered.bg_fill,
+        ui.visuals().widgets.active.bg_fill,
+        ui.visuals().selection.bg_fill,
+        ui.visuals().text_color(),
+    )
+    .fill(button_state, false);
     ui.painter()
         .rect_filled(button_rect, egui::CornerRadius::same(8), fill);
     ui.painter().rect_stroke(
         button_rect,
         egui::CornerRadius::same(8),
-        ui.visuals().widgets.inactive.bg_stroke,
+        interaction::hover_stroke(
+            button_state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        ),
         egui::StrokeKind::Inside,
     );
     let icon_rect = egui::Rect::from_center_size(button_rect.center(), egui::vec2(14.0, 14.0));
@@ -897,25 +919,7 @@ fn render_instance_screenshot_overlay_button(
     let clicked = response.clicked();
     let contains_pointer = button_contains_pointer || response.is_pointer_button_down_on();
     if button_contains_pointer {
-        let _ = egui::Tooltip::always_open(
-            ui.ctx().clone(),
-            ui.layer_id(),
-            response.id.with("tooltip"),
-            egui::PopupAnchor::Pointer,
-        )
-        .gap(12.0)
-        .show(|ui| {
-            let tooltip_style = LabelOptions {
-                color: ui.visuals().text_color(),
-                ..style::body(ui)
-            };
-            let _ = text_ui.label(
-                ui,
-                ("instance_screenshot_overlay_tooltip", id_source, tooltip),
-                tooltip,
-                &tooltip_style,
-            );
-        });
+        let _ = crate::ui::style::hover_tip(ui, response.clone(), tooltip);
     }
     InstanceScreenshotOverlayButtonResult {
         clicked,

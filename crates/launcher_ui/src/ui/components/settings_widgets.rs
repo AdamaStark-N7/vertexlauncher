@@ -5,6 +5,7 @@ mod settings_widgets_search;
 
 use egui::{self, Align, Layout, Response, Sense, Ui};
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::{
     apply_gamepad_scroll_if_focused, apply_gamepad_scroll_to_registered_id, gamepad_scroll_delta,
     make_gamepad_scrollable, prelude::*,
@@ -816,7 +817,7 @@ pub fn full_width_button(
     if primary {
         style.stroke = ui.visuals().selection.stroke;
         style.fill = ui.visuals().selection.bg_fill;
-        style.fill_hovered = ui.visuals().selection.bg_fill.gamma_multiply(1.1);
+        style.fill_hovered = crate::ui::style::hover_fill(ui, ui.visuals().selection.bg_fill);
         style.fill_active = ui.visuals().selection.bg_fill.gamma_multiply(0.9);
         style.fill_selected = ui.visuals().selection.bg_fill;
         style.text_color = ui.visuals().widgets.active.fg_stroke.color;
@@ -846,7 +847,7 @@ pub fn selectable_chip_button(
 
     if selected {
         style.fill = ui.visuals().widgets.active.bg_fill;
-        style.fill_hovered = ui.visuals().widgets.active.bg_fill.gamma_multiply(1.08);
+        style.fill_hovered = crate::ui::style::hover_fill(ui, ui.visuals().widgets.active.bg_fill);
         style.fill_active = ui.visuals().widgets.active.bg_fill.gamma_multiply(0.92);
         style.text_color = ui.visuals().widgets.active.fg_stroke.color;
     }
@@ -1008,10 +1009,19 @@ pub fn u128_slider_with_input_row(
                     let knob_center = egui::pos2(knob_x, rail_rect.center().y);
                     let knob_radius = (slider_inner_rect.height() * 0.34).clamp(6.0, 11.0);
 
+                    let slider_state = interaction::InteractionState::of(
+                        ui.ctx(),
+                        &slider_response,
+                        ui.is_enabled(),
+                    );
                     let rail_stroke = if slider_response.has_focus() || slider_editing {
                         ui.visuals().selection.stroke
                     } else {
-                        ui.visuals().widgets.inactive.bg_stroke
+                        interaction::hover_stroke(
+                            slider_state,
+                            ui.visuals().widgets.inactive.bg_stroke,
+                            ui.visuals().widgets.hovered.bg_stroke,
+                        )
                     };
                     ui.painter().rect(
                         rail_rect,
@@ -1027,9 +1037,15 @@ pub fn u128_slider_with_input_row(
                         egui::Stroke::NONE,
                         egui::StrokeKind::Inside,
                     );
+                    // The knob grows slightly on hover and while dragged.
+                    let knob_grow = if slider_state.pressed {
+                        1.0
+                    } else {
+                        slider_state.hover
+                    };
                     ui.painter().circle(
                         knob_center,
-                        knob_radius,
+                        knob_radius * (1.0 + 0.2 * knob_grow),
                         ui.visuals().widgets.noninteractive.fg_stroke.color,
                         egui::Stroke::new(1.0, rail_stroke.color),
                     );
@@ -1200,10 +1216,19 @@ pub fn float_slider_row(
                     let knob_center = egui::pos2(knob_x, rail_rect.center().y);
                     let knob_radius = (slider_inner_rect.height() * 0.34).clamp(6.0, 11.0);
 
+                    let slider_state = interaction::InteractionState::of(
+                        ui.ctx(),
+                        &slider_response,
+                        ui.is_enabled(),
+                    );
                     let rail_stroke = if slider_response.has_focus() || slider_editing {
                         ui.visuals().selection.stroke
                     } else {
-                        ui.visuals().widgets.inactive.bg_stroke
+                        interaction::hover_stroke(
+                            slider_state,
+                            ui.visuals().widgets.inactive.bg_stroke,
+                            ui.visuals().widgets.hovered.bg_stroke,
+                        )
                     };
                     ui.painter().rect(
                         rail_rect,
@@ -1219,9 +1244,15 @@ pub fn float_slider_row(
                         egui::Stroke::NONE,
                         egui::StrokeKind::Inside,
                     );
+                    // The knob grows slightly on hover and while dragged.
+                    let knob_grow = if slider_state.pressed {
+                        1.0
+                    } else {
+                        slider_state.hover
+                    };
                     ui.painter().circle(
                         knob_center,
-                        knob_radius,
+                        knob_radius * (1.0 + 0.2 * knob_grow),
                         ui.visuals().widgets.noninteractive.fg_stroke.color,
                         egui::Stroke::new(1.0, rail_stroke.color),
                     );
@@ -1315,14 +1346,17 @@ fn switch(ui: &mut Ui, value: &mut bool, metrics: ControlMetrics, id: egui::Id) 
         let visuals = ui.visuals();
         let off_fill = visuals.widgets.inactive.bg_fill;
         let on_fill = visuals.selection.bg_fill;
-        let fill = lerp_color32_oklab(off_fill, on_fill, pos);
+        let switch_state = interaction::InteractionState::of(ui.ctx(), &response, ui.is_enabled());
+        let fill = lerp_color32_oklab(off_fill, on_fill, pos)
+            .lerp_to_gamma(visuals.text_color(), 0.14 * switch_state.hover);
 
         let bg_stroke = if response.has_focus() {
             visuals.selection.stroke
         } else {
             let off_color = visuals.widgets.inactive.bg_stroke.color;
             let on_color = visuals.selection.stroke.color;
-            let stroke_color = lerp_color32_oklab(off_color, on_color, pos);
+            let stroke_color = lerp_color32_oklab(off_color, on_color, pos)
+                .lerp_to_gamma(visuals.widgets.hovered.bg_stroke.color, switch_state.hover);
             let stroke_w = visuals.widgets.inactive.bg_stroke.width
                 + (visuals.selection.stroke.width - visuals.widgets.inactive.bg_stroke.width) * pos;
             egui::Stroke::new(stroke_w, stroke_color)
@@ -1522,7 +1556,7 @@ fn dropdown(
         Sense::click(),
     );
 
-    let mut interacted = ui.style().interact(&response);
+    let mut interacted = &ui.visuals().widgets.inactive;
     let mut text_color = interacted.text_color();
 
     let popup_response = egui::Popup::menu(&response)
@@ -1622,11 +1656,24 @@ fn dropdown(
         text_color = interacted.text_color();
     }
 
+    let dropdown_state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let (dropdown_fill, dropdown_stroke) = if is_open || response.has_focus() {
+        (interacted.bg_fill, interacted.bg_stroke)
+    } else {
+        (
+            interaction::FillPalette::from_visuals(ui.visuals()).fill(dropdown_state, false),
+            interaction::hover_stroke(
+                dropdown_state,
+                ui.visuals().widgets.inactive.bg_stroke,
+                ui.visuals().widgets.hovered.bg_stroke,
+            ),
+        )
+    };
     ui.painter().rect(
         button_rect,
         6.0,
-        interacted.bg_fill,
-        interacted.bg_stroke,
+        dropdown_fill,
+        dropdown_stroke,
         egui::StrokeKind::Inside,
     );
 
@@ -1738,7 +1785,7 @@ fn searchable_dropdown(
         Sense::click(),
     );
 
-    let mut interacted = ui.style().interact(&response);
+    let mut interacted = &ui.visuals().widgets.inactive;
     let mut text_color = interacted.text_color();
 
     let popup_response = egui::Popup::menu(&response)
@@ -1882,11 +1929,24 @@ fn searchable_dropdown(
         state.query.clear();
     }
 
+    let dropdown_state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let (dropdown_fill, dropdown_stroke) = if is_open || response.has_focus() {
+        (interacted.bg_fill, interacted.bg_stroke)
+    } else {
+        (
+            interaction::FillPalette::from_visuals(ui.visuals()).fill(dropdown_state, false),
+            interaction::hover_stroke(
+                dropdown_state,
+                ui.visuals().widgets.inactive.bg_stroke,
+                ui.visuals().widgets.hovered.bg_stroke,
+            ),
+        )
+    };
     ui.painter().rect(
         button_rect,
         6.0,
-        interacted.bg_fill,
-        interacted.bg_stroke,
+        dropdown_fill,
+        dropdown_stroke,
         egui::StrokeKind::Inside,
     );
 

@@ -12,6 +12,7 @@ use flate2::read::GzDecoder;
 use instances::{InstanceStore, instance_root_path, set_server_favorite, set_world_favorite};
 use launcher_runtime as tokio_runtime;
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 use ui_foundation::{
     DialogPreset, UiMetrics, danger_button, dialog_options, fill_tab_row, secondary_button,
@@ -1032,12 +1033,15 @@ fn render_server_row(
             |ui| {
                 render_server_ping_icon(ui, ping);
                 ui.add_space(SERVER_STATUS_GROUP_GAP);
-                let _ = text_ui.label(
+                let players_response = text_ui.label(
                     ui,
                     (id_source, "players"),
                     player_count.as_deref().unwrap_or(""),
                     &meta_label_options,
                 );
+                if let Some(tip) = server_player_list_tip(ping) {
+                    let _ = crate::ui::style::hover_tip(ui, players_response, tip);
+                }
             },
         );
     });
@@ -1109,6 +1113,28 @@ fn render_server_row(
         }
         _ => {}
     }
+}
+
+fn server_player_list_tip(ping: Option<&ServerPingSnapshot>) -> Option<String> {
+    let snapshot = ping?;
+    let online = snapshot.players_online?;
+    if snapshot.players_sample.is_empty() {
+        return Some(if online == 0 {
+            "No players online".to_owned()
+        } else {
+            "The server did not share which players are online".to_owned()
+        });
+    }
+    let mut tip = format!("Players online ({online}):");
+    for name in &snapshot.players_sample {
+        tip.push_str("\n");
+        tip.push_str(name);
+    }
+    let hidden = (online as usize).saturating_sub(snapshot.players_sample.len());
+    if hidden > 0 {
+        tip.push_str(&format!("\n…and {hidden} more"));
+    }
+    Some(tip)
 }
 
 fn server_player_count_text(ping: Option<&ServerPingSnapshot>) -> Option<String> {
@@ -1409,21 +1435,17 @@ fn render_clickable_entry_row(
         egui::Sense::click(),
     );
     let visuals = ui.visuals();
-    let has_focus = response.has_focus();
-    let fill = if response.is_pointer_button_down_on() {
-        visuals.widgets.active.bg_fill
-    } else if response.hovered() || has_focus {
-        visuals.widgets.hovered.bg_fill
-    } else {
-        visuals.widgets.inactive.weak_bg_fill
-    };
-    let stroke = if has_focus {
-        visuals.selection.stroke
-    } else if response.hovered() {
-        visuals.widgets.hovered.bg_stroke
-    } else {
-        visuals.widgets.inactive.bg_stroke
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let fill = interaction::FillPalette::from_visuals(visuals).fill(state, false);
+    let stroke = interaction::focus_stroke(
+        state,
+        visuals,
+        interaction::hover_stroke(
+            state,
+            visuals.widgets.inactive.bg_stroke,
+            visuals.widgets.hovered.bg_stroke,
+        ),
+    );
     ui.painter().rect(
         rect,
         egui::CornerRadius::same(8),
@@ -1431,17 +1453,7 @@ fn render_clickable_entry_row(
         stroke,
         egui::StrokeKind::Inside,
     );
-    if has_focus {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            egui::CornerRadius::same(10),
-            egui::Stroke::new(
-                (visuals.selection.stroke.width + 1.0).max(2.0),
-                visuals.selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(ui.painter(), visuals, state, rect, 8);
     let inner = rect.shrink2(egui::vec2(
         ACTIVITY_ENTRY_ROW_HORIZONTAL_PADDING,
         ACTIVITY_ENTRY_ROW_VERTICAL_PADDING,
@@ -1520,7 +1532,6 @@ fn render_favorite_star_button(
         egui::Sense::hover(),
     );
     let response = ui.interact(rect, ui.make_persistent_id(id_source), egui::Sense::click());
-    let has_focus = response.has_focus();
     let star_fill = if active {
         ui.visuals().warn_fg_color
     } else {
@@ -1542,36 +1553,32 @@ fn render_favorite_star_button(
         rect.center(),
         egui::vec2(FAVORITE_STAR_ICON_SIZE, FAVORITE_STAR_ICON_SIZE),
     );
-    let button_fill = if response.is_pointer_button_down_on() {
-        ui.visuals().widgets.active.bg_fill
-    } else if response.hovered() || has_focus {
-        ui.visuals().widgets.hovered.bg_fill
-    } else {
-        Color32::TRANSPARENT
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    let button_fill = interaction::FillPalette::new(
+        Color32::TRANSPARENT,
+        ui.visuals().widgets.hovered.bg_fill,
+        ui.visuals().widgets.active.bg_fill,
+        ui.visuals().selection.bg_fill,
+        ui.visuals().text_color(),
+    )
+    .fill(state, false);
     ui.painter()
         .rect_filled(rect, egui::CornerRadius::same(6), button_fill);
     ui.painter().rect_stroke(
         rect,
         egui::CornerRadius::same(6),
-        if has_focus {
-            ui.visuals().selection.stroke
-        } else {
-            ui.visuals().widgets.inactive.bg_stroke
-        },
+        interaction::focus_stroke(
+            state,
+            ui.visuals(),
+            interaction::hover_stroke(
+                state,
+                ui.visuals().widgets.inactive.bg_stroke,
+                ui.visuals().widgets.hovered.bg_stroke,
+            ),
+        ),
         egui::StrokeKind::Inside,
     );
-    if has_focus {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            egui::CornerRadius::same(8),
-            egui::Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 6);
     let mut icon_ui = ui.new_child(
         egui::UiBuilder::new()
             .max_rect(icon_rect)

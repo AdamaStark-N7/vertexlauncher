@@ -1,5 +1,6 @@
 use egui::{self, Frame, ScrollArea, Stroke, Ui};
 use textui::{TextFundamentals, TextKerning, TextUi};
+use textui_egui::interaction;
 use textui_egui::prelude::*;
 
 use crate::{
@@ -91,16 +92,33 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                                 ui.ctx().data_mut(|d| d.insert_persisted(open_id, is_open));
                             }
 
-                            let interact = ui.style().interact(&header_response);
-                            let header_fill = interact.bg_fill;
-                            let header_stroke = interact.bg_stroke;
-                            let header_text_color = interact.text_color();
+                            let header_state =
+                                interaction::InteractionState::of(ui.ctx(), &header_response, true);
+                            let header_fill = interaction::FillPalette::from_visuals(ui.visuals())
+                                .fill(header_state, false);
+                            let header_stroke = interaction::focus_stroke(
+                                header_state,
+                                ui.visuals(),
+                                interaction::hover_stroke(
+                                    header_state,
+                                    ui.visuals().widgets.inactive.bg_stroke,
+                                    ui.visuals().widgets.hovered.bg_stroke,
+                                ),
+                            );
+                            let header_text_color = ui.visuals().text_color();
                             ui.painter().rect(
                                 header_rect,
                                 7.0,
                                 header_fill,
                                 header_stroke,
                                 egui::StrokeKind::Inside,
+                            );
+                            interaction::paint_focus_ring(
+                                ui.painter(),
+                                ui.visuals(),
+                                header_state,
+                                header_rect,
+                                7,
                             );
 
                             let icon_size =

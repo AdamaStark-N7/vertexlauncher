@@ -1,11 +1,13 @@
 use crate::{
-    FRAME_LIMIT_FPS_MAX, FRAME_LIMIT_FPS_MIN, SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX,
-    SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN, SKIN_PREVIEW_MOTION_BLUR_AMOUNT_STEP,
-    SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX, SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN,
-    SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP, SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX,
-    SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN, SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_STEP,
-    SKIN_PREVIEW_MSAA_SAMPLES_MAX, SKIN_PREVIEW_MSAA_SAMPLES_MIN, SKIN_PREVIEW_MSAA_SAMPLES_STEP,
-    UI_FONT_SIZE_MAX, UI_FONT_SIZE_MIN, UI_FONT_SIZE_STEP, UI_FONT_WEIGHT_MAX, UI_FONT_WEIGHT_MIN,
+    FRAME_LIMIT_FPS_MAX, FRAME_LIMIT_FPS_MIN, NOTIFICATION_FADE_OUT_SECONDS_MAX,
+    NOTIFICATION_FADE_OUT_SECONDS_MIN, NOTIFICATION_FADE_OUT_SECONDS_STEP,
+    SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MAX, SKIN_PREVIEW_MOTION_BLUR_AMOUNT_MIN,
+    SKIN_PREVIEW_MOTION_BLUR_AMOUNT_STEP, SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX,
+    SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN, SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP,
+    SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MAX, SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_MIN,
+    SKIN_PREVIEW_MOTION_BLUR_SHUTTER_FRAMES_STEP, SKIN_PREVIEW_MSAA_SAMPLES_MAX,
+    SKIN_PREVIEW_MSAA_SAMPLES_MIN, SKIN_PREVIEW_MSAA_SAMPLES_STEP, UI_FONT_SIZE_MAX,
+    UI_FONT_SIZE_MIN, UI_FONT_SIZE_STEP, UI_FONT_WEIGHT_MAX, UI_FONT_WEIGHT_MIN,
     UI_FONT_WEIGHT_STEP,
 };
 
@@ -227,6 +229,7 @@ impl DropdownSettingId {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FloatSettingId {
     UiFontSize,
+    NotificationFadeOutSeconds,
     SkinPreviewMotionBlurAmount,
     SkinPreviewMotionBlurShutterFrames,
 }
@@ -254,6 +257,16 @@ impl FloatSettingId {
                 min: UI_FONT_SIZE_MIN,
                 max: UI_FONT_SIZE_MAX,
                 step: UI_FONT_SIZE_STEP,
+            },
+            FloatSettingId::NotificationFadeOutSeconds => FloatSettingSpec {
+                id: FloatSettingId::NotificationFadeOutSeconds,
+                label: "Notification Fade Out Time",
+                info_tooltip: Some(
+                    "How long, in seconds, a notification takes to fade away after its timer runs out. 0 makes it disappear instantly. Dismissing a notification with its X button is always instant. Default: 0.25.",
+                ),
+                min: NOTIFICATION_FADE_OUT_SECONDS_MIN,
+                max: NOTIFICATION_FADE_OUT_SECONDS_MAX,
+                step: NOTIFICATION_FADE_OUT_SECONDS_STEP,
             },
             FloatSettingId::SkinPreviewMotionBlurAmount => FloatSettingSpec {
                 id: FloatSettingId::SkinPreviewMotionBlurAmount,

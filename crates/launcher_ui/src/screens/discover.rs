@@ -10,6 +10,7 @@ use egui::Ui;
 use installation::{MinecraftVersionEntry, VersionCatalogFilter, fetch_version_catalog};
 use modrinth::Client as ModrinthClient;
 use textui::TextUi;
+use textui_egui::interaction;
 use textui_egui::{apply_gamepad_scroll_to_registered_id, make_gamepad_scrollable, prelude::*};
 use ui_foundation::{UiMetrics, responsive_columns, themed_text_input};
 
@@ -591,14 +592,6 @@ fn render_discover_tile(
             sel_color.gamma_multiply(0.15),
             egui::Stroke::new(base_stroke_width, sel_color),
         )
-    } else if was_hovered {
-        (
-            ui.visuals().window_fill,
-            egui::Stroke::new(
-                base_stroke_width,
-                ui.visuals().widgets.hovered.bg_stroke.color,
-            ),
-        )
     } else {
         (
             ui.visuals().window_fill,
@@ -713,6 +706,15 @@ fn render_discover_tile(
             page_link_clicked
         });
     let interaction = ui.interact(response.response.rect, id, egui::Sense::click());
+    let tile_state = interaction::InteractionState::of(ui.ctx(), &interaction, true);
+    interaction::paint_card_highlight(
+        ui.painter(),
+        ui.visuals(),
+        tile_state,
+        response.response.rect,
+        style::CORNER_RADIUS_MD,
+        true,
+    );
 
     // Persist state for the next frame so the frame fill/stroke can be set
     // correctly before the frame renders (egui renders before interact returns).
@@ -1224,6 +1226,16 @@ fn render_search_tag_chips(
                         .frame(false)
                         .min_size(egui::vec2(22.0, 22.0));
                         let icon_response = ui.add(icon_button);
+                        let icon_state =
+                            interaction::InteractionState::of(ui.ctx(), &icon_response, true);
+                        interaction::paint_card_highlight(
+                            ui.painter(),
+                            ui.visuals(),
+                            icon_state,
+                            icon_response.rect,
+                            6,
+                            true,
+                        );
                         if crate::ui::style::hover_tip(
                             ui,
                             icon_response,

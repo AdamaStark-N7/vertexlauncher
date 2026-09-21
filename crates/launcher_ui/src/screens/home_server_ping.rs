@@ -190,6 +190,7 @@ fn query_server_snapshot(address: &str) -> ServerPingSnapshot {
         motd: None,
         players_online: None,
         players_max: None,
+        players_sample: Vec::new(),
         checked_at: Instant::now(),
     };
     let (host, port) = split_server_address(address);
@@ -204,6 +205,7 @@ fn query_server_snapshot(address: &str) -> ServerPingSnapshot {
                 motd: None,
                 players_online: None,
                 players_max: None,
+                players_sample: Vec::new(),
                 checked_at: Instant::now(),
             };
         }
@@ -213,13 +215,14 @@ fn query_server_snapshot(address: &str) -> ServerPingSnapshot {
 
     let start = Instant::now();
     match request_server_status(&mut stream, host.as_str(), port) {
-        Ok((motd, players_online, players_max)) => ServerPingSnapshot {
+        Ok(status) => ServerPingSnapshot {
             status: ServerPingStatus::Online {
                 latency_ms: start.elapsed().as_millis() as u64,
             },
-            motd,
-            players_online,
-            players_max,
+            motd: status.motd,
+            players_online: status.players_online,
+            players_max: status.players_max,
+            players_sample: status.players_sample,
             checked_at: Instant::now(),
         },
         Err(_) => ServerPingSnapshot {
@@ -229,6 +232,7 @@ fn query_server_snapshot(address: &str) -> ServerPingSnapshot {
             motd: None,
             players_online: None,
             players_max: None,
+            players_sample: Vec::new(),
             checked_at: Instant::now(),
         },
     }
@@ -262,7 +266,7 @@ fn request_server_status(
     stream: &mut TcpStream,
     host: &str,
     port: u16,
-) -> Result<(Option<String>, Option<u32>, Option<u32>), ()> {
+) -> Result<ParsedServerStatus, ()> {
     send_handshake_packet(stream, host, port)?;
     send_status_request_packet(stream)?;
     let json = read_status_response_packet(stream)?;
@@ -348,7 +352,14 @@ fn read_mc_string_from_stream(stream: &mut TcpStream) -> Result<String, ()> {
     Ok(String::from_utf8_lossy(bytes.as_slice()).to_string())
 }
 
-fn parse_status_json(raw: &str) -> Result<(Option<String>, Option<u32>, Option<u32>), ()> {
+struct ParsedServerStatus {
+    motd: Option<String>,
+    players_online: Option<u32>,
+    players_max: Option<u32>,
+    players_sample: Vec<String>,
+}
+
+fn parse_status_json(raw: &str) -> Result<ParsedServerStatus, ()> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| ())?;
     let motd = value
         .get("description")
@@ -366,7 +377,25 @@ fn parse_status_json(raw: &str) -> Result<(Option<String>, Option<u32>, Option<u
         .and_then(|players| players.get("max"))
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok());
-    Ok((motd, players_online, players_max))
+    let players_sample = value
+        .get("players")
+        .and_then(|players| players.get("sample"))
+        .and_then(|sample| sample.as_array())
+        .map(|sample| {
+            sample
+                .iter()
+                .filter_map(|player| player.get("name")?.as_str())
+                .map(|name| strip_minecraft_format_codes(name).trim().to_owned())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(ParsedServerStatus {
+        motd,
+        players_online,
+        players_max,
+        players_sample,
+    })
 }
 
 fn motd_from_json(value: &serde_json::Value) -> Option<String> {

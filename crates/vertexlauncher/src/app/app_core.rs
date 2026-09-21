@@ -470,7 +470,13 @@ impl VertexApp {
         notification::render_popups(
             ctx,
             &mut self.text_ui,
-            self.config.notification_expiry_bars_empty_left(),
+            &notification::NotificationDisplaySettings {
+                expiry_bars_empty_left: self.config.notification_expiry_bars_empty_left(),
+                fade_out: std::time::Duration::from_secs_f32(
+                    self.config.notification_fade_out_seconds(),
+                ),
+                easing: self.config.notification_easing(),
+            },
             suppressed_progress_source.as_deref(),
         );
 

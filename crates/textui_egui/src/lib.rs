@@ -1,6 +1,7 @@
 mod button_options;
 mod code_block_options;
 mod input_options;
+pub mod interaction;
 mod label_options;
 mod markdown_options;
 mod text_helpers;
@@ -1181,21 +1182,24 @@ fn selectable_button_impl(
         (text_size.y + options.padding.y * 2.0).max(options.min_size.y),
     );
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
-    let has_focus = response.has_focus();
-    let fill = if response.is_pointer_button_down_on() {
-        options.fill_active
-    } else if response.hovered() {
-        options.fill_hovered
-    } else if selected || has_focus {
-        options.fill_selected
-    } else {
-        options.fill
-    };
-    let stroke = if has_focus {
-        ui.visuals().selection.stroke
-    } else {
-        options.stroke
-    };
+    let state = interaction::InteractionState::of(ui.ctx(), &response, ui.is_enabled());
+    let palette = interaction::FillPalette::new(
+        options.fill,
+        options.fill_hovered,
+        options.fill_active,
+        options.fill_selected,
+        options.text_color,
+    );
+    let fill = palette.fill(state, selected);
+    let stroke = interaction::focus_stroke(
+        state,
+        ui.visuals(),
+        interaction::hover_stroke(
+            state,
+            options.stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        ),
+    );
     ui.painter()
         .rect_filled(rect, CornerRadius::same(options.corner_radius), fill);
     if stroke.width > 0.0 {
@@ -1206,22 +1210,21 @@ fn selectable_button_impl(
             egui::StrokeKind::Inside,
         );
     }
-    if has_focus {
-        ui.painter().rect_stroke(
-            rect.expand(2.0),
-            CornerRadius::same(options.corner_radius.saturating_add(2)),
-            egui::Stroke::new(
-                (ui.visuals().selection.stroke.width + 1.0).max(2.0),
-                ui.visuals().selection.stroke.color,
-            ),
-            egui::StrokeKind::Outside,
-        );
-    }
+    interaction::paint_focus_ring(
+        ui.painter(),
+        ui.visuals(),
+        state,
+        rect,
+        options.corner_radius,
+    );
     let text_rect = Rect::from_center_size(rect.center(), text_size);
     let painter = ui.painter().with_clip_rect(ui.clip_rect());
     paint_gpu_scene_in_rect(text_ui, &painter, text_rect, &scene, Color32::WHITE);
     response
 }
+
+/// Minimum gap kept between a tooltip and the edge of the window.
+const TOOLTIP_SCREEN_MARGIN: f32 = 6.0;
 
 fn tooltip_impl(
     text_ui: &mut TextUi,
@@ -1277,10 +1280,26 @@ fn tooltip_at_impl(
     .expect("synchronous textui tooltip scene should always be available");
     let raster_size = egui::vec2(scene.size_points[0], scene.size_points[1]);
     let size = raster_size + options.padding * 2.0;
+    let bounds = ctx.content_rect();
+    let bounds = Rect::from_min_max(
+        egui::pos2(bounds.min.x, bounds.min.y.max(min_y)),
+        bounds.max,
+    )
+    .shrink(TOOLTIP_SCREEN_MARGIN);
     let mut rect = Rect::from_min_size(pointer + options.offset, size);
-    if rect.min.y < min_y {
-        rect = rect.translate(egui::vec2(0.0, min_y - rect.min.y));
+    // Flip to the other side of the pointer when the tooltip would run off the screen.
+    if rect.max.x > bounds.max.x {
+        rect = rect.translate(egui::vec2(-(size.x + options.offset.x * 2.0), 0.0));
     }
+    if rect.max.y > bounds.max.y {
+        rect = rect.translate(egui::vec2(0.0, -(size.y + options.offset.y * 2.0)));
+    }
+    // Then hard-clamp so the whole tooltip stays visible even if it does not fit either side.
+    let shift = egui::vec2(
+        (bounds.min.x - rect.min.x).max(0.0) + (bounds.max.x - rect.max.x).min(0.0),
+        (bounds.min.y - rect.min.y).max(0.0) + (bounds.max.y - rect.max.y).min(0.0),
+    );
+    rect = rect.translate(shift);
     rect = snap_rect_to_pixel_grid(rect, scale);
     let layer_id = egui::LayerId::new(egui::Order::Tooltip, id_source.with("tooltip_layer"));
     let painter = ctx.layer_painter(layer_id);

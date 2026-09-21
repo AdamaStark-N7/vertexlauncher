@@ -1,5 +1,6 @@
 use super::content_updates::update_all_installed_content;
 use super::*;
+use textui_egui::interaction;
 
 pub(super) fn request_content_update(
     state: &mut InstanceScreenState,
@@ -156,16 +157,17 @@ pub(super) fn render_joined_content_browser_controls(
             egui::Sense::hover()
         },
     );
-    let label_visuals = if open_browser_enabled {
-        ui.style().interact(&label_response)
-    } else {
-        &ui.visuals().widgets.inactive
-    };
+    let label_state =
+        interaction::InteractionState::of(ui.ctx(), &label_response, open_browser_enabled);
     ui.painter().rect(
         label_rect,
         label_radius,
-        label_visuals.bg_fill,
-        label_visuals.bg_stroke,
+        interaction::FillPalette::from_visuals(ui.visuals()).fill(label_state, false),
+        interaction::hover_stroke(
+            label_state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        ),
         egui::StrokeKind::Inside,
     );
     let label_inner = label_rect.shrink2(egui::vec2(button_style.padding.x, 0.0));
@@ -200,12 +202,16 @@ pub(super) fn render_joined_content_browser_controls(
         ui.id().with(("instance_add_content_plus", instance_id)),
         egui::Sense::click(),
     );
-    let icon_visuals = ui.style().interact(&icon_response);
+    let icon_state = interaction::InteractionState::of(ui.ctx(), &icon_response, true);
     ui.painter().rect(
         icon_rect,
         icon_radius,
-        icon_visuals.bg_fill,
-        icon_visuals.bg_stroke,
+        interaction::FillPalette::from_visuals(ui.visuals()).fill(icon_state, false),
+        interaction::hover_stroke(
+            icon_state,
+            ui.visuals().widgets.inactive.bg_stroke,
+            ui.visuals().widgets.hovered.bg_stroke,
+        ),
         egui::StrokeKind::Inside,
     );
     let icon_color = ui.visuals().text_color();

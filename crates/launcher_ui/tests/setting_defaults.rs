@@ -24,7 +24,7 @@ fn toggle_tooltips_state_the_real_default() {
 #[test]
 fn numeric_tooltips_state_the_real_default() {
     let config = Config::default();
-    let cases: [(&str, String); 7] = [
+    let cases: [(&str, String); 8] = [
         (
             tooltip(FloatSettingId::UiFontSize.spec().info_tooltip),
             format!("Default: {}.", config.ui_font_size()),
@@ -47,6 +47,14 @@ fn numeric_tooltips_state_the_real_default() {
                 "Default: {}.",
                 config.skin_preview_motion_blur_shutter_frames()
             ),
+        ),
+        (
+            tooltip(
+                FloatSettingId::NotificationFadeOutSeconds
+                    .spec()
+                    .info_tooltip,
+            ),
+            format!("Default: {}.", config.notification_fade_out_seconds()),
         ),
         (
             tooltip(IntSettingId::UiFontWeight.spec().info_tooltip),
