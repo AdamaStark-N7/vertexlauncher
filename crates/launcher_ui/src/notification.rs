@@ -48,6 +48,8 @@ pub enum Severity {
 pub struct NotificationAction {
     pub label: String,
     pub callback: Arc<dyn Fn(&egui::Context) + Send + Sync>,
+    /// Draws the label in the theme's danger color, for destructive actions.
+    pub danger: bool,
 }
 
 impl NotificationAction {
@@ -58,7 +60,13 @@ impl NotificationAction {
         Self {
             label: label.into(),
             callback: Arc::new(callback),
+            danger: false,
         }
+    }
+
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
     }
 }
 

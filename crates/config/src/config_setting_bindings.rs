@@ -44,6 +44,7 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled,
+            insecure_file_account_storage: _,
             window_transparency: _,
             legacy_window_blur_enabled: _,
             windows_backdrop_type: _,

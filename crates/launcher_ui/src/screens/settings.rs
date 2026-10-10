@@ -42,6 +42,9 @@ mod graphics_settings;
 #[path = "settings/appearance_settings.rs"]
 mod appearance_settings;
 
+#[path = "settings/privacy_settings.rs"]
+mod privacy_settings;
+
 #[path = "settings/instance_defaults.rs"]
 mod instance_defaults;
 
@@ -50,6 +53,7 @@ use self::graphics_settings::*;
 use self::instance_defaults::*;
 use self::java_runtime::render_java_runtime_settings;
 use self::memory_slider_max_state::MemorySliderMaxState;
+use self::privacy_settings::*;
 use self::text_settings::*;
 
 pub fn render(
@@ -68,6 +72,7 @@ pub fn render(
             render_settings_contents(ui, text_ui, config, options);
         },
     );
+    render_insecure_storage_confirm(ui.ctx(), text_ui, config);
 }
 
 pub fn prewarm(
@@ -136,7 +141,7 @@ fn render_settings_contents(
         ui,
         text_ui,
         "Privacy",
-        "On-stream safety settings.",
+        "On-stream safety and account security settings.",
         |ui, text_ui| {
             render_selected_toggles(
                 ui,
@@ -144,6 +149,7 @@ fn render_settings_contents(
                 config,
                 &[config::ToggleSettingId::StreamerModeEnabled],
             );
+            render_insecure_storage_setting(ui, text_ui, config);
         },
     );
 

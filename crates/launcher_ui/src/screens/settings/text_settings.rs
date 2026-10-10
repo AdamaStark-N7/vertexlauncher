@@ -42,7 +42,54 @@ pub(super) fn render_theme_setting(
             config.set_theme_id(theme.id.clone());
         }
     }
+    if text_ui
+        .button(
+            ui,
+            "theme_export_json",
+            "Export theme as JSON",
+            &style::neutral_button(ui),
+        )
+        .on_hover_text("Saves the selected theme as a JSON file in the themes folder, to use as a starting point for your own theme.")
+        .clicked()
+        && let Some(theme) = available_themes.get(selected_theme_index)
+    {
+        export_theme_json(theme);
+    }
     ui.add_space(style::SPACE_MD);
+}
+
+fn export_theme_json(theme: &Theme) {
+    match theme.export_json_to_themes_dir() {
+        Ok(path) => {
+            let folder = path.parent().map(Path::to_path_buf);
+            crate::notification::emit_with_actions(
+                crate::notification::Severity::Info,
+                "Settings",
+                format!(
+                    "Exported {} to {}. Give the copy a new \"id\" and restart to load it as its own theme.",
+                    theme.name,
+                    path.display()
+                ),
+                vec![crate::notification::NotificationAction::new(
+                    "Open folder",
+                    move |_ctx| {
+                        if let Some(folder) = folder.as_deref()
+                            && let Err(err) = crate::desktop::open_in_file_manager(folder)
+                        {
+                            crate::notification::error!(
+                                "Settings",
+                                "Failed to open the themes folder: {}",
+                                err
+                            );
+                        }
+                    },
+                )],
+            );
+        }
+        Err(err) => {
+            crate::notification::error!("Settings", "Failed to export theme: {}", err);
+        }
+    }
 }
 
 pub(super) fn render_ui_font_settings(

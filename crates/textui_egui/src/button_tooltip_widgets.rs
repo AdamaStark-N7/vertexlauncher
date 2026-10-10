@@ -1,5 +1,26 @@
 use super::*;
 
+/// An icon drawn after a button's label. The label and icon are centered together as one group.
+pub struct TrailingIcon<'a> {
+    pub size: f32,
+    /// Space between the label and the icon.
+    pub gap: f32,
+    /// Draws the icon into the rect it is given.
+    pub paint: &'a mut dyn FnMut(&mut Ui, Rect),
+}
+
+/// Like [`TextUiExt::button`], with an icon after the label.
+pub fn button_with_trailing_icon(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    text: &str,
+    options: &ButtonOptions,
+    icon: TrailingIcon<'_>,
+) -> Response {
+    button_impl(text_ui, ui, id_source, text, false, options, Some(icon))
+}
+
 pub(super) fn selectable_button_impl(
     text_ui: &mut TextUi,
     ui: &mut Ui,
@@ -7,6 +28,18 @@ pub(super) fn selectable_button_impl(
     text: &str,
     selected: bool,
     options: &ButtonOptions,
+) -> Response {
+    button_impl(text_ui, ui, id_source, text, selected, options, None)
+}
+
+fn button_impl(
+    text_ui: &mut TextUi,
+    ui: &mut Ui,
+    id_source: impl Hash,
+    text: &str,
+    selected: bool,
+    options: &ButtonOptions,
+    mut trailing_icon: Option<TrailingIcon<'_>>,
 ) -> Response {
     let mut label_style = LabelOptions {
         font_size: options.font_size,
@@ -42,8 +75,12 @@ pub(super) fn selectable_button_impl(
     })
     .expect("synchronous textui button scene should always be available");
     let text_size = egui::vec2(scene.size_points[0], scene.size_points[1]);
+    let icon_extent = trailing_icon
+        .as_ref()
+        .map_or(0.0, |icon| icon.gap + icon.size);
+    let content_width = text_size.x + icon_extent;
     let desired_size = egui::vec2(
-        (text_size.x + options.padding.x * 2.0).max(options.min_size.x),
+        (content_width + options.padding.x * 2.0).max(options.min_size.x),
         (text_size.y + options.padding.y * 2.0).max(options.min_size.y),
     );
     let (rect, response) = ui.allocate_exact_size(desired_size, Sense::click());
@@ -82,9 +119,24 @@ pub(super) fn selectable_button_impl(
         rect,
         options.corner_radius,
     );
-    let text_rect = Rect::from_center_size(rect.center(), text_size);
+    // Center the label and icon together, not the label alone.
+    let content_left = rect.center().x - content_width * 0.5;
+    let text_rect = Rect::from_min_size(
+        egui::pos2(content_left, rect.center().y - text_size.y * 0.5),
+        text_size,
+    );
     let painter = ui.painter().with_clip_rect(ui.clip_rect());
     paint_gpu_scene_in_rect(text_ui, &painter, text_rect, &scene, Color32::WHITE);
+    if let Some(icon) = trailing_icon.as_mut() {
+        let icon_rect = Rect::from_center_size(
+            egui::pos2(
+                text_rect.right() + icon.gap + icon.size * 0.5,
+                rect.center().y,
+            ),
+            egui::vec2(icon.size, icon.size),
+        );
+        (icon.paint)(ui, icon_rect);
+    }
     response
 }
 

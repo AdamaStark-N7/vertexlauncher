@@ -11,6 +11,8 @@ use super::screenshot_common::{
 mod delete;
 #[path = "home_screenshots/gallery.rs"]
 mod gallery;
+#[path = "home_screenshots/pending_open.rs"]
+mod pending_open;
 #[path = "home_screenshots/scan.rs"]
 mod scan;
 #[path = "home_screenshots/screenshot_candidate.rs"]
@@ -40,6 +42,7 @@ mod viewer_modal;
 
 pub(super) use self::delete::*;
 pub(super) use self::gallery::*;
+pub(super) use self::pending_open::*;
 pub(super) use self::scan::*;
 pub(super) use self::screenshot_candidate::ScreenshotCandidate;
 pub(super) use self::screenshot_entry::ScreenshotEntry;

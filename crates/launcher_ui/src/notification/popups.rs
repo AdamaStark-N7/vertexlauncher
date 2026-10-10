@@ -209,16 +209,27 @@ pub fn render_popups(
                     if !entry.actions.is_empty() {
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = style::SPACE_SM;
+                            // Every button gets an equal share of the row, minus the gaps.
+                            let action_count = entry.actions.len() as f32;
+                            let button_width = ((ui.available_width()
+                                - style::SPACE_SM * (action_count - 1.0))
+                                / action_count)
+                                .max(1.0);
                             for (action_index, action) in entry.actions.iter().enumerate() {
+                                let mut button_options = ui_foundation::secondary_button(
+                                    ui,
+                                    egui::vec2(button_width, style::CONTROL_HEIGHT),
+                                );
+                                if action.danger {
+                                    button_options.text_color = ui.visuals().error_fg_color;
+                                }
                                 let clicked = text_ui
                                     .button(
                                         ui,
                                         ("notif-action", entry.id, action_index),
                                         action.label.as_str(),
-                                        &ui_foundation::secondary_button(
-                                            ui,
-                                            egui::vec2(72.0, style::CONTROL_HEIGHT),
-                                        ),
+                                        &button_options,
                                     )
                                     .clicked();
                                 if clicked {

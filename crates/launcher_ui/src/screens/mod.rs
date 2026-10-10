@@ -45,6 +45,7 @@ pub use content_browser::sort_dropdown_id as content_browser_sort_dropdown_id;
 pub use content_browser::version_dropdown_id as content_browser_version_dropdown_id;
 pub use discover::{DiscoverInstallRequest, DiscoverInstallSource, DiscoverState};
 pub use home::HomePresenceSection;
+pub use home::open_screenshot_in_viewer;
 pub use home::purge_inactive_state as purge_inactive_home_state;
 pub use home::purge_screenshot_state as purge_home_screenshot_state;
 pub use home::set_gamepad_screenshot_viewer_input as set_home_screenshot_viewer_gamepad_input;
@@ -185,6 +186,22 @@ fn shell_escape(value: &str) -> String {
         return value.to_owned();
     }
     format!("\"{}\"", value.replace('"', "\\\""))
+}
+
+/// Asks the app to switch to `screen` on its next frame. Lets code with only an
+/// [`egui::Context`] (e.g. a notification button) navigate.
+pub(crate) fn request_screen(ctx: &egui::Context, screen: AppScreen) {
+    ctx.data_mut(|data| data.insert_temp(egui::Id::new("requested_screen"), screen));
+}
+
+/// Takes the screen requested through [`request_screen`], if any.
+pub fn take_requested_screen(ctx: &egui::Context) -> Option<AppScreen> {
+    ctx.data_mut(|data| {
+        let id = egui::Id::new("requested_screen");
+        let screen = data.get_temp::<AppScreen>(id);
+        data.remove::<AppScreen>(id);
+        screen
+    })
 }
 
 pub(crate) fn queue_launch_intent(ctx: &egui::Context, intent: PendingLaunchIntent) {

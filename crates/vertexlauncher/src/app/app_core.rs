@@ -189,6 +189,8 @@ impl VertexApp {
         };
 
         config.normalize();
+        // Read by account loading below, so set it before `AuthState::load`.
+        auth::set_insecure_file_storage(config.insecure_file_account_storage());
         #[cfg(target_os = "macos")]
         if config.window_transparency().uses_native_blur() {
             downgrade_window_blur_for_startup(

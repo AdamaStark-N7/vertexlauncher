@@ -220,6 +220,8 @@ pub struct Config {
     graphics_adapter_explicit_hash: Option<u64>,
     graphics_api_preference: GraphicsApiPreference,
     streamer_mode_enabled: bool,
+    /// Keep sign-in tokens in a plain-text file instead of the OS keyring. Off by default.
+    insecure_file_account_storage: bool,
     #[serde(default = "default_window_transparency")]
     window_transparency: WindowTransparency,
     #[serde(default, rename = "window_blur_enabled", skip_serializing)]
@@ -345,6 +347,15 @@ impl Config {
 
     pub fn streamer_mode_enabled(&self) -> bool {
         self.streamer_mode_enabled
+    }
+
+    /// Whether sign-in tokens are kept in a plain-text file instead of the OS keyring.
+    pub fn insecure_file_account_storage(&self) -> bool {
+        self.insecure_file_account_storage
+    }
+
+    pub fn set_insecure_file_account_storage(&mut self, enabled: bool) {
+        self.insecure_file_account_storage = enabled;
     }
 
     /// Returns whether launcher-owned Discord Rich Presence is enabled.
@@ -1173,6 +1184,7 @@ impl Default for Config {
             graphics_adapter_explicit_hash: None,
             graphics_api_preference: GraphicsApiPreference::Auto,
             streamer_mode_enabled: false,
+            insecure_file_account_storage: false,
             window_transparency: default_window_transparency(),
             legacy_window_blur_enabled: None,
             windows_backdrop_type: default_windows_backdrop_type(),

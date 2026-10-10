@@ -38,6 +38,7 @@ use textui::{
 
 pub use button_options::{ButtonOptions, ButtonTypography, set_button_typography};
 use button_tooltip_widgets::*;
+pub use button_tooltip_widgets::{TrailingIcon, button_with_trailing_icon};
 pub use code_block_options::CodeBlockOptions;
 use code_markdown_widgets::*;
 pub use gamepad_scroll::*;

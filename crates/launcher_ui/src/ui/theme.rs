@@ -528,6 +528,195 @@ impl Theme {
     }
 }
 
+/// The Catppuccin colors a launcher theme is built from. Every flavor shares the same roles, so
+/// one mapping (see [`Theme::from_catppuccin`]) covers all four.
+struct CatppuccinPalette {
+    mantle: u32,
+    base: u32,
+    surface0: u32,
+    surface1: u32,
+    surface2: u32,
+    overlay0: u32,
+    text: u32,
+    subtext0: u32,
+    mauve: u32,
+    blue: u32,
+    red: u32,
+    yellow: u32,
+    green: u32,
+    sky: u32,
+}
+
+impl Theme {
+    fn from_catppuccin(id: &str, flavor: &str, palette: &CatppuccinPalette) -> Self {
+        Self {
+            id: id.to_owned(),
+            name: format!("Catppuccin {flavor}"),
+            description: format!("The {flavor} flavor of the Catppuccin palette."),
+            bg_dark: Oklch::from_hex(palette.mantle),
+            bg: Oklch::from_hex(palette.base),
+            bg_light: Oklch::from_hex(palette.surface0),
+            text: Oklch::from_hex(palette.text),
+            text_muted: Oklch::from_hex(palette.subtext0),
+            highlight: Oklch::from_hex(palette.surface2),
+            border: Oklch::from_hex(palette.overlay0),
+            border_muted: Oklch::from_hex(palette.surface1),
+            primary: Oklch::from_hex(palette.mauve),
+            secondary: Oklch::from_hex(palette.blue),
+            danger: Oklch::from_hex(palette.red),
+            warning: Oklch::from_hex(palette.yellow),
+            success: Oklch::from_hex(palette.green),
+            info: Oklch::from_hex(palette.sky),
+            motion: ThemeMotion::default(),
+        }
+    }
+
+    fn catppuccin_latte() -> Self {
+        Self::from_catppuccin(
+            "catppuccin_latte",
+            "Latte",
+            &CatppuccinPalette {
+                mantle: 0xe6e9ef,
+                base: 0xeff1f5,
+                surface0: 0xccd0da,
+                surface1: 0xbcc0cc,
+                surface2: 0xacb0be,
+                overlay0: 0x9ca0b0,
+                text: 0x4c4f69,
+                subtext0: 0x6c6f85,
+                mauve: 0x8839ef,
+                blue: 0x1e66f5,
+                red: 0xd20f39,
+                yellow: 0xdf8e1d,
+                green: 0x40a02b,
+                sky: 0x04a5e5,
+            },
+        )
+    }
+
+    fn catppuccin_frappe() -> Self {
+        Self::from_catppuccin(
+            "catppuccin_frappe",
+            "Frappé",
+            &CatppuccinPalette {
+                mantle: 0x292c3c,
+                base: 0x303446,
+                surface0: 0x414559,
+                surface1: 0x51576d,
+                surface2: 0x626880,
+                overlay0: 0x737994,
+                text: 0xc6d0f5,
+                subtext0: 0xa5adce,
+                mauve: 0xca9ee6,
+                blue: 0x8caaee,
+                red: 0xe78284,
+                yellow: 0xe5c890,
+                green: 0xa6d189,
+                sky: 0x99d1db,
+            },
+        )
+    }
+
+    fn catppuccin_macchiato() -> Self {
+        Self::from_catppuccin(
+            "catppuccin_macchiato",
+            "Macchiato",
+            &CatppuccinPalette {
+                mantle: 0x1e2030,
+                base: 0x24273a,
+                surface0: 0x363a4f,
+                surface1: 0x494d64,
+                surface2: 0x5b6078,
+                overlay0: 0x6e738d,
+                text: 0xcad3f5,
+                subtext0: 0xa5adcb,
+                mauve: 0xc6a0f6,
+                blue: 0x8aadf4,
+                red: 0xed8796,
+                yellow: 0xeed49f,
+                green: 0xa6da95,
+                sky: 0x91d7e3,
+            },
+        )
+    }
+
+    fn catppuccin_mocha() -> Self {
+        Self::from_catppuccin(
+            "catppuccin_mocha",
+            "Mocha",
+            &CatppuccinPalette {
+                mantle: 0x181825,
+                base: 0x1e1e2e,
+                surface0: 0x313244,
+                surface1: 0x45475a,
+                surface2: 0x585b70,
+                overlay0: 0x6c7086,
+                text: 0xcdd6f4,
+                subtext0: 0xa6adc8,
+                mauve: 0xcba6f7,
+                blue: 0x89b4fa,
+                red: 0xf38ba8,
+                yellow: 0xf9e2af,
+                green: 0xa6e3a1,
+                sky: 0x89dceb,
+            },
+        )
+    }
+
+    /// Serializes this theme as pretty JSON, a starting point for writing a new theme.
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    /// Writes this theme as `<id>.json` into the themes directory and returns the file path.
+    ///
+    /// Theme files in that directory are loaded at startup, so editing the exported file (and
+    /// giving it a new `id`) is enough to add a theme of your own.
+    pub fn export_json_to_themes_dir(&self) -> Result<PathBuf, String> {
+        let dir = app_paths::themes_dir();
+        std::fs::create_dir_all(&dir)
+            .map_err(|err| format!("failed to create {}: {err}", dir.display()))?;
+        let file_name: String = self
+            .id
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        let path = dir.join(format!("{file_name}.json"));
+        let json = self.to_json().map_err(|err| err.to_string())?;
+        std::fs::write(&path, json)
+            .map_err(|err| format!("failed to write {}: {err}", path.display()))?;
+        Ok(path)
+    }
+}
+
+impl Oklch {
+    /// Converts a `0xRRGGBB` sRGB color to Oklch.
+    pub fn from_hex(rgb: u32) -> Self {
+        let channel = |shift: u32| srgb_to_linear(((rgb >> shift) & 0xff) as f32 / 255.0);
+        let (r, g, b) = (channel(16), channel(8), channel(0));
+
+        let l = (0.412_221_47 * r + 0.536_332_55 * g + 0.051_445_995 * b).cbrt();
+        let m = (0.211_903_5 * r + 0.680_699_5 * g + 0.107_396_96 * b).cbrt();
+        let s = (0.088_302_46 * r + 0.281_718_85 * g + 0.629_978_7 * b).cbrt();
+
+        let lightness = 0.210_454_26 * l + 0.793_617_8 * m - 0.004_072_047 * s;
+        let a = 1.977_998_5 * l - 2.428_592_2 * m + 0.450_593_7 * s;
+        let b = 0.025_904_037 * l + 0.782_771_77 * m - 0.808_675_77 * s;
+
+        Self {
+            l: lightness,
+            c: a.hypot(b),
+            h: b.atan2(a).to_degrees().rem_euclid(360.0),
+        }
+    }
+}
+
 impl Oklch {
     pub fn to_color32(self) -> Color32 {
         let h_rad = self.h.to_radians();
@@ -566,6 +755,10 @@ fn ensure_themes_dir_and_defaults(dir: &Path) {
         Theme::default_light(),
         Theme::high_contrast(),
         Theme::purple_dream(),
+        Theme::catppuccin_latte(),
+        Theme::catppuccin_frappe(),
+        Theme::catppuccin_macchiato(),
+        Theme::catppuccin_mocha(),
     ] {
         let path = dir.join(format!("{}.toml", theme.id));
         if path.exists() {
@@ -601,7 +794,7 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
         let Some(ext) = path.extension().and_then(|ext| ext.to_str()) else {
             continue;
         };
-        if ext != "toml" {
+        if ext != "toml" && ext != "json" {
             continue;
         }
 
@@ -613,7 +806,12 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
                 continue;
             }
         };
-        let Ok(mut theme) = toml::from_str::<Theme>(&contents) else {
+        let parsed = if ext == "json" {
+            serde_json::from_str::<Theme>(&contents).ok()
+        } else {
+            toml::from_str::<Theme>(&contents).ok()
+        };
+        let Some(mut theme) = parsed else {
             continue;
         };
 
@@ -632,6 +830,14 @@ fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
     }
 
     themes
+}
+
+fn srgb_to_linear(value: f32) -> f32 {
+    if value <= 0.04045 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn linear_to_srgb_u8(value: f32) -> u8 {
@@ -684,4 +890,37 @@ impl ThemeAlphaProfile {
 
 fn scale_alpha(alpha: u8, ui_opacity_percent: u8) -> u8 {
     ((alpha as u32).saturating_mul(ui_opacity_percent as u32) / 100) as u8
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hex_to_oklch_round_trips_through_color32() {
+        for hex in [
+            0x1e1e2e_u32,
+            0xcdd6f4,
+            0xf38ba8,
+            0xeff1f5,
+            0x8839ef,
+            0x000000,
+            0xffffff,
+        ] {
+            let color = Oklch::from_hex(hex).to_color32();
+            let expected = [(hex >> 16) as u8, (hex >> 8) as u8, hex as u8];
+            for (got, want) in [color.r(), color.g(), color.b()].into_iter().zip(expected) {
+                assert!(got.abs_diff(want) <= 1, "{hex:06x}: {got} vs {want}");
+            }
+        }
+    }
+
+    #[test]
+    fn exported_json_loads_back_as_the_same_theme() {
+        let theme = Theme::catppuccin_mocha();
+        let json = theme.to_json().unwrap();
+        let loaded: Theme = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.id, theme.id);
+        assert_eq!(loaded.text.to_color32(), theme.text.to_color32());
+    }
 }

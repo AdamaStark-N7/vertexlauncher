@@ -1,5 +1,11 @@
 use std::{
-    sync::{LazyLock, Mutex},
+    collections::BTreeMap,
+    fs,
+    path::PathBuf,
+    sync::{
+        LazyLock, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     thread,
 };
 
@@ -13,6 +19,114 @@ use crate::constants::{
 use crate::error::AuthError;
 
 static SECURE_STORE_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+static INSECURE_FILE_STORAGE: AtomicBool = AtomicBool::new(false);
+
+/// Switches refresh-token storage between the OS keyring (default) and a plain-text file next
+/// to the account cache. The file is NOT encrypted: anyone who can read it can sign in as the
+/// account. It exists for systems where the keyring is unusable, such as a Steam Deck.
+///
+/// Tokens move between the two stores as they are next read or written, so flipping this does
+/// not sign anyone out.
+pub fn set_insecure_file_storage(enabled: bool) {
+    INSECURE_FILE_STORAGE.store(enabled, Ordering::Relaxed);
+}
+
+fn insecure_file_storage_enabled() -> bool {
+    INSECURE_FILE_STORAGE.load(Ordering::Relaxed)
+}
+
+/// Where refresh tokens are kept while insecure file storage is in use.
+pub fn insecure_token_file_path() -> PathBuf {
+    crate::cache::account_cache_path().with_file_name("refresh_tokens.json")
+}
+
+/// Plain-text refresh-token file, keyed by Minecraft profile id.
+mod token_file {
+    use super::*;
+
+    fn read_all() -> BTreeMap<String, String> {
+        let path = insecure_token_file_path();
+        match fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_else(|err| {
+                tracing::warn!(
+                    target: "vertexlauncher/auth/secret_store",
+                    path = %path.display(),
+                    error = %err,
+                    "ignoring unreadable refresh-token file"
+                );
+                BTreeMap::new()
+            }),
+            Err(_) => BTreeMap::new(),
+        }
+    }
+
+    fn write_all(tokens: &BTreeMap<String, String>) -> Result<(), AuthError> {
+        let path = insecure_token_file_path();
+        if tokens.is_empty() {
+            return match fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(file_error(&path, "remove", err)),
+            };
+        }
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|err| file_error(parent, "create", err))?;
+        }
+        let json = serde_json::to_string(tokens)?;
+        // Write beside the target and rename, so a crash never leaves a half-written file.
+        let temp = path.with_extension("json.tmp");
+        write_private(&temp, json.as_bytes()).map_err(|err| file_error(&temp, "write", err))?;
+        fs::rename(&temp, &path).map_err(|err| file_error(&path, "replace", err))
+    }
+
+    #[cfg(unix)]
+    fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)
+    }
+
+    #[cfg(not(unix))]
+    fn write_private(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+        fs::write(path, contents)
+    }
+
+    fn file_error(path: &std::path::Path, action: &str, err: std::io::Error) -> AuthError {
+        AuthError::SecureStorage(format!(
+            "Failed to {action} the refresh-token file {}: {err}",
+            path.display()
+        ))
+    }
+
+    pub(super) fn load(profile_id: &str) -> Option<String> {
+        read_all()
+            .remove(profile_id)
+            .filter(|token| !token.is_empty())
+    }
+
+    pub(super) fn store(profile_id: &str, token: &str) -> Result<(), AuthError> {
+        let mut tokens = read_all();
+        tokens.insert(profile_id.to_owned(), token.to_owned());
+        write_all(&tokens)
+    }
+
+    pub(super) fn remove(profile_id: &str) -> Result<(), AuthError> {
+        let mut tokens = read_all();
+        if tokens.remove(profile_id).is_some() {
+            write_all(&tokens)?;
+        }
+        Ok(())
+    }
+}
 
 pub(crate) enum RefreshTokenLoadResult {
     Present(String),
@@ -91,7 +205,28 @@ fn delete_accounts_state_unlocked() -> Result<(), AuthError> {
 }
 
 pub(crate) fn load_refresh_token(profile_id: &str) -> Result<RefreshTokenLoadResult, AuthError> {
-    with_secure_store_lock(|| load_refresh_token_unlocked(profile_id))
+    with_secure_store_lock(|| {
+        // The file wins over the keyring: it is only ever written while insecure storage is on,
+        // so it holds the newest token, and the keyring copy may predate a rotation.
+        if let Some(token) = token_file::load(profile_id) {
+            if !insecure_file_storage_enabled()
+                && store_refresh_token_unlocked(profile_id, &token).is_ok()
+            {
+                // Insecure storage was switched off and the keyring took the token back.
+                let _ = token_file::remove(profile_id);
+            }
+            return Ok(RefreshTokenLoadResult::Present(token));
+        }
+
+        let loaded = load_refresh_token_unlocked(profile_id)?;
+        if insecure_file_storage_enabled()
+            && let RefreshTokenLoadResult::Present(token) = &loaded
+        {
+            // Insecure storage was just switched on: carry the keyring token over.
+            let _ = token_file::store(profile_id, token);
+        }
+        Ok(loaded)
+    })
 }
 
 fn load_refresh_token_unlocked(profile_id: &str) -> Result<RefreshTokenLoadResult, AuthError> {
@@ -125,7 +260,15 @@ fn load_refresh_token_unlocked(profile_id: &str) -> Result<RefreshTokenLoadResul
 }
 
 pub(crate) fn store_refresh_token(profile_id: &str, refresh_token: &str) -> Result<(), AuthError> {
-    with_secure_store_lock(|| store_refresh_token_unlocked(profile_id, refresh_token))
+    with_secure_store_lock(|| {
+        if insecure_file_storage_enabled() {
+            return token_file::store(profile_id, refresh_token);
+        }
+        store_refresh_token_unlocked(profile_id, refresh_token)?;
+        // Anything left in the file from insecure mode is now stale.
+        let _ = token_file::remove(profile_id);
+        Ok(())
+    })
 }
 
 fn store_refresh_token_unlocked(profile_id: &str, refresh_token: &str) -> Result<(), AuthError> {
@@ -171,6 +314,7 @@ fn store_refresh_token_unlocked(profile_id: &str, refresh_token: &str) -> Result
 
 pub(crate) fn delete_refresh_token(profile_id: &str) -> Result<(), AuthError> {
     with_secure_store_lock(|| {
+        token_file::remove(profile_id)?;
         delete_refresh_token_for_service_unlocked(REFRESH_TOKEN_SERVICE, profile_id)?;
         delete_refresh_token_for_service_unlocked(LEGACY_REFRESH_TOKEN_SERVICE, profile_id)?;
         Ok(())
@@ -354,4 +498,50 @@ fn should_retry_refresh_token_verification(err: &KeyringError) -> bool {
 
 fn sleep_before_refresh_token_retry() {
     thread::sleep(SECURE_STORE_RETRY_DELAY);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insecure_file_storage_round_trips_and_deletes_tokens() {
+        let dir =
+            std::env::temp_dir().join(format!("vertex-insecure-token-test-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // SAFETY: no other test in this crate reads or writes this variable.
+        unsafe { std::env::set_var("VERTEX_ACCOUNT_CACHE_PATH", dir.join("accounts.json")) };
+        set_insecure_file_storage(true);
+
+        store_refresh_token("profile-a", "token-a").unwrap();
+        store_refresh_token("profile-b", "token-b").unwrap();
+        assert!(insecure_token_file_path().starts_with(&dir));
+        assert!(matches!(
+            load_refresh_token("profile-a").unwrap(),
+            RefreshTokenLoadResult::Present(token) if token == "token-a"
+        ));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(insecure_token_file_path())
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "token file must not be group/world accessible"
+            );
+        }
+
+        token_file::remove("profile-a").unwrap();
+        assert!(token_file::load("profile-a").is_none());
+        assert_eq!(token_file::load("profile-b").as_deref(), Some("token-b"));
+        token_file::remove("profile-b").unwrap();
+        assert!(!insecure_token_file_path().exists());
+
+        set_insecure_file_storage(false);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

@@ -120,7 +120,7 @@ pub(crate) fn clear_cached_account() -> Result<(), AuthError> {
     clear_cached_accounts()
 }
 
-fn account_cache_path() -> PathBuf {
+pub(crate) fn account_cache_path() -> PathBuf {
     std::env::var("VERTEX_ACCOUNT_CACHE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| default_account_cache_path())

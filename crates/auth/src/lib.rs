@@ -16,6 +16,7 @@ use tokio::runtime::Handle;
 
 pub use constants::{BUILTIN_MICROSOFT_CLIENT_ID, BUILTIN_MICROSOFT_TENANT};
 pub use error::AuthError;
+pub use secret_store::{insecure_token_file_path, set_insecure_file_storage};
 pub use types::{
     CachedAccount, CachedAccountRenewalEvent, CachedAccountsState, DeviceCodeLoginFlow,
     DeviceCodePrompt, LoginEvent, MinecraftCapeState, MinecraftLoginFlow, MinecraftProfileState,

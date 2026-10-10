@@ -219,35 +219,34 @@ pub(in super::super) fn render_runtime_row(
                     if runtime_running {
                         render_stop_runtime_button(ui, id, &button_style, running_avatar_png)
                     } else {
-                        let launch_response = text_ui.button(
+                        let icon_color = button_style.text_color;
+                        let mut paint_play_icon = |ui: &mut Ui, icon_rect: egui::Rect| {
+                            let _ = ui.put(
+                                icon_rect,
+                                egui::Image::from_bytes(
+                                    format!(
+                                        "bytes://instance/runtime-play/{id}-{:02x}{:02x}{:02x}.svg",
+                                        icon_color.r(),
+                                        icon_color.g(),
+                                        icon_color.b()
+                                    ),
+                                    crate::ui::svg_tint::tint_svg(assets::PLAY_SVG, icon_color),
+                                )
+                                .fit_to_exact_size(icon_rect.size()),
+                            );
+                        };
+                        textui_egui::button_with_trailing_icon(
+                            text_ui,
                             ui,
                             ("instance_runtime_toggle", id),
                             "Launch",
                             &button_style,
-                        );
-                        let icon_size = 16.0;
-                        let icon_color = button_style.text_color;
-                        let icon_rect = egui::Rect::from_center_size(
-                            egui::pos2(
-                                launch_response.rect.right() - 12.0 - icon_size * 0.5,
-                                launch_response.rect.center().y,
-                            ),
-                            egui::vec2(icon_size, icon_size),
-                        );
-                        let _ = ui.put(
-                            icon_rect,
-                            egui::Image::from_bytes(
-                                format!(
-                                    "bytes://instance/runtime-play/{id}-{:02x}{:02x}{:02x}.svg",
-                                    icon_color.r(),
-                                    icon_color.g(),
-                                    icon_color.b()
-                                ),
-                                crate::ui::svg_tint::tint_svg(assets::PLAY_SVG, icon_color),
-                            )
-                            .fit_to_exact_size(icon_rect.size()),
-                        );
-                        launch_response
+                            textui_egui::TrailingIcon {
+                                size: 16.0,
+                                gap: style::SPACE_SM,
+                                paint: &mut paint_play_icon,
+                            },
+                        )
                     }
                 })
                 .inner;

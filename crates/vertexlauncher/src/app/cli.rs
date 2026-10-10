@@ -487,6 +487,8 @@ fn startup_config() -> Config {
     match load_config() {
         LoadConfigResult::Loaded(mut config) => {
             config.normalize();
+            // Account loading reads this, so it must be set before any account is touched.
+            auth::set_insecure_file_storage(config.insecure_file_account_storage());
             config
         }
         LoadConfigResult::Missing { .. } => Config::default(),

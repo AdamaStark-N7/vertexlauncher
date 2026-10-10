@@ -15,7 +15,6 @@ use egui::Context;
 use instances::{InstanceStore, instance_root_path};
 use launcher_runtime as tokio_runtime;
 
-use crate::desktop;
 use crate::notification::{self, NotificationAction, Severity};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -138,10 +137,8 @@ fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
     let copy_path = path.clone();
     let remove_path = path;
     vec![
-        NotificationAction::new("View", move |_ctx| {
-            if let Err(err) = desktop::open_in_file_manager(view_path.as_path()) {
-                notification::error!("screenshots", "Failed to open screenshot: {}", err);
-            }
+        NotificationAction::new("View", move |ctx| {
+            crate::screens::open_screenshot_in_viewer(ctx, view_path.clone());
         }),
         NotificationAction::new("Copy", move |ctx| {
             match copy_to_clipboard(ctx, &copy_path) {
@@ -168,7 +165,8 @@ fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
                     }
                 }
             });
-        }),
+        })
+        .danger(),
     ]
 }
 

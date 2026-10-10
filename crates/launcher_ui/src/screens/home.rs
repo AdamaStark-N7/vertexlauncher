@@ -198,6 +198,12 @@ pub fn set_gamepad_screenshot_viewer_input(ctx: &egui::Context, pan: egui::Vec2,
     home_screenshots::set_gamepad_screenshot_viewer_input(ctx, pan, zoom);
 }
 
+/// Opens `path` in the Home screenshot viewer: switches to Home's Screenshots tab and shows the
+/// screenshot once the gallery has loaded it.
+pub fn open_screenshot_in_viewer(ctx: &egui::Context, path: PathBuf) {
+    home_screenshots::request_open_screenshot(ctx, path);
+}
+
 pub fn presence_section(ctx: &egui::Context) -> HomePresenceSection {
     let state_id = home_state_id();
     let state = ctx.data_mut(|data| data.get_temp::<HomeState>(state_id));
@@ -238,6 +244,12 @@ pub fn render(
     {
         state.purge_activity_image_state(ui.ctx());
     }
+    if home_screenshots::has_pending_open(ui.ctx()) && state.active_tab != HomeTab::Screenshots {
+        if state.active_tab == HomeTab::InstancesAndWorlds {
+            state.purge_activity_image_state(ui.ctx());
+        }
+        state.active_tab = HomeTab::Screenshots;
+    }
     ui.ctx().request_repaint_after(Duration::from_millis(250));
     state.screenshot_images.begin_frame(ui.ctx());
     state.thumbnails.cache_frame_index = state.thumbnails.cache_frame_index.saturating_add(1);
@@ -269,6 +281,7 @@ pub fn render(
         ui.ctx().request_repaint_after(Duration::from_millis(50));
     }
 
+    home_screenshots::resolve_pending_open(ui.ctx(), &mut state, instances, config);
     render_screenshot_viewer_modal(ui.ctx(), text_ui, &mut state, metrics);
     render_delete_screenshot_modal(ui.ctx(), text_ui, &mut state, instances, config, metrics);
     home_server_sync::render_server_sync_modal(ui.ctx(), text_ui, instances, config);
@@ -301,7 +314,10 @@ fn render_home_tab_row(
     );
 }
 
-fn modal_default_focus_requested(ctx: &egui::Context, id_source: impl std::hash::Hash) -> bool {
+pub(super) fn modal_default_focus_requested(
+    ctx: &egui::Context,
+    id_source: impl std::hash::Hash,
+) -> bool {
     let key = egui::Id::new(("modal_default_focus_frame", id_source));
     let frame = ctx.cumulative_frame_nr();
     ctx.data_mut(|data| {

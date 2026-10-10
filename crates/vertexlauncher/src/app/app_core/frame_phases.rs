@@ -63,6 +63,7 @@ impl VertexApp {
     pub(super) fn begin_frame(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.apply_frame_limiter(ctx);
         ui_foundation::set_drag_scroll_enabled(self.config.drag_scroll_enabled());
+        auth::set_insecure_file_storage(self.config.insecure_file_account_storage());
         self.text_ui.set_graphics_config(build_text_graphics_config(
             &self.config,
             self.startup_graphics,
@@ -80,6 +81,15 @@ impl VertexApp {
         } else {
             self.screen_launch_auth().map(|context| context.player_name)
         };
+        if let Some(screen) = screens::take_requested_screen(ctx) {
+            tracing::info!(
+                target: "vertexlauncher/navigation",
+                from_screen = ?self.active_screen,
+                to_screen = ?screen,
+                "A UI action requested navigation."
+            );
+            self.active_screen = screen;
+        }
         launcher_ui::screenshot_watch::poll(
             ctx,
             &self.instance_store,
