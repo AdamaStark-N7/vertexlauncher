@@ -201,7 +201,7 @@ impl Mesh {
         ];
 
         // Add all vertices
-        for face in 0..6 {
+        for (face, face_uvs) in uvs.iter().enumerate() {
             let corners = match face {
                 0 => &[0, 1, 2, 3], // back
                 1 => &[5, 4, 7, 6], // front
@@ -213,7 +213,7 @@ impl Mesh {
 
             for (i, &corner) in corners.iter().enumerate() {
                 let pos = vertices[corner];
-                let uv = uvs[face][i];
+                let uv = face_uvs[i];
                 self.add_vertex(Vertex::new(pos, uv, [0.0, 1.0, 0.0], [1.0; 4]));
             }
         }
@@ -269,7 +269,7 @@ impl Mesh {
         let data = bytemuck::cast_slice(&self.vertices);
         device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("Vertex Buffer"),
-            contents: data.as_ref(),
+            contents: data,
             usage: wgpu::BufferUsages::VERTEX,
         })
     }
@@ -285,7 +285,7 @@ impl Mesh {
             Some(
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Index Buffer"),
-                    contents: data.as_ref(),
+                    contents: data,
                     usage: wgpu::BufferUsages::INDEX,
                 }),
             )

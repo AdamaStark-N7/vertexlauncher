@@ -10,6 +10,7 @@ pub const ANTENNA_BARS_4_SVG: &[u8] = include_bytes!("antenna-bars-4.svg");
 pub const ANTENNA_BARS_5_SVG: &[u8] = include_bytes!("antenna-bars-5.svg");
 pub const ADJUSTMENTS_SVG: &[u8] = include_bytes!("adjustments.svg");
 pub const CHECK_SVG: &[u8] = include_bytes!("check.svg");
+pub const CONFETTI_SVG: &[u8] = include_bytes!("confetti.svg");
 pub const CHEVRON_DOWN_SVG: &[u8] = include_bytes!("chevron-down.svg");
 pub const CHEVRON_RIGHT_SVG: &[u8] = include_bytes!("chevron-right.svg");
 pub const CHEVRON_UP_SVG: &[u8] = include_bytes!("chevron-up.svg");

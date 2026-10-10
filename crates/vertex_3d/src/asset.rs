@@ -195,7 +195,6 @@ impl ShaderAssetDesc {
 }
 
 fn default_pass_templates(compiled: &CompiledShaderProgram) -> Vec<DeferredRenderPipelineTemplate> {
-    let has_compute = compiled.stages.contains_key(&ShaderKind::Compute);
     let has_raster = compiled.stages.contains_key(&ShaderKind::Vertex)
         || compiled.stages.contains_key(&ShaderKind::Fragment);
 
@@ -211,9 +210,8 @@ fn default_pass_templates(compiled: &CompiledShaderProgram) -> Vec<DeferredRende
                 .contains_key(&ShaderKind::Fragment)
                 .then_some(ShaderKind::Fragment),
         }]
-    } else if has_compute {
-        Vec::new()
     } else {
+        // Compute-only (or empty) programs have no raster pipeline template.
         Vec::new()
     }
 }

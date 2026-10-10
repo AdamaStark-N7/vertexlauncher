@@ -1,4 +1,5 @@
 use super::*;
+use crate::atlas::ResolvedGlyphAtlasEntry;
 
 fn target_format_is_hdr(format: wgpu::TextureFormat) -> bool {
     matches!(
@@ -7,7 +8,46 @@ fn target_format_is_hdr(format: wgpu::TextureFormat) -> bool {
     )
 }
 
+/// Builds the CPU-scene quad for a glyph resolved in the shared atlas.
+fn atlas_quad_for_glyph(
+    atlas_entry: &ResolvedGlyphAtlasEntry,
+    glyph: &PreparedGlyph,
+    positions: [Pos2; 4],
+) -> TextAtlasQuad {
+    TextAtlasQuad {
+        atlas_page_index: atlas_entry.page_index,
+        positions: positions.map(Into::into),
+        uvs: uv_quad_points(atlas_entry.uv).map(Into::into),
+        tint: if atlas_entry.is_color {
+            Color32::WHITE.into()
+        } else {
+            glyph.color.into()
+        },
+        is_color: atlas_entry.is_color,
+    }
+}
+
 impl TextUi {
+    fn resolve_scene_glyph_entry(
+        &mut self,
+        ctx: &Context,
+        glyph: &PreparedGlyph,
+        graphics_config: ResolvedTextGraphicsConfig,
+        field_range_px: f32,
+    ) -> Option<ResolvedGlyphAtlasEntry> {
+        let content_mode = self.resolved_glyph_content_mode(graphics_config, &glyph.cache_key);
+        let raster_key = glyph
+            .cache_key
+            .for_content_mode(content_mode, field_range_px);
+        self.glyph_atlas.resolve_sync(
+            ctx,
+            &mut self.font_system,
+            &mut self.scale_context,
+            raster_key,
+            self.current_frame,
+        )
+    }
+
     pub(crate) fn get_cached_prepared_layout(
         &mut self,
         id: Id,
@@ -176,17 +216,9 @@ impl TextUi {
         let mut bounds: Option<Rect> = None;
 
         for glyph in layout.glyphs.iter() {
-            let content_mode = self.resolved_glyph_content_mode(graphics_config, &glyph.cache_key);
-            let raster_key = glyph
-                .cache_key
-                .for_content_mode(content_mode, field_range_px);
-            let Some(atlas_entry) = self.glyph_atlas.resolve_sync(
-                ctx,
-                &mut self.font_system,
-                &mut self.scale_context,
-                raster_key,
-                self.current_frame,
-            ) else {
+            let Some(atlas_entry) =
+                self.resolve_scene_glyph_entry(ctx, glyph, graphics_config, field_range_px)
+            else {
                 continue;
             };
 
@@ -201,17 +233,7 @@ impl TextUi {
             let positions = quad_positions_from_min_size(min, size_points);
             let quad_bounds = rect_from_points(positions);
             bounds = Some(bounds.map_or(quad_bounds, |current| current.union(quad_bounds)));
-            quads.push(TextAtlasQuad {
-                atlas_page_index: atlas_entry.page_index,
-                positions: positions.map(Into::into),
-                uvs: uv_quad_points(atlas_entry.uv).map(Into::into),
-                tint: if atlas_entry.is_color {
-                    Color32::WHITE.into()
-                } else {
-                    glyph.color.into()
-                },
-                is_color: atlas_entry.is_color,
-            });
+            quads.push(atlas_quad_for_glyph(&atlas_entry, glyph, positions));
         }
 
         TextRenderScene {
@@ -221,37 +243,46 @@ impl TextUi {
         }
     }
 
+    /// Sizes the scene page to the glyphs in `layout` and starts an empty scene assembly.
+    ///
+    /// Sizing the page to this text instead of always using the full page size matters: a
+    /// short label needs a few KB, not a 4 MB texture that is zeroed, copied and uploaded
+    /// per label.
+    fn begin_gpu_scene_assembly(
+        &mut self,
+        layout: &PreparedTextLayout,
+        graphics_config: ResolvedTextGraphicsConfig,
+    ) -> GpuSceneAssembly {
+        let max_page_side_px = default_gpu_scene_page_side(graphics_config);
+        let mut area = 0usize;
+        let mut max_dim = 0usize;
+        for glyph in layout.glyphs.iter() {
+            if let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
+                &glyph.cache_key,
+                graphics_config.rasterization,
+                graphics_config.atlas_padding_px,
+            ) {
+                let [w, h] = atlas_glyph.upload_image.size;
+                area += w * h;
+                max_dim = max_dim.max(w).max(h);
+            }
+        }
+        let target_page_side_px = fit_scene_page_side(area, max_dim, max_page_side_px);
+        GpuSceneAssembly::new(
+            std::mem::take(&mut self.cpu_page_pool),
+            target_page_side_px,
+            graphics_config.atlas_padding_px,
+            layout.glyphs.len(),
+        )
+    }
+
     pub(crate) fn build_text_gpu_scene_from_layout(
         &mut self,
         layout: &PreparedTextLayout,
         scale: f32,
     ) -> TextGpuScene {
-        let max_page_side_px =
-            default_gpu_scene_page_side(self.resolved_graphics_config(self.max_texture_side_px));
         let graphics_config = self.resolved_graphics_config(self.max_texture_side_px);
-        // Size the page to this text instead of always using the full page size: a short label
-        // needs a few KB, not a 4 MB texture that is zeroed, copied and uploaded per label.
-        let target_page_side_px = {
-            let mut area = 0usize;
-            let mut max_dim = 0usize;
-            for glyph in layout.glyphs.iter() {
-                if let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
-                    &glyph.cache_key,
-                    graphics_config.rasterization,
-                    graphics_config.atlas_padding_px,
-                ) {
-                    let [w, h] = atlas_glyph.upload_image.size;
-                    area += w * h;
-                    max_dim = max_dim.max(w).max(h);
-                }
-            }
-            fit_scene_page_side(area, max_dim, max_page_side_px)
-        };
-        let mut page_pool = std::mem::take(&mut self.cpu_page_pool);
-        let mut pages = Vec::<CpuSceneAtlasPage>::new();
-        let mut page_hashers = Vec::<FxHasher>::new();
-        let mut quads = Vec::with_capacity(layout.glyphs.len());
-        let mut bounds: Option<Rect> = None;
+        let mut assembly = self.begin_gpu_scene_assembly(layout, graphics_config);
 
         for glyph in layout.glyphs.iter() {
             let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
@@ -261,59 +292,9 @@ impl TextUi {
             ) else {
                 continue;
             };
-
-            let allocation_size = size2(
-                atlas_glyph.upload_image.size[0] as i32,
-                atlas_glyph.upload_image.size[1] as i32,
-            );
-            let Some((page_index, allocation)) = allocate_cpu_scene_page_slot(
-                &mut pages,
-                &mut page_pool,
-                target_page_side_px,
-                allocation_size,
-            ) else {
+            let Some((page_index, uv)) = assembly.place_glyph(glyph, &atlas_glyph) else {
                 continue;
             };
-
-            // Initialize hasher for any newly created pages.
-            while page_hashers.len() < pages.len() {
-                let new_idx = page_hashers.len();
-                let mut h = FxHasher::default();
-                new_idx.hash(&mut h);
-                pages[new_idx].size.hash(&mut h);
-                page_hashers.push(h);
-            }
-
-            let pos = [
-                allocation.rectangle.min.x.max(0) as usize,
-                allocation.rectangle.min.y.max(0) as usize,
-            ];
-            // Hash glyph identity + position — O(glyphs) instead of O(pixels) at finalisation.
-            glyph.cache_key.hash(&mut page_hashers[page_index]);
-            pos[0].hash(&mut page_hashers[page_index]);
-            pos[1].hash(&mut page_hashers[page_index]);
-
-            let page_size = pages[page_index].size;
-            blit_to_page(
-                &mut pages[page_index].rgba8,
-                page_size,
-                &atlas_glyph.upload_image,
-                pos[0],
-                pos[1],
-            );
-
-            let uv = Rect::from_min_max(
-                Pos2::new(
-                    (pos[0] + graphics_config.atlas_padding_px) as f32 / page_size[0] as f32,
-                    (pos[1] + graphics_config.atlas_padding_px) as f32 / page_size[1] as f32,
-                ),
-                Pos2::new(
-                    (pos[0] + graphics_config.atlas_padding_px + atlas_glyph.size_px[0]) as f32
-                        / page_size[0] as f32,
-                    (pos[1] + graphics_config.atlas_padding_px + atlas_glyph.size_px[1]) as f32
-                        / page_size[1] as f32,
-                ),
-            );
 
             let min = Pos2::new(
                 glyph.offset_points.x + atlas_glyph.placement_left_px as f32 / scale,
@@ -324,55 +305,11 @@ impl TextUi {
                 atlas_glyph.size_px[1] as f32 / scale,
             );
             let positions = quad_positions_from_min_size(min, size_points);
-            let quad_bounds = rect_from_points(positions);
-            bounds = Some(bounds.map_or(quad_bounds, |current| current.union(quad_bounds)));
-            quads.push(TextGpuQuad {
-                atlas_page_index: page_index,
-                positions: positions.map(|point| [point.x, point.y]),
-                uvs: uv_quad_points(uv).map(|point| [point.x, point.y]),
-                tint_rgba: [
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.r()
-                    } else {
-                        glyph.color.r()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.g()
-                    } else {
-                        glyph.color.g()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.b()
-                    } else {
-                        glyph.color.b()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.a()
-                    } else {
-                        glyph.color.a()
-                    },
-                ],
-            });
+            assembly.push_quad(page_index, uv, positions, &atlas_glyph, glyph);
         }
 
+        let (atlas_pages, quads, bounds) = assembly.finish(&mut self.cpu_page_pool);
         let bounds = bounds.unwrap_or(Rect::NOTHING);
-        let atlas_pages = pages
-            .iter()
-            .enumerate()
-            .map(|(i, page)| {
-                let content_hash = page_hashers.get(i).map(|h| h.finish()).unwrap_or(0);
-                cpu_page_to_page_data(page, i, content_hash)
-            })
-            .collect();
-
-        // Return pages to the pool for reuse next call (pixel buffer allocations survive).
-        const CPU_PAGE_POOL_MAX: usize = 4;
-        let return_count = CPU_PAGE_POOL_MAX
-            .saturating_sub(page_pool.len())
-            .min(pages.len());
-        page_pool.extend(pages.drain(..return_count));
-        self.cpu_page_pool = page_pool;
-
         TextGpuScene {
             atlas_pages,
             quads,
@@ -406,17 +343,9 @@ impl TextUi {
         let mut bounds: Option<Rect> = None;
 
         for (glyph, path_glyph) in layout.glyphs.iter().zip(path_layout.glyphs.iter()) {
-            let content_mode = self.resolved_glyph_content_mode(graphics_config, &glyph.cache_key);
-            let raster_key = glyph
-                .cache_key
-                .for_content_mode(content_mode, field_range_px);
-            let Some(atlas_entry) = self.glyph_atlas.resolve_sync(
-                ctx,
-                &mut self.font_system,
-                &mut self.scale_context,
-                raster_key,
-                self.current_frame,
-            ) else {
+            let Some(atlas_entry) =
+                self.resolve_scene_glyph_entry(ctx, glyph, graphics_config, field_range_px)
+            else {
                 continue;
             };
 
@@ -436,17 +365,7 @@ impl TextUi {
             );
             let quad_bounds = rect_from_points(positions);
             bounds = Some(bounds.map_or(quad_bounds, |current| current.union(quad_bounds)));
-            quads.push(TextAtlasQuad {
-                atlas_page_index: atlas_entry.page_index,
-                positions: positions.map(Into::into),
-                uvs: uv_quad_points(atlas_entry.uv).map(Into::into),
-                tint: if atlas_entry.is_color {
-                    Color32::WHITE.into()
-                } else {
-                    glyph.color.into()
-                },
-                is_color: atlas_entry.is_color,
-            });
+            quads.push(atlas_quad_for_glyph(&atlas_entry, glyph, positions));
         }
 
         Ok(TextRenderScene {
@@ -474,32 +393,8 @@ impl TextUi {
             path,
             path_options,
         )?;
-        let max_page_side_px =
-            default_gpu_scene_page_side(self.resolved_graphics_config(self.max_texture_side_px));
         let graphics_config = self.resolved_graphics_config(self.max_texture_side_px);
-        // Size the page to this text instead of always using the full page size: a short label
-        // needs a few KB, not a 4 MB texture that is zeroed, copied and uploaded per label.
-        let target_page_side_px = {
-            let mut area = 0usize;
-            let mut max_dim = 0usize;
-            for glyph in layout.glyphs.iter() {
-                if let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
-                    &glyph.cache_key,
-                    graphics_config.rasterization,
-                    graphics_config.atlas_padding_px,
-                ) {
-                    let [w, h] = atlas_glyph.upload_image.size;
-                    area += w * h;
-                    max_dim = max_dim.max(w).max(h);
-                }
-            }
-            fit_scene_page_side(area, max_dim, max_page_side_px)
-        };
-        let mut page_pool = std::mem::take(&mut self.cpu_page_pool);
-        let mut pages = Vec::<CpuSceneAtlasPage>::new();
-        let mut page_hashers = Vec::<FxHasher>::new();
-        let mut quads = Vec::with_capacity(layout.glyphs.len());
-        let mut bounds: Option<Rect> = None;
+        let mut assembly = self.begin_gpu_scene_assembly(layout, graphics_config);
 
         for (glyph, path_glyph) in layout.glyphs.iter().zip(path_layout.glyphs.iter()) {
             let Some(atlas_glyph) = self.get_or_rasterize_gpu_scene_glyph(
@@ -509,57 +404,9 @@ impl TextUi {
             ) else {
                 continue;
             };
-
-            let allocation_size = size2(
-                atlas_glyph.upload_image.size[0] as i32,
-                atlas_glyph.upload_image.size[1] as i32,
-            );
-            let Some((page_index, allocation)) = allocate_cpu_scene_page_slot(
-                &mut pages,
-                &mut page_pool,
-                target_page_side_px,
-                allocation_size,
-            ) else {
+            let Some((page_index, uv)) = assembly.place_glyph(glyph, &atlas_glyph) else {
                 continue;
             };
-
-            while page_hashers.len() < pages.len() {
-                let new_idx = page_hashers.len();
-                let mut h = FxHasher::default();
-                new_idx.hash(&mut h);
-                pages[new_idx].size.hash(&mut h);
-                page_hashers.push(h);
-            }
-
-            let pos = [
-                allocation.rectangle.min.x.max(0) as usize,
-                allocation.rectangle.min.y.max(0) as usize,
-            ];
-            glyph.cache_key.hash(&mut page_hashers[page_index]);
-            pos[0].hash(&mut page_hashers[page_index]);
-            pos[1].hash(&mut page_hashers[page_index]);
-
-            let page_size = pages[page_index].size;
-            blit_to_page(
-                &mut pages[page_index].rgba8,
-                page_size,
-                &atlas_glyph.upload_image,
-                pos[0],
-                pos[1],
-            );
-
-            let uv = Rect::from_min_max(
-                Pos2::new(
-                    (pos[0] + graphics_config.atlas_padding_px) as f32 / page_size[0] as f32,
-                    (pos[1] + graphics_config.atlas_padding_px) as f32 / page_size[1] as f32,
-                ),
-                Pos2::new(
-                    (pos[0] + graphics_config.atlas_padding_px + atlas_glyph.size_px[0]) as f32
-                        / page_size[0] as f32,
-                    (pos[1] + graphics_config.atlas_padding_px + atlas_glyph.size_px[1]) as f32
-                        / page_size[1] as f32,
-                ),
-            );
 
             let size_points = egui::vec2(
                 atlas_glyph.size_px[0] as f32 / scale,
@@ -575,54 +422,11 @@ impl TextUi {
                 size_points,
                 path_glyph.rotation_radians,
             );
-            let quad_bounds = rect_from_points(positions);
-            bounds = Some(bounds.map_or(quad_bounds, |current| current.union(quad_bounds)));
-            quads.push(TextGpuQuad {
-                atlas_page_index: page_index,
-                positions: positions.map(|point| [point.x, point.y]),
-                uvs: uv_quad_points(uv).map(|point| [point.x, point.y]),
-                tint_rgba: [
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.r()
-                    } else {
-                        glyph.color.r()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.g()
-                    } else {
-                        glyph.color.g()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.b()
-                    } else {
-                        glyph.color.b()
-                    },
-                    if atlas_glyph.is_color {
-                        Color32::WHITE.a()
-                    } else {
-                        glyph.color.a()
-                    },
-                ],
-            });
+            assembly.push_quad(page_index, uv, positions, &atlas_glyph, glyph);
         }
 
+        let (atlas_pages, quads, bounds) = assembly.finish(&mut self.cpu_page_pool);
         let bounds = bounds.unwrap_or(egui_rect_from_text(path_layout.bounds));
-        let atlas_pages = pages
-            .iter()
-            .enumerate()
-            .map(|(i, page)| {
-                let content_hash = page_hashers.get(i).map(|h| h.finish()).unwrap_or(0);
-                cpu_page_to_page_data(page, i, content_hash)
-            })
-            .collect();
-
-        const CPU_PAGE_POOL_MAX: usize = 4;
-        let return_count = CPU_PAGE_POOL_MAX
-            .saturating_sub(page_pool.len())
-            .min(pages.len());
-        page_pool.extend(pages.drain(..return_count));
-        self.cpu_page_pool = page_pool;
-
         Ok(TextGpuScene {
             atlas_pages,
             quads,

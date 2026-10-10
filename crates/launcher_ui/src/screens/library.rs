@@ -541,11 +541,23 @@ fn render_instance_tile(
         .response;
 
     let context_id = ui.make_persistent_id(("library_instance_context", instance.id.as_str()));
-    if frame_response.secondary_clicked() {
-        let anchor = frame_response
-            .interact_pointer_pos()
-            .or_else(|| ui.ctx().pointer_latest_pos())
-            .unwrap_or(frame_response.rect.left_bottom());
+    // The frame itself is hover-only, so add a focusable overlay (it does not steal clicks from
+    // the tile's buttons) and detect right-clicks by pointer position.
+    let tile_response = ui.interact(
+        frame_response.rect,
+        context_id.with("tile_focus"),
+        egui::Sense::focusable_noninteractive(),
+    );
+    let pointer_secondary_anchor = ui.input(|i| {
+        i.pointer
+            .button_clicked(egui::PointerButton::Secondary)
+            .then(|| i.pointer.interact_pos())
+            .flatten()
+            .filter(|pos| frame_response.rect.contains(*pos))
+    });
+    let menu_anchor = pointer_secondary_anchor
+        .or_else(|| crate::ui::context_menu::trigger_anchor(ui.ctx(), &tile_response));
+    if let Some(anchor) = menu_anchor {
         instance_context_menu::request_for_instance(ui.ctx(), context_id, anchor, true);
     }
 

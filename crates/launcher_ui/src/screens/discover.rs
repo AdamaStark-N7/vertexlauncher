@@ -75,8 +75,12 @@ mod discover_state;
 mod discover_tile_render_result;
 #[path = "discover/discover_ui_metrics.rs"]
 mod discover_ui_metrics;
+#[path = "content_browser_state/game_version_options.rs"]
+mod game_version_options;
 #[path = "discover/search_mode.rs"]
 mod search_mode;
+#[path = "content_browser_ui/search_tag_chips.rs"]
+mod search_tag_chips;
 
 use self::cached_discover_masonry_layout::CachedDiscoverMasonryLayout;
 use self::discover_detail::{
@@ -103,7 +107,14 @@ use self::discover_source::DiscoverSource;
 pub use self::discover_state::DiscoverState;
 use self::discover_tile_render_result::DiscoverTileRenderResult;
 use self::discover_ui_metrics::DiscoverUiMetrics;
+use self::game_version_options::game_version_option_labels;
 use self::search_mode::SearchMode;
+use self::search_tag_chips::{SearchTagChipIds, add_search_tag, render_search_tag_chips};
+
+const SEARCH_TAG_CHIP_IDS: SearchTagChipIds = SearchTagChipIds {
+    remove_icon_uri_prefix: "bytes://discover/tag-remove",
+    label_id: "discover_search_tag",
+};
 
 pub fn render(
     ui: &mut Ui,
@@ -188,9 +199,10 @@ fn render_discover_browse_content(
                     search_submitted = true;
                 }
             }
-            if !state.search_tags.is_empty()
-                && render_search_tag_chips(ui, text_ui, &mut state.search_tags)
-            {
+            if !state.search_tags.is_empty() && {
+                ui.add_space(style::SPACE_SM);
+                render_search_tag_chips(ui, text_ui, &mut state.search_tags, SEARCH_TAG_CHIP_IDS)
+            } {
                 search_submitted = true;
             }
             ui.add_space(style::SPACE_SM);
@@ -254,13 +266,8 @@ fn render_discover_browse_content(
                     filter_controls_have_focus |= response.has_focus();
                 }
                 if provider_index <= 3 && 3 < (row + 1) * filter_columns {
-                    let mut game_version_options =
-                        Vec::<String>::with_capacity(state.available_game_versions.len() + 1);
-                    game_version_options.push("Any version".to_owned());
-                    for version in &state.available_game_versions {
-                        game_version_options.push(version.display_label());
-                    }
-                    let game_version_option_refs = game_version_options
+                    let game_version_option_refs = state
+                        .game_version_options
                         .iter()
                         .map(String::as_str)
                         .collect::<Vec<_>>();
@@ -1139,29 +1146,6 @@ fn normalize_search_key(value: &str) -> String {
         .collect::<String>()
 }
 
-fn add_search_tag(search_tags: &mut Vec<String>, candidate: &str) -> bool {
-    let Some(normalized) = normalize_search_tag(candidate) else {
-        return false;
-    };
-    if search_tags
-        .iter()
-        .any(|tag| tag.eq_ignore_ascii_case(normalized.as_str()))
-    {
-        return false;
-    }
-    search_tags.push(normalized);
-    true
-}
-
-fn normalize_search_tag(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_owned())
-    }
-}
-
 fn compose_search_query(input: &str, tags: &[String]) -> String {
     let mut parts = Vec::with_capacity(tags.len() + 1);
     for tag in tags {
@@ -1175,92 +1159,6 @@ fn compose_search_query(input: &str, tags: &[String]) -> String {
         parts.push(trimmed_input.to_owned());
     }
     parts.join(" ")
-}
-
-fn render_search_tag_chips(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    search_tags: &mut Vec<String>,
-) -> bool {
-    let mut removed_index: Option<usize> = None;
-    let tag_style = LabelOptions {
-        color: ui.visuals().text_color(),
-        ..style::caption(ui)
-    };
-    ui.add_space(style::SPACE_SM);
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = egui::vec2(style::SPACE_SM, style::SPACE_SM);
-        for (index, tag) in search_tags.iter().enumerate() {
-            let fill = ui.visuals().selection.bg_fill.gamma_multiply(0.28);
-            let stroke = egui::Stroke::new(1.0, ui.visuals().selection.bg_fill.gamma_multiply(0.7));
-            let text_color = ui.visuals().text_color();
-            let themed_svg = crate::ui::svg_tint::tint_svg(assets::X_SVG, text_color);
-            let uri = format!(
-                "bytes://discover/tag-remove/{index}-{:02x}{:02x}{:02x}.svg",
-                text_color.r(),
-                text_color.g(),
-                text_color.b()
-            );
-            let max_chip_width = ui.available_width().max(1.0);
-            let max_text_width =
-                (max_chip_width - 22.0 - ui.spacing().item_spacing.x - 16.0).max(1.0);
-            let display_tag = truncate_single_line_text_with_ellipsis(
-                text_ui,
-                ui,
-                tag.as_str(),
-                max_text_width,
-                &tag_style,
-            );
-            egui::Frame::new()
-                .fill(fill)
-                .stroke(stroke)
-                .corner_radius(egui::CornerRadius::same(8))
-                .inner_margin(egui::Margin::symmetric(8, 5))
-                .show(ui, |ui| {
-                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                        ui.set_min_height(24.0);
-                        let icon_button = egui::Button::image(
-                            egui::Image::from_bytes(uri, themed_svg)
-                                .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-                        )
-                        .frame(false)
-                        .min_size(egui::vec2(22.0, 22.0));
-                        let icon_response = ui.add(icon_button);
-                        let icon_state =
-                            interaction::InteractionState::of(ui.ctx(), &icon_response, true);
-                        interaction::paint_card_highlight(
-                            ui.painter(),
-                            ui.visuals(),
-                            icon_state,
-                            icon_response.rect,
-                            6,
-                            true,
-                        );
-                        if crate::ui::style::hover_tip(
-                            ui,
-                            icon_response,
-                            format!("Remove tag: {tag}"),
-                        )
-                        .clicked()
-                        {
-                            removed_index = Some(index);
-                        }
-                        let _ = text_ui.label(
-                            ui,
-                            ("discover_search_tag", tag.as_str()),
-                            display_tag.as_str(),
-                            &tag_style,
-                        );
-                    });
-                });
-        }
-    });
-    if let Some(index) = removed_index {
-        search_tags.remove(index);
-        true
-    } else {
-        false
-    }
 }
 
 fn sized_dropdown_picker(
@@ -1339,6 +1237,7 @@ fn poll_version_catalog(state: &mut DiscoverState) {
         state.version_catalog_in_flight = false;
         match update {
             Ok(versions) => {
+                state.game_version_options = game_version_option_labels(&versions);
                 state.available_game_versions = versions;
                 state.version_catalog_error = None;
             }

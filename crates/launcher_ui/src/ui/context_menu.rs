@@ -75,8 +75,14 @@ struct ContextMenuInvocation {
 struct ContextMenuState {
     request: Option<ContextMenuRequest>,
     open: bool,
+    /// Widget that opened the menu from the keyboard/gamepad; focus goes back to it on close.
+    return_focus: Option<Id>,
+    /// Focus should still be moved onto the first item.
+    focus_pending: bool,
 }
 
+const KEYBOARD_TRIGGER_ID: &str = "app_context_menu_keyboard_trigger";
+const LAST_FOCUSED_ITEM_ID: &str = "app_context_menu_last_focused_item";
 const STATE_ID: &str = "app_context_menu_state";
 const INVOCATION_ID: &str = "app_context_menu_invocation";
 const ANIM_ID: &str = "app_context_menu_anim";
@@ -144,18 +150,47 @@ fn menu_max_height(screen_rect: Rect) -> f32 {
         .max(MENU_ITEM_HEIGHT + MENU_PADDING * 2.0)
 }
 
+/// Returns the menu anchor when `response` was right-clicked, or when it has keyboard focus and
+/// Shift+F10 was pressed (the gamepad's X button injects the same chord).
+///
+/// A keyboard-triggered menu moves focus into itself and returns it to `response` on close.
+pub fn trigger_anchor(ctx: &Context, response: &egui::Response) -> Option<Pos2> {
+    if response.secondary_clicked() {
+        return Some(
+            response
+                .interact_pointer_pos()
+                .or_else(|| ctx.pointer_latest_pos())
+                .unwrap_or(response.rect.left_bottom()),
+        );
+    }
+    let keyboard_pressed =
+        response.has_focus() && ctx.input(|i| i.modifiers.shift && i.key_pressed(Key::F10));
+    if keyboard_pressed {
+        ctx.data_mut(|data| data.insert_temp(Id::new(KEYBOARD_TRIGGER_ID), response.id));
+        return Some(response.rect.left_bottom());
+    }
+    None
+}
+
 pub fn request(ctx: &Context, request: ContextMenuRequest) {
     if request.items.is_empty() {
         close(ctx);
         return;
     }
 
+    let return_focus = ctx.data_mut(|data| {
+        let id = data.get_temp::<Id>(Id::new(KEYBOARD_TRIGGER_ID));
+        data.remove::<Id>(Id::new(KEYBOARD_TRIGGER_ID));
+        id
+    });
     ctx.data_mut(|data| {
         data.insert_temp(
             Id::new(STATE_ID),
             ContextMenuState {
                 request: Some(request),
                 open: true,
+                return_focus,
+                focus_pending: return_focus.is_some(),
             },
         );
     });
@@ -167,8 +202,16 @@ pub fn close(ctx: &Context) {
         .data_mut(|data| data.get_temp::<ContextMenuState>(Id::new(STATE_ID)))
         .unwrap_or_default();
     state.open = false;
+    release_focus(ctx, &mut state);
     ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state));
     ctx.request_repaint();
+}
+
+fn release_focus(ctx: &Context, state: &mut ContextMenuState) {
+    if let Some(id) = state.return_focus.take() {
+        ctx.memory_mut(|memory| memory.request_focus(id));
+    }
+    state.focus_pending = false;
 }
 
 pub fn take_invocation(ctx: &Context, source_id: Id) -> Option<String> {
@@ -293,6 +336,7 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
     }
     if close_due_to_outside_click {
         state.open = false;
+        release_focus(ctx, &mut state);
         ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state.clone()));
     }
 
@@ -347,6 +391,8 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                 pos2(inner_rect.max.x, area_rect.max.y - MENU_PADDING),
             );
             let mut selected_action: Option<String> = None;
+            let mut item_ids: Vec<Id> = Vec::with_capacity(request.items.len());
+            let keyboard_menu = state.return_focus.is_some();
             let content_offset_y = (1.0 - eased) * MENU_SLIDE_DISTANCE;
             let builder = egui::UiBuilder::new()
                 .max_rect(Rect::from_min_size(
@@ -367,11 +413,21 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                     .show(ui, |ui| {
                         ui.set_width(inner_rect.width());
 
-                        for item in &request.items {
+                        for (index, item) in request.items.iter().enumerate() {
                             let (item_rect, response) = ui.allocate_exact_size(
                                 vec2(inner_rect.width(), MENU_ITEM_HEIGHT),
                                 Sense::click(),
                             );
+                            item_ids.push(response.id);
+                            if target_open && keyboard_menu && state.focus_pending && index == 0 {
+                                response.request_focus();
+                                state.focus_pending = false;
+                            }
+                            if response.has_focus() {
+                                ctx.data_mut(|data| {
+                                    data.insert_temp(Id::new(LAST_FOCUSED_ITEM_ID), response.id);
+                                });
+                            }
 
                             let state = interaction::InteractionState::of(ctx, &response, true);
                             let item_fill = if item.danger {
@@ -463,6 +519,20 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                     });
             });
 
+            // Keep controller/keyboard focus trapped inside the menu while it is open.
+            if target_open && keyboard_menu && !state.focus_pending {
+                let focused = ctx.memory(|memory| memory.focused());
+                if focused.is_none_or(|id| !item_ids.contains(&id)) {
+                    let last = ctx
+                        .data(|data| data.get_temp::<Id>(Id::new(LAST_FOCUSED_ITEM_ID)))
+                        .filter(|id| item_ids.contains(id))
+                        .or_else(|| item_ids.first().copied());
+                    if let Some(id) = last {
+                        ctx.memory_mut(|memory| memory.request_focus(id));
+                    }
+                }
+            }
+
             if let Some(action_id) = selected_action {
                 ctx.data_mut(|data| {
                     data.insert_temp(
@@ -474,6 +544,7 @@ pub fn show(ctx: &Context, text_ui: &mut TextUi) {
                     );
                 });
                 state.open = false;
+                release_focus(ctx, &mut state);
                 ctx.data_mut(|data| data.insert_temp(Id::new(STATE_ID), state.clone()));
                 ctx.request_repaint();
             }

@@ -32,6 +32,8 @@ mod content_scope;
 mod deferred_content_cleanup;
 #[path = "content_browser_state/detail_versions_result.rs"]
 mod detail_versions_result;
+#[path = "content_browser_state/game_version_options.rs"]
+mod game_version_options;
 #[path = "content_browser_state/mod_sort_mode.rs"]
 mod mod_sort_mode;
 #[path = "content_browser_state/queued_content_download.rs"]
@@ -57,6 +59,7 @@ pub(super) use self::content_install_request::ContentInstallRequest;
 pub(super) use self::content_scope::ContentScope;
 pub(super) use self::deferred_content_cleanup::DeferredContentCleanup;
 pub(super) use self::detail_versions_result::DetailVersionsResult;
+pub(super) use self::game_version_options::game_version_option_labels;
 pub(super) use self::mod_sort_mode::ModSortMode;
 pub(super) use self::queued_content_download::QueuedContentDownload;
 pub(super) use self::search_update::SearchUpdate;

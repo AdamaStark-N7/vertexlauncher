@@ -108,6 +108,9 @@ pub(super) fn update_all_installed_content(
         "scanning for bulk content updates"
     );
 
+    // Leftovers from an earlier interrupted update: restore or delete before scanning.
+    crate::screens::content_browser::remove_launcher_artifacts(instance_root, kind.folder_name());
+
     loop {
         pass += 1;
         if pass > 512 {
@@ -236,20 +239,142 @@ pub(super) fn update_all_installed_content(
     }
 
     let kind_label = kind.label().to_ascii_lowercase();
+    // Duplicates are removed whether or not they have an update, so an out-of-date copy the
+    // update passes could not resolve does not stay behind.
+    let removed_duplicates =
+        remove_duplicate_content(instance_root, kind, game_version, loader_label);
+    let removed_artifacts = crate::screens::content_browser::remove_launcher_artifacts(
+        instance_root,
+        kind.folder_name(),
+    );
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
         instance_root = %instance_root.display(),
         kind = %kind.folder_name(),
         updated_count,
+        removed_duplicates,
+        removed_artifacts,
         "finished bulk content update scan"
     );
-    if updated_count == 0 {
-        Ok(format!("No {kind_label} updates available."))
+    let mut message = if updated_count == 0 {
+        format!("No {kind_label} updates available.")
     } else if updated_count == 1 {
-        Ok(format!("Updated 1 {} entry.", kind.content_type_key()))
+        format!("Updated 1 {} entry.", kind.content_type_key())
     } else {
-        Ok(format!("Updated {updated_count} {kind_label}."))
+        format!("Updated {updated_count} {kind_label}.")
+    };
+    if removed_duplicates > 0 {
+        message.push_str(&format!(" Removed {removed_duplicates} duplicate file(s)."));
     }
+    if removed_artifacts > 0 {
+        message.push_str(&format!(
+            " Cleaned up {removed_artifacts} leftover file(s)."
+        ));
+    }
+    Ok(message)
+}
+
+/// Deletes extra copies of the same project (for example two versions of one mod).
+///
+/// Files are grouped by resolved project, keeping enabled and disabled copies apart. Only
+/// confident matches (managed or exact hash) are considered, and pack-managed files are never
+/// deleted. The kept copy is the manifest's file for the project, otherwise a copy that is
+/// already the latest version; if neither exists the group is left alone and logged.
+/// Failures are logged and skipped so one bad delete does not stop the rest.
+fn remove_duplicate_content(
+    instance_root: &Path,
+    kind: InstalledContentKind,
+    game_version: &str,
+    loader_label: &str,
+) -> usize {
+    let managed_identities = load_managed_content_identities(instance_root);
+    let installed_files = InstalledContentResolver::scan_installed_content_files(
+        instance_root,
+        kind,
+        &managed_identities,
+    );
+    if installed_files.len() < 2 {
+        return 0;
+    }
+    let mut hash_cache = InstalledContentResolver::load_hash_cache(instance_root);
+    let manifest = managed_content::load_content_manifest(instance_root);
+
+    let mut groups: std::collections::HashMap<
+        (String, bool),
+        Vec<(
+            InstalledContentFile,
+            content_resolver::ResolvedInstalledContent,
+        )>,
+    > = std::collections::HashMap::new();
+    for (file, resolution) in resolve_installed_content_metadata_batch(
+        installed_files.as_slice(),
+        kind,
+        game_version,
+        loader_label,
+        &mut hash_cache,
+    ) {
+        if resolution.resolution_kind
+            == content_resolver::InstalledContentResolutionKind::HeuristicSearch
+        {
+            continue;
+        }
+        groups
+            .entry((resolution.entry.id.clone(), file.disabled))
+            .or_default()
+            .push((file, resolution));
+    }
+
+    let mut removed = 0usize;
+    for ((project_id, _), mut group) in groups {
+        if group.len() < 2 {
+            continue;
+        }
+        group.sort_by(|a, b| a.0.file_name.cmp(&b.0.file_name));
+        let managed_path = manifest_project_for_entry(&manifest, &group[0].1.entry)
+            .map(|project| instance_root.join(project.file_path.as_path()));
+        let keeper = managed_path
+            .as_ref()
+            .and_then(|path| {
+                group.iter().position(|(file, _)| {
+                    content_paths_match(path.as_path(), file.file_path.as_path())
+                })
+            })
+            .or_else(|| {
+                group
+                    .iter()
+                    .position(|(_, resolution)| resolution.update.is_none())
+            });
+        let Some(keeper) = keeper else {
+            tracing::warn!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                "found {} copies of {project_id} but none is current or managed; leaving them alone",
+                group.len()
+            );
+            continue;
+        };
+        for (index, (file, _)) in group.iter().enumerate() {
+            let pack_managed = file
+                .managed_identity
+                .as_ref()
+                .is_some_and(|identity| identity.pack_managed);
+            if index == keeper || pack_managed {
+                continue;
+            }
+            tracing::warn!(
+                target: CONTENT_UPDATE_LOG_TARGET,
+                "removing duplicate content file_path={} keeping={} project={project_id}",
+                file.file_path.display(),
+                group[keeper].0.file_path.display(),
+            );
+            match remove_stale_duplicate_content_path(file.file_path.as_path()) {
+                Ok(()) => removed += 1,
+                Err(err) => {
+                    tracing::warn!(target: CONTENT_UPDATE_LOG_TARGET, "{err}");
+                }
+            }
+        }
+    }
+    removed
 }
 
 fn remove_stale_duplicate_content_path(path: &Path) -> Result<(), String> {

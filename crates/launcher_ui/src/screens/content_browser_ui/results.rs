@@ -1,0 +1,499 @@
+use super::*;
+
+pub(in crate::screens::content_browser) fn render_results(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &mut ContentBrowserState,
+    manifest: &ContentInstallManifest,
+    max_height: f32,
+) -> RenderResultsOutcome {
+    let mut outcome = RenderResultsOutcome::default();
+    let frame = egui::Frame::new()
+        .fill(ui.visuals().widgets.noninteractive.bg_fill)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(style::SPACE_XL as i8));
+    frame.show(ui, |ui| {
+        ui.set_min_height(max_height);
+        if state.search_in_flight {
+            let progress_label = if state.search_total_tasks > 0 {
+                format!(
+                    "Searching content... {}/{} result groups loaded.",
+                    state.search_completed_tasks, state.search_total_tasks
+                )
+            } else {
+                "Searching content...".to_owned()
+            };
+            let _ = text_ui.label(
+                ui,
+                ("content_browser_search_progress", instance_id),
+                progress_label.as_str(),
+                &style::muted(ui),
+            );
+            ui.add_space(style::SPACE_MD);
+        }
+        egui::ScrollArea::vertical()
+            .scroll_source(modal_host::drag_scroll_source())
+            .id_salt(("content_browser_results_scroll", instance_id))
+            .max_height(max_height)
+            .show(ui, |ui| {
+                ui.add_space(style::SPACE_XS);
+                if state.results.entries.is_empty() {
+                    let empty_message = if state.search_in_flight {
+                        "Searching content..."
+                    } else {
+                        "No results yet. Search to browse installable content."
+                    };
+                    let _ = text_ui.label(
+                        ui,
+                        ("content_browser_empty", instance_id),
+                        empty_message,
+                        &style::muted(ui),
+                    );
+                    return;
+                }
+
+                let grouped_counts =
+                    count_entries_by_content_type(state.results.entries.as_slice());
+                let mut current_group = None;
+                for entry in &state.results.entries {
+                    if current_group != Some(entry.content_type) {
+                        current_group = Some(entry.content_type);
+                        let group_count = grouped_counts[entry.content_type.index()];
+                        let _ = text_ui.label(
+                            ui,
+                            (
+                                "content_browser_group_heading",
+                                instance_id,
+                                entry.content_type.label(),
+                            ),
+                            &format!("{} ({group_count})", entry.content_type.label()),
+                            &style::stat_label(ui),
+                        );
+                        ui.add_space(6.0);
+                    }
+
+                    let installed_project =
+                        installed_project_for_entry(manifest, entry).map(|(_, project)| project);
+                    let download_enabled = installed_project.is_none();
+                    let download_in_flight = state
+                        .active_download
+                        .as_ref()
+                        .is_some_and(|active| active.dedupe_key == entry.dedupe_key);
+                    let tile_outcome = render_result_tile(
+                        ui,
+                        text_ui,
+                        (instance_id, &entry.dedupe_key),
+                        entry,
+                        installed_project,
+                        download_enabled,
+                        download_in_flight,
+                    );
+                    if tile_outcome.download_clicked {
+                        state.download_queue.push_back(QueuedContentDownload {
+                            request: ContentInstallRequest::Latest {
+                                entry: entry.clone(),
+                                game_version: state.minecraft_version_filter.clone(),
+                                loader: state.loader,
+                            },
+                        });
+                        state.status_message = Some(format!(
+                            "Queued {} for download ({} in queue).",
+                            entry.name,
+                            state.download_queue.len()
+                        ));
+                    }
+                    if tile_outcome.open_clicked && outcome.open_entry.is_none() {
+                        outcome.open_entry = Some(entry.clone());
+                    }
+                    ui.add_space(8.0);
+                }
+            });
+
+        ui.add_space(8.0);
+        render_pagination_row(ui, text_ui, instance_id, state, &mut outcome);
+    });
+    outcome
+}
+
+/// Previous / page-number / Go / Next controls under the results list.
+fn render_pagination_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    state: &ContentBrowserState,
+    outcome: &mut RenderResultsOutcome,
+) {
+    ui.horizontal(|ui| {
+        let pagination_button_style =
+            style::neutral_button_with_min_size(ui, egui::vec2(72.0, 30.0));
+        if ui
+            .add_enabled_ui(!state.search_in_flight && state.current_page > 1, |ui| {
+                text_ui.button(
+                    ui,
+                    ("content_browser_previous_page", instance_id),
+                    "Previous",
+                    &pagination_button_style,
+                )
+            })
+            .inner
+            .clicked()
+        {
+            outcome.requested_page = Some(state.current_page.saturating_sub(1).max(1));
+        }
+
+        let _ = text_ui.label(
+            ui,
+            ("content_browser_page_label", instance_id),
+            "Page",
+            &style::caption(ui),
+        );
+        // The field edits its own text and resets whenever the active page changes.
+        let page_input_id = ui.make_persistent_id(("content_browser_page_input", instance_id));
+        let current_page_text = state.current_page.max(1).to_string();
+        let (mut page_text, seen_page_text) = ui
+            .ctx()
+            .data(|data| data.get_temp::<(String, String)>(page_input_id))
+            .unwrap_or_else(|| (current_page_text.clone(), current_page_text.clone()));
+        if seen_page_text != current_page_text {
+            page_text = current_page_text.clone();
+        }
+        let mut page_input_options = style::input_options(ui);
+        page_input_options.desired_width = Some(72.0);
+        page_input_options.min_width = 72.0;
+        page_input_options.desired_rows = 1;
+        let _ = text_ui.singleline_input(ui, page_input_id, &mut page_text, &page_input_options);
+        let page_value = page_text
+            .trim()
+            .parse()
+            .unwrap_or(state.current_page)
+            .clamp(1, 10_000);
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(page_input_id, (page_text, current_page_text)));
+        if ui
+            .add_enabled_ui(!state.search_in_flight, |ui| {
+                text_ui.button(
+                    ui,
+                    ("content_browser_go_page", instance_id),
+                    "Go",
+                    &pagination_button_style,
+                )
+            })
+            .inner
+            .clicked()
+        {
+            outcome.requested_page = Some(page_value.max(1));
+        }
+
+        if ui
+            .add_enabled_ui(!state.search_in_flight, |ui| {
+                text_ui.button(
+                    ui,
+                    ("content_browser_next_page", instance_id),
+                    "Next",
+                    &pagination_button_style,
+                )
+            })
+            .inner
+            .clicked()
+        {
+            outcome.requested_page = Some(state.current_page.saturating_add(1).max(1));
+        }
+
+        ui.add_space(8.0);
+        let _ = text_ui.label(
+            ui,
+            ("content_browser_page_current", instance_id),
+            &format!("Current: {}", state.current_page.max(1)),
+            &style::muted_single_line(ui),
+        );
+    });
+}
+
+/// Right-aligned action buttons (details, download/progress) plus the title and chips.
+fn render_tile_header_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    entry: &BrowserProjectEntry,
+    installed_project: Option<&InstalledContentProject>,
+    download_enabled: bool,
+    download_in_flight: bool,
+    metrics: &ContentBrowserUiMetrics,
+) -> ResultTileInnerOutcome {
+    let mut open_clicked = false;
+    let mut download_clicked = false;
+    let download_button_rect;
+
+    let mut info_hasher = std::collections::hash_map::DefaultHasher::new();
+    (id_source, "info-svg").hash(&mut info_hasher);
+    let info_button_id = format!("content-browser-info-{}", info_hasher.finish());
+    let info_button = render_rounded_icon_button(
+        ui,
+        info_button_id.as_str(),
+        assets::ADJUSTMENTS_SVG,
+        "Open mod details",
+        ui.visuals().widgets.inactive.weak_bg_fill,
+        metrics.action_button_width,
+        metrics.action_button_height,
+        true,
+    );
+    let info_button_rect = info_button.rect;
+    if info_button.clicked {
+        open_clicked = true;
+    }
+    ui.add_space(TILE_ACTION_BUTTON_GAP_XS);
+
+    if download_in_flight {
+        let progress_width = metrics
+            .download_progress_width
+            .min(ui.available_width().max(64.0))
+            .max(metrics.action_button_width * 2.5);
+        let progress = crate::ui::components::progress_bar::progress_bar(
+            ui,
+            text_ui,
+            (id_source, "download_progress"),
+            0.0,
+            true,
+            (Some(progress_width), Some(metrics.action_button_height)),
+            crate::ui::components::progress_bar::ProgressLabel::Text("Downloading"),
+        );
+        download_button_rect = progress.rect;
+    } else {
+        let mut download_hasher = std::collections::hash_map::DefaultHasher::new();
+        (id_source, "download-svg").hash(&mut download_hasher);
+        let download_button_id = format!("content-browser-download-{}", download_hasher.finish());
+        let download_button = render_rounded_icon_button(
+            ui,
+            download_button_id.as_str(),
+            if download_enabled {
+                assets::DOWNLOAD_SVG
+            } else {
+                assets::CHECK_SVG
+            },
+            if download_enabled {
+                "Quick install latest compatible version"
+            } else {
+                "Already installed in this instance"
+            },
+            ui.visuals().selection.bg_fill,
+            metrics.action_button_width,
+            metrics.action_button_height,
+            download_enabled,
+        );
+        download_button_rect = download_button.rect;
+        if download_button.clicked {
+            download_clicked = true;
+        }
+    }
+    ui.add_space(TILE_ACTION_BUTTON_GAP_XS);
+
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width().max(80.0), 0.0),
+        egui::Layout::top_down(egui::Align::Min),
+        |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.set_max_width(ui.available_width().max(80.0));
+                ui.spacing_mut().item_spacing.x = 2.0;
+                render_tile_title_and_chips(ui, text_ui, id_source, entry, installed_project);
+            });
+            if ui.min_rect().height() < TILE_ACTION_BUTTON_HEIGHT {
+                ui.add_space(TILE_ACTION_BUTTON_HEIGHT - ui.min_rect().height());
+            }
+        },
+    );
+
+    ResultTileInnerOutcome {
+        open_clicked,
+        download_clicked,
+        download_button_rect,
+        info_button_rect,
+    }
+}
+
+/// Project title followed by the type, source, and installed chips.
+fn render_tile_title_and_chips(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    entry: &BrowserProjectEntry,
+    installed_project: Option<&InstalledContentProject>,
+) {
+    let title_text = if entry.name.trim().is_empty() {
+        "Unnamed"
+    } else {
+        entry.name.trim()
+    };
+    let _ = text_ui.label(ui, (id_source, "name"), title_text, &style::stat_label(ui));
+    render_chip(ui, text_ui, (id_source, "type"), entry.content_type.label());
+    for source in &entry.sources {
+        render_chip(
+            ui,
+            text_ui,
+            (id_source, "source", source.label()),
+            source.label(),
+        );
+    }
+    if let Some(project) = installed_project {
+        let installed_label = project
+            .selected_version_name
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or("Installed");
+        render_chip(ui, text_ui, (id_source, "installed"), installed_label);
+    }
+}
+
+/// Framed, scrollable summary text under the tile header.
+fn render_tile_summary(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    summary: &str,
+) {
+    egui::Frame::new()
+        .fill(ui.visuals().selection.bg_fill.gamma_multiply(0.25))
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(8))
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .scroll_source(modal_host::drag_scroll_source())
+                .id_salt((id_source, "tile_summary_scroll"))
+                .max_height(52.0)
+                .show(ui, |ui| {
+                    let _ = text_ui.label(ui, (id_source, "summary"), summary, &style::body(ui));
+                });
+        });
+}
+
+fn render_result_tile(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    entry: &BrowserProjectEntry,
+    installed_project: Option<&InstalledContentProject>,
+    download_enabled: bool,
+    download_in_flight: bool,
+) -> ResultTileOutcome {
+    let metrics = ContentBrowserUiMetrics::from_ui(ui);
+    let frame = egui::Frame::new()
+        .fill(ui.visuals().widgets.inactive.bg_fill)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(10))
+        .inner_margin(egui::Margin::same(8))
+        .show(ui, |ui| {
+            let thumbnail_size =
+                egui::vec2(metrics.result_thumbnail_size, metrics.result_thumbnail_size);
+            let mut inner = ResultTileInnerOutcome {
+                open_clicked: false,
+                download_clicked: false,
+                download_button_rect: egui::Rect::NOTHING,
+                info_button_rect: egui::Rect::NOTHING,
+            };
+
+            ui.horizontal_top(|ui| {
+                egui::Frame::new()
+                    .fill(ui.visuals().faint_bg_color)
+                    .corner_radius(egui::CornerRadius::same(8))
+                    .inner_margin(egui::Margin::same(0))
+                    .show(ui, |ui| {
+                        render_browser_thumbnail(
+                            ui,
+                            id_source,
+                            entry,
+                            metrics.result_thumbnail_size,
+                        );
+                    });
+                ui.add_space(10.0);
+                let text_column_width = ui.available_width().max(140.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(text_column_width, thumbnail_size.y),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        let summary = if entry.summary.trim().is_empty() {
+                            "No description provided."
+                        } else {
+                            entry.summary.trim()
+                        };
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::TOP), |ui| {
+                            inner = render_tile_header_row(
+                                ui,
+                                text_ui,
+                                id_source,
+                                entry,
+                                installed_project,
+                                download_enabled,
+                                download_in_flight,
+                                &metrics,
+                            );
+                        });
+                        ui.add_space(4.0);
+                        render_tile_summary(ui, text_ui, id_source, summary);
+                    },
+                );
+            });
+
+            inner
+        });
+
+    let response = ui.interact(
+        frame.response.rect,
+        ui.make_persistent_id((id_source, "open_detail")),
+        egui::Sense::click(),
+    );
+    let tile_state = interaction::InteractionState::of(ui.ctx(), &response, true);
+    interaction::paint_card_highlight(
+        ui.painter(),
+        ui.visuals(),
+        tile_state,
+        frame.response.rect,
+        10,
+        true,
+    );
+    let ResultTileInnerOutcome {
+        open_clicked: button_open_clicked,
+        download_clicked: button_download_clicked,
+        download_button_rect,
+        info_button_rect,
+    } = frame.inner;
+    let pointer_pos = response.interact_pointer_pos();
+    let pointer_over_download =
+        response.clicked() && pointer_pos.is_some_and(|pos| download_button_rect.contains(pos));
+    let pointer_over_info =
+        response.clicked() && pointer_pos.is_some_and(|pos| info_button_rect.contains(pos));
+    let overlay_clicked_download = pointer_over_download && download_enabled;
+    let overlay_clicked_info = pointer_over_info;
+    let pointer_over_action_button = pointer_over_download || pointer_over_info;
+    ResultTileOutcome {
+        open_clicked: button_open_clicked
+            || overlay_clicked_info
+            || (response.clicked() && !button_download_clicked && !pointer_over_action_button),
+        download_clicked: button_download_clicked || overlay_clicked_download,
+    }
+}
+
+pub(super) fn render_chip(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    label: &str,
+) {
+    egui::Frame::new()
+        .fill(ui.visuals().widgets.inactive.weak_bg_fill)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(6))
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            let _ = text_ui.label(
+                ui,
+                (id_source, "chip", label),
+                label,
+                &LabelOptions {
+                    color: ui.visuals().text_color(),
+                    ..style::caption(ui)
+                },
+            );
+        });
+}

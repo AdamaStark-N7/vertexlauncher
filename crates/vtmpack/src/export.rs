@@ -299,7 +299,7 @@ where
     })
 }
 
-fn xz_preset_for_compression_mode(mode: VtmpackCompressionMode) -> u32 {
+pub(crate) fn xz_preset_for_compression_mode(mode: VtmpackCompressionMode) -> u32 {
     match mode {
         VtmpackCompressionMode::Standard => XZ_PRESET_STANDARD,
         VtmpackCompressionMode::Extreme => XZ_PRESET_EXTREME,
@@ -714,7 +714,7 @@ fn collect_regular_files_recursive(root: &Path, out: &mut Vec<PathBuf>) -> std::
     Ok(())
 }
 
-fn append_bytes_to_archive<W: Write>(
+pub(crate) fn append_bytes_to_archive<W: Write>(
     archive: &mut tar::Builder<W>,
     path: &str,
     bytes: &[u8],
@@ -728,7 +728,7 @@ fn append_bytes_to_archive<W: Write>(
         .map_err(|err| format!("failed to append {path} to archive: {err}"))
 }
 
-fn progress_update(
+pub(crate) fn progress_update(
     message: &str,
     completed_steps: usize,
     total_steps: usize,

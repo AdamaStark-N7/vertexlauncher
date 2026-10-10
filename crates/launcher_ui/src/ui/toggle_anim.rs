@@ -26,7 +26,11 @@ pub(crate) struct ToggleAnimState {
 impl ToggleAnimState {
     /// Create state already settled at `pos` with no pending animation.
     pub(crate) fn settled(pos: f32) -> Self {
-        Self { from: pos, to: pos, elapsed: TOGGLE_ANIM_SECS }
+        Self {
+            from: pos,
+            to: pos,
+            elapsed: TOGGLE_ANIM_SECS,
+        }
     }
 
     /// Current visual position in [0, 1] after applying cubic ease-out.

@@ -56,19 +56,21 @@ pub fn take_finished_instance_processes() -> Vec<FinishedInstanceProcess> {
     }
 }
 
-pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, InstallationError> {
-    let instance_root = fs_canonicalize(request.instance_root.as_path())
-        .unwrap_or_else(|_| request.instance_root.clone());
-    let instance_key = normalize_path_key(instance_root.as_path());
-    let requested_account = normalize_account_key(request.account_key.as_deref());
+/// Rejects a launch when the same account is already running this instance, or the account is
+/// already in use by another instance.
+fn ensure_launch_allowed(
+    request: &LaunchRequest,
+    instance_key: &str,
+    requested_account: Option<&str>,
+) -> Result<(), InstallationError> {
     if let Ok(mut processes) = process_registry().lock() {
         prune_finished_processes(&mut processes);
-        if let Some(instance_processes) = processes.get_mut(instance_key.as_str()) {
+        if let Some(instance_processes) = processes.get_mut(instance_key) {
             let same_account_already_running = instance_processes.iter_mut().find_map(|process| {
                 if !matches!(process.child.try_wait(), Ok(None)) {
                     return None;
                 }
-                let matches_account = match requested_account.as_deref() {
+                let matches_account = match requested_account {
                     Some(account) => process
                         .account_key
                         .as_deref()
@@ -83,14 +85,14 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
             });
             if let Some(pid) = same_account_already_running {
                 return Err(InstallationError::InstanceAlreadyRunning {
-                    instance_root: instance_key,
+                    instance_root: instance_key.to_owned(),
                     pid,
                 });
             }
         }
-        if let Some(account) = requested_account.as_deref() {
+        if let Some(account) = requested_account {
             for (running_instance_root, instance_processes) in processes.iter_mut() {
-                if running_instance_root == &instance_key {
+                if running_instance_root == instance_key {
                     continue;
                 }
                 for process in instance_processes {
@@ -112,6 +114,36 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
             }
         }
     }
+    Ok(())
+}
+
+fn redacted_command_args(command: &Command) -> Vec<String> {
+    let raw_args: Vec<std::borrow::Cow<str>> = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy())
+        .collect();
+    let mut command_args: Vec<String> = Vec::with_capacity(raw_args.len());
+    let mut redact_next = false;
+    for arg in &raw_args {
+        if redact_next {
+            command_args.push("[redacted]".to_owned());
+            redact_next = false;
+        } else {
+            command_args.push(quote_command_arg(arg.as_ref()));
+            if arg.as_ref() == "--accessToken" {
+                redact_next = true;
+            }
+        }
+    }
+    command_args
+}
+
+pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, InstallationError> {
+    let instance_root = fs_canonicalize(request.instance_root.as_path())
+        .unwrap_or_else(|_| request.instance_root.clone());
+    let instance_key = normalize_path_key(instance_root.as_path());
+    let requested_account = normalize_account_key(request.account_key.as_deref());
+    ensure_launch_allowed(request, instance_key.as_str(), requested_account.as_deref())?;
 
     let java_resolution = resolve_java_executable(request.java_executable.as_deref());
     let java = java_resolution.executable.as_str();
@@ -225,23 +257,7 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         command.arg(arg);
     }
 
-    let raw_args: Vec<std::borrow::Cow<str>> = command
-        .get_args()
-        .map(|arg| arg.to_string_lossy())
-        .collect();
-    let mut command_args: Vec<String> = Vec::with_capacity(raw_args.len());
-    let mut redact_next = false;
-    for arg in &raw_args {
-        if redact_next {
-            command_args.push("[redacted]".to_owned());
-            redact_next = false;
-        } else {
-            command_args.push(quote_command_arg(arg.as_ref()));
-            if arg.as_ref() == "--accessToken" {
-                redact_next = true;
-            }
-        }
-    }
+    let command_args = redacted_command_args(&command);
     let _ = writeln!(
         command_log,
         "[vertexlauncher] Command: {} {}",

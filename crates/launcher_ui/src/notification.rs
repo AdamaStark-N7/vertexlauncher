@@ -1,18 +1,28 @@
-use crate::ui::style;
+#[path = "notification/emitters.rs"]
+mod emitters;
+#[path = "notification/popups.rs"]
+mod popups;
+#[path = "notification/store.rs"]
+mod store;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use config::NotificationEasing;
-use egui::{self, Color32, CornerRadius, Frame, Layout, Margin, Stroke};
-use textui::TextUi;
-use textui_egui::interaction;
-use textui_egui::prelude::*;
 
-use crate::{assets, privacy};
+use crate::assets;
+
+pub use emitters::{
+    emit, emit_progress, emit_replace, emit_spinner, emit_with_actions, emit_with_icon,
+};
+pub use popups::render_popups;
+use store::{drain_notifications, entry_fade_opacity, entry_ttl};
 
 const NOTIFICATION_TTL: Duration = Duration::from_secs(7);
+/// Notifications carrying buttons stay up longer so there is time to reach them.
+const NOTIFICATION_ACTION_TTL: Duration = Duration::from_secs(15);
 const PROGRESS_NOTIFICATION_STALE_TTL: Duration = Duration::from_secs(14);
 const NOTIFICATION_MAX_STACK: usize = 8;
 const NOTIFICATION_EXPIRY_BAR_HEIGHT: f32 = 4.0;
@@ -33,6 +43,33 @@ pub enum Severity {
     Error,
 }
 
+/// A button attached to a notification. The callback runs on the UI thread when it is clicked.
+#[derive(Clone)]
+pub struct NotificationAction {
+    pub label: String,
+    pub callback: Arc<dyn Fn(&egui::Context) + Send + Sync>,
+}
+
+impl NotificationAction {
+    pub fn new(
+        label: impl Into<String>,
+        callback: impl Fn(&egui::Context) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            callback: Arc::new(callback),
+        }
+    }
+}
+
+impl std::fmt::Debug for NotificationAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotificationAction")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub severity: Severity,
@@ -41,6 +78,9 @@ pub struct Notification {
     pub progress: Option<f32>,
     pub spinner: bool,
     pub replace_key: Option<String>,
+    pub actions: Vec<NotificationAction>,
+    /// SVG shown instead of the severity icon.
+    pub icon: Option<&'static [u8]>,
     pub when: Instant,
 }
 
@@ -53,6 +93,8 @@ struct NotificationEntry {
     progress: Option<f32>,
     spinner: bool,
     replace_key: Option<String>,
+    actions: Vec<NotificationAction>,
+    icon: Option<&'static [u8]>,
     count: u32,
     last_seen: Instant,
 }
@@ -74,6 +116,10 @@ static STREAMER_MODE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 pub fn set_streamer_mode(enabled: bool) {
     STREAMER_MODE_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+fn streamer_mode_enabled() -> bool {
+    STREAMER_MODE_ENABLED.load(Ordering::Relaxed)
 }
 
 fn center() -> &'static NotificationCenter {
@@ -103,515 +149,6 @@ fn severity_name(severity: Severity) -> &'static str {
         Severity::Warn => "Warn",
         Severity::Error => "Error",
     }
-}
-
-pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<String>) {
-    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
-    );
-    let message = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
-    );
-    match severity {
-        Severity::Log => {
-            tracing::debug!(target: "notification", source = %source, message = %message)
-        }
-        Severity::Info => {
-            tracing::info!(target: "notification", source = %source, message = %message)
-        }
-        Severity::Warn => {
-            tracing::warn!(target: "notification", source = %source, message = %message)
-        }
-        Severity::Error => {
-            tracing::error!(target: "notification", source = %source, message = %message)
-        }
-    }
-    if let Err(err) = center().tx.send(Notification {
-        severity,
-        source,
-        message,
-        progress: None,
-        spinner: false,
-        replace_key: None,
-        when: Instant::now(),
-    }) {
-        tracing::error!(
-            target: "notification",
-            error = %err,
-            "Failed to enqueue notification."
-        );
-    }
-}
-
-pub fn emit_progress(
-    severity: Severity,
-    source: impl Into<String>,
-    message: impl Into<String>,
-    progress: f32,
-) {
-    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
-    );
-    let message = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
-    );
-    let progress = progress.clamp(0.0, 1.0);
-    tracing::info!(
-        target: "notification",
-        source = %source,
-        message = %message,
-        progress,
-        "notification progress update"
-    );
-    if let Err(err) = center().tx.send(Notification {
-        severity,
-        source: source.clone(),
-        message,
-        progress: Some(progress),
-        spinner: false,
-        replace_key: Some(source.clone()),
-        when: Instant::now(),
-    }) {
-        tracing::error!(
-            target: "notification",
-            source = %source,
-            progress,
-            error = %err,
-            "Failed to enqueue progress notification."
-        );
-    }
-}
-
-pub fn emit_spinner(
-    severity: Severity,
-    source: impl Into<String>,
-    message: impl Into<String>,
-    replace_key: impl Into<String>,
-) {
-    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
-    );
-    let message = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
-    );
-    let replace_key = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned(),
-    );
-    tracing::info!(
-        target: "notification",
-        source = %source,
-        message = %message,
-        replace_key = %replace_key,
-        spinner = true,
-        "notification spinner update"
-    );
-    if let Err(err) = center().tx.send(Notification {
-        severity,
-        source,
-        message,
-        progress: None,
-        spinner: true,
-        replace_key: Some(replace_key),
-        when: Instant::now(),
-    }) {
-        tracing::error!(
-            target: "notification",
-            error = %err,
-            "Failed to enqueue spinner notification."
-        );
-    }
-}
-
-pub fn emit_replace(
-    severity: Severity,
-    source: impl Into<String>,
-    message: impl Into<String>,
-    replace_key: impl Into<String>,
-) {
-    let streamer_mode = STREAMER_MODE_ENABLED.load(Ordering::Relaxed);
-    let source = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &source.into()).into_owned(),
-    );
-    let message = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &message.into()).into_owned(),
-    );
-    let replace_key = privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &replace_key.into()).into_owned(),
-    );
-    tracing::info!(
-        target: "notification",
-        source = %source,
-        message = %message,
-        replace_key = %replace_key,
-        "notification replacement update"
-    );
-    if let Err(err) = center().tx.send(Notification {
-        severity,
-        source,
-        message,
-        progress: None,
-        spinner: false,
-        replace_key: Some(replace_key),
-        when: Instant::now(),
-    }) {
-        tracing::error!(
-            target: "notification",
-            error = %err,
-            "Failed to enqueue replacement notification."
-        );
-    }
-}
-
-fn drain_notifications(fade_out: Duration) {
-    let center = center();
-    let Ok(rx) = center.rx.lock() else {
-        tracing::error!(
-            target: "notification",
-            "Notification receiver mutex was poisoned while draining notifications."
-        );
-        return;
-    };
-    let Ok(mut store) = center.store.lock() else {
-        tracing::error!(
-            target: "notification",
-            "Notification store mutex was poisoned while draining notifications."
-        );
-        return;
-    };
-
-    while let Ok(notif) = rx.try_recv() {
-        if let Some(replace_key) = notif.replace_key.as_deref() {
-            if let Some(existing) = store
-                .entries
-                .iter_mut()
-                .find(|entry| entry.replace_key.as_deref() == Some(replace_key))
-            {
-                existing.severity = notif.severity;
-                existing.source = notif.source;
-                existing.message = notif.message;
-                existing.progress = notif.progress;
-                existing.spinner = notif.spinner;
-                existing.count = 1;
-                existing.replace_key = notif.replace_key;
-                existing.last_seen = notif.when;
-                continue;
-            }
-        } else if let Some(existing) = store.entries.iter_mut().find(|entry| {
-            entry.severity == notif.severity
-                && entry.source == notif.source
-                && entry.message == notif.message
-        }) {
-            existing.count = existing.count.saturating_add(1);
-            existing.last_seen = notif.when;
-            continue;
-        }
-
-        let entry_id = store.next_id;
-        store.entries.push(NotificationEntry {
-            id: entry_id,
-            severity: notif.severity,
-            source: notif.source,
-            message: notif.message,
-            progress: notif.progress,
-            spinner: notif.spinner,
-            replace_key: notif.replace_key,
-            count: 1,
-            last_seen: notif.when,
-        });
-        store.next_id = entry_id.saturating_add(1);
-    }
-
-    let now = Instant::now();
-    store.entries.retain(|entry| {
-        now.saturating_duration_since(entry.last_seen) < entry_ttl(entry) + fade_out
-    });
-    store.entries.sort_by(|a, b| b.last_seen.cmp(&a.last_seen));
-    if store.entries.len() > NOTIFICATION_MAX_STACK {
-        store.entries.truncate(NOTIFICATION_MAX_STACK);
-    }
-}
-
-fn entry_ttl(entry: &NotificationEntry) -> Duration {
-    if entry.progress.is_some() || entry.spinner {
-        PROGRESS_NOTIFICATION_STALE_TTL
-    } else {
-        NOTIFICATION_TTL
-    }
-}
-
-fn entry_fade_opacity(
-    entry: &NotificationEntry,
-    now: Instant,
-    settings: &NotificationDisplaySettings,
-) -> f32 {
-    let past_ttl = now
-        .saturating_duration_since(entry.last_seen)
-        .saturating_sub(entry_ttl(entry));
-    if past_ttl.is_zero() {
-        return 1.0;
-    }
-    let fade_progress = past_ttl.as_secs_f32() / settings.fade_out.as_secs_f32().max(f32::EPSILON);
-    1.0 - settings.easing.apply(fade_progress)
-}
-
-pub fn render_popups(
-    ctx: &egui::Context,
-    text_ui: &mut TextUi,
-    settings: &NotificationDisplaySettings,
-    suppressed_progress_source: Option<&str>,
-) {
-    drain_notifications(settings.fade_out);
-
-    let entries = {
-        let Ok(store) = center().store.lock() else {
-            return;
-        };
-        if store.entries.is_empty() {
-            return;
-        }
-        store
-            .entries
-            .iter()
-            .filter(|entry| {
-                suppressed_progress_source.is_none_or(|source| {
-                    let suppressible = entry.progress.is_some() || entry.spinner;
-                    !suppressible
-                        || (entry.source != source && entry.replace_key.as_deref() != Some(source))
-                })
-            })
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    if entries.is_empty() {
-        return;
-    }
-
-    egui::Area::new(egui::Id::new("notification_stack_area"))
-        .anchor(egui::Align2::RIGHT_TOP, egui::vec2(-14.0, 48.0))
-        .interactable(true)
-        .order(egui::Order::Foreground)
-        .show(ctx, |ui| {
-            ui.set_width(360.0);
-            ui.spacing_mut().item_spacing = egui::vec2(0.0, 8.0);
-            let now = Instant::now();
-            let mut dismissed_ids = Vec::new();
-
-            for (index, entry) in entries.iter().enumerate() {
-                let base = ui.visuals().window_fill;
-                let frame = Frame::new()
-                    .fill(Color32::from_rgba_premultiplied(
-                        base.r(),
-                        base.g(),
-                        base.b(),
-                        255,
-                    ))
-                    .stroke(Stroke::new(1.0, ui.visuals().window_stroke.color))
-                    .corner_radius(CornerRadius::same(10))
-                    .inner_margin(Margin::same(10));
-
-                let previous_opacity = ui.opacity();
-                ui.set_opacity(previous_opacity * entry_fade_opacity(entry, now, settings));
-                frame.show(ui, |ui| {
-                    if entry.progress.is_none() && !entry.spinner {
-                        let elapsed = now.saturating_duration_since(entry.last_seen);
-                        let remaining = NOTIFICATION_TTL.saturating_sub(elapsed);
-                        let expiry_progress = (remaining.as_secs_f32()
-                            / NOTIFICATION_TTL.as_secs_f32())
-                        .clamp(0.0, 1.0);
-                        let expiry_fill = severity_accent_fill(ui, entry.severity);
-                        let bar_width = ui.available_width().max(1.0);
-                        let (bar_rect, _) = ui.allocate_exact_size(
-                            egui::vec2(bar_width, NOTIFICATION_EXPIRY_BAR_HEIGHT),
-                            egui::Sense::hover(),
-                        );
-                        ui.painter().rect_filled(
-                            bar_rect,
-                            CornerRadius::same(2),
-                            ui.visuals().widgets.inactive.bg_fill,
-                        );
-                        if expiry_progress > 0.0 {
-                            let fill_width = bar_rect.width() * expiry_progress;
-                            let filled_rect = if settings.expiry_bars_empty_left {
-                                egui::Rect::from_min_max(
-                                    egui::pos2(bar_rect.max.x - fill_width, bar_rect.min.y),
-                                    bar_rect.max,
-                                )
-                            } else {
-                                egui::Rect::from_min_max(
-                                    bar_rect.min,
-                                    egui::pos2(bar_rect.min.x + fill_width, bar_rect.max.y),
-                                )
-                            };
-                            ui.painter().rect_filled(
-                                filled_rect,
-                                CornerRadius::same(2),
-                                expiry_fill,
-                            );
-                        }
-                        ui.add_space(8.0);
-                    }
-
-                    ui.with_layout(Layout::right_to_left(egui::Align::TOP), |ui| {
-                        let close_button = notification_icon_button(
-                            ui,
-                            &format!("notif-close-{}", entry.id),
-                            assets::X_SVG,
-                            "Dismiss notification",
-                        );
-                        if close_button.clicked() {
-                            dismissed_ids.push(entry.id);
-                        }
-                        ui.add_space(6.0);
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(ui.available_width().max(0.0), 0.0),
-                            Layout::left_to_right(egui::Align::TOP),
-                            |ui| {
-                                let icon_size = 16.0;
-                                let icon = crate::ui::svg_tint::themed_svg_image(
-                                    "notification",
-                                    &format!(
-                                        "notif-icon-{}-{}",
-                                        index,
-                                        severity_name(entry.severity)
-                                    ),
-                                    icon_for_severity(entry.severity),
-                                    ui.visuals().text_color(),
-                                    icon_size,
-                                );
-                                let icon_rect = egui::Rect::from_min_size(
-                                    ui.cursor().min + egui::vec2(0.0, 2.0),
-                                    egui::vec2(icon_size, icon_size),
-                                );
-                                ui.put(icon_rect, icon);
-                                ui.add_space(6.0);
-
-                                if entry.count > 1 {
-                                    let count_style = style::caption(ui);
-                                    let _ = text_ui.label(
-                                        ui,
-                                        ("notif-count", index),
-                                        &format!("x{}", entry.count),
-                                        &count_style,
-                                    );
-                                    ui.add_space(6.0);
-                                }
-
-                                let mut source_style = style::stat_label(ui);
-                                source_style.wrap = true;
-                                let _ = text_ui.label(
-                                    ui,
-                                    ("notif-source", index),
-                                    &format!(
-                                        "{} · {}",
-                                        severity_name(entry.severity),
-                                        entry.source
-                                    ),
-                                    &source_style,
-                                );
-                            },
-                        );
-                    });
-
-                    ui.add_space(4.0);
-                    let message_style = LabelOptions {
-                        color: ui.visuals().text_color(),
-                        wrap: true,
-                        ..style::caption(ui)
-                    };
-                    if let Some(progress) = entry.progress {
-                        ui.add_space(6.0);
-                        let overlay = format!("{}  {:.0}%", entry.message, progress * 100.0);
-                        ui.add(
-                            egui::ProgressBar::new(progress).desired_width(ui.available_width()),
-                        );
-                        let _ = text_ui.label(
-                            ui,
-                            ("notif-progress-message", index),
-                            overlay.as_str(),
-                            &message_style,
-                        );
-                    } else if entry.spinner {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.spinner();
-                            ui.add_space(6.0);
-                            let _ = text_ui.label(
-                                ui,
-                                ("notif-spinner-message", index),
-                                entry.message.as_str(),
-                                &message_style,
-                            );
-                        });
-                    } else {
-                        let _ = text_ui.label(
-                            ui,
-                            ("notif-message", index),
-                            entry.message.as_str(),
-                            &message_style,
-                        );
-                    }
-                });
-                ui.set_opacity(previous_opacity);
-            }
-
-            if !dismissed_ids.is_empty()
-                && let Ok(mut store) = center().store.lock()
-            {
-                store
-                    .entries
-                    .retain(|entry| !dismissed_ids.contains(&entry.id));
-            }
-        });
-
-    ctx.request_repaint();
-}
-
-fn severity_accent_fill(ui: &egui::Ui, severity: Severity) -> Color32 {
-    match severity {
-        Severity::Log | Severity::Info => ui.visuals().selection.bg_fill,
-        Severity::Warn => ui.visuals().warn_fg_color,
-        Severity::Error => ui.visuals().error_fg_color,
-    }
-}
-
-fn notification_icon_button(
-    ui: &mut egui::Ui,
-    icon_id: &str,
-    svg_bytes: &[u8],
-    tooltip: &str,
-) -> egui::Response {
-    let button_size = egui::vec2(22.0, 22.0);
-    let icon_size = 12.0;
-    let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
-    let fill = interaction::FillPalette::from_visuals(ui.visuals()).fill(state, false);
-    let stroke = interaction::hover_stroke(
-        state,
-        ui.visuals().widgets.noninteractive.bg_stroke,
-        ui.visuals().widgets.hovered.bg_stroke,
-    );
-    ui.painter().rect_filled(rect, CornerRadius::same(7), fill);
-    ui.painter().rect_stroke(
-        rect,
-        CornerRadius::same(7),
-        stroke,
-        egui::StrokeKind::Inside,
-    );
-    interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 7);
-
-    let image = crate::ui::svg_tint::themed_svg_image(
-        "notification",
-        icon_id,
-        svg_bytes,
-        ui.visuals().text_color(),
-        icon_size,
-    );
-    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
-    let _ = ui.put(icon_rect, image);
-
-    crate::ui::style::hover_tip(ui, response, tooltip)
 }
 
 #[macro_export]

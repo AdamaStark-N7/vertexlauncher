@@ -21,6 +21,10 @@ use crate::{
     ResolveInstalledContentRequest, ResolveInstalledContentResult, ResolvedInstalledContent,
 };
 
+#[path = "installed_content_lookup_text.rs"]
+mod installed_content_lookup_text;
+use installed_content_lookup_text::*;
+
 /// Maximum number of entries kept in each session-scoped lookup cache.
 /// Prevents unbounded growth when the user browses a very large mod library.
 const LOOKUP_CACHE_MAX_ENTRIES: usize = 4096;
@@ -1235,88 +1239,6 @@ fn choose_preferred_content_entry(
     }
 
     best.map(|(_, entry)| entry)
-}
-
-fn split_lookup_tokens(value: &str) -> Vec<&str> {
-    value
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .collect()
-}
-
-fn trim_ignorable_lookup_suffix<'a>(tokens: &'a [&'a str]) -> &'a [&'a str] {
-    let trimmed_len = tokens
-        .iter()
-        .rposition(|token| !is_ignorable_lookup_suffix_token(token))
-        .map(|index| index + 1)
-        .unwrap_or(tokens.len());
-    &tokens[..trimmed_len]
-}
-
-fn is_ignorable_lookup_suffix_token(token: &str) -> bool {
-    matches!(
-        token,
-        "fabric"
-            | "forge"
-            | "neoforge"
-            | "quilt"
-            | "rift"
-            | "liteloader"
-            | "loader"
-            | "mod"
-            | "mods"
-            | "shader"
-            | "shaders"
-            | "shaderpack"
-            | "shaderpacks"
-            | "resourcepack"
-            | "resourcepacks"
-            | "texturepack"
-            | "texturepacks"
-            | "datapack"
-            | "datapacks"
-            | "minecraft"
-            | "mc"
-            | "client"
-            | "server"
-    )
-}
-
-fn split_camel_case_words(value: &str) -> String {
-    let mut result = String::with_capacity(value.len() + 8);
-    let mut chars = value.chars().peekable();
-    let mut previous: Option<char> = None;
-
-    while let Some(ch) = chars.next() {
-        let next = chars.peek().copied();
-        if let Some(prev) = previous
-            && should_insert_camel_case_boundary(prev, ch, next)
-            && !result.ends_with(' ')
-        {
-            result.push(' ');
-        }
-        result.push(ch);
-        previous = Some(ch);
-    }
-
-    result
-}
-
-fn should_insert_camel_case_boundary(previous: char, current: char, next: Option<char>) -> bool {
-    (previous.is_ascii_lowercase() && current.is_ascii_uppercase())
-        || (previous.is_ascii_uppercase()
-            && current.is_ascii_uppercase()
-            && next.is_some_and(|next| next.is_ascii_lowercase()))
-}
-
-fn query_has_only_ignorable_suffix_tokens(
-    query_tokens: &[&str],
-    candidate_tokens: &[&str],
-) -> bool {
-    query_tokens.starts_with(candidate_tokens)
-        && query_tokens[candidate_tokens.len()..]
-            .iter()
-            .all(|token| is_ignorable_lookup_suffix_token(token))
 }
 
 fn content_source_priority(source: ContentSource) -> i32 {

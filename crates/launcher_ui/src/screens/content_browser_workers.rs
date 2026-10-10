@@ -189,6 +189,7 @@ pub(super) fn poll_version_catalog(state: &mut ContentBrowserState) {
         state.version_catalog_in_flight = false;
         match update {
             Ok(versions) => {
+                state.game_version_options = game_version_option_labels(&versions);
                 state.available_game_versions = versions;
                 state.version_catalog_error = None;
             }
@@ -1121,20 +1122,37 @@ pub(super) fn maybe_start_queued_download(
     install_activity::set_status(
         instance_name,
         installation::InstallStage::DownloadingCore,
-        "Applying content changes...",
+        "Resolving dependencies...",
     );
     notification::progress!(
         notification::Severity::Info,
         "content-browser/download",
-        0.1f32,
-        "Applying queued content operation..."
+        0.0f32,
+        "Resolving dependencies..."
     );
     let root = instance_root.to_path_buf();
     let request = next.request.clone();
+    let queued_after = state.download_queue.len();
+    let activity_instance = instance_name.to_owned();
+    // Shown in the top-right notification and, via install activity, on the instance screen.
+    let sink: InstallReportSink = Arc::new(move |progress, fraction| {
+        install_activity::set_progress(activity_instance.as_str(), progress);
+        notification::emit_progress(
+            notification::Severity::Info,
+            "content-browser/download",
+            progress.message.clone(),
+            fraction,
+        );
+    });
 
     let _ = tokio_runtime::spawn_detached(async move {
         let join = tokio_runtime::spawn_blocking(move || {
-            apply_content_install_request(root.as_path(), request)
+            apply_content_install_request_with_live_progress(
+                root.as_path(),
+                request,
+                queued_after,
+                sink,
+            )
         });
         let result = match join.await {
             Ok(r) => r,

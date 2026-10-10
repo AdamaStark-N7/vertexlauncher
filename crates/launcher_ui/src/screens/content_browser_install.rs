@@ -2,10 +2,16 @@ use super::*;
 
 #[path = "content_browser_install/dependency_ref.rs"]
 mod dependency_ref;
+#[path = "content_browser_install/install_reporter.rs"]
+mod install_reporter;
 #[path = "content_browser_install/resolved_download.rs"]
 mod resolved_download;
 
 pub(super) use self::dependency_ref::DependencyRef;
+pub(super) use self::install_reporter::{
+    InstallReportSink, InstallReporter, with_install_reporter,
+};
+use self::install_reporter::{report_begin_file, report_file_bytes, report_finish_file};
 pub(super) use self::resolved_download::ResolvedDownload;
 
 pub(super) fn active_download_from_request(
@@ -33,6 +39,123 @@ pub(super) fn apply_content_install_request(
         &HashMap::new(),
         &[],
     )
+}
+
+/// Installs `request` while reporting live progress through `sink`.
+///
+/// The project and all of its not-yet-installed dependencies are resolved first so the whole
+/// queue is known up front, then downloaded one file at a time with byte-level progress.
+pub(super) fn apply_content_install_request_with_live_progress(
+    instance_root: &Path,
+    request: ContentInstallRequest,
+    queued_after: usize,
+    sink: InstallReportSink,
+) -> Result<ContentDownloadOutcome, String> {
+    let names = plan_install_queue(instance_root, &request);
+    let reporter = InstallReporter::new(sink, names, queued_after);
+    with_install_reporter(reporter, || {
+        apply_content_install_request(instance_root, request)
+    })
+}
+
+/// Names of everything `request` will download, root first, dependencies after. Best effort:
+/// a project that cannot be resolved here is left out and reported by the real install.
+fn plan_install_queue(instance_root: &Path, request: &ContentInstallRequest) -> Vec<String> {
+    let modrinth = ModrinthClient::default();
+    let curseforge = CurseForgeClient::from_env();
+    let manifest = load_content_manifest(instance_root);
+    let (entry, game_version, loader, resolved) = match request {
+        ContentInstallRequest::Latest {
+            entry,
+            game_version,
+            loader,
+        } => {
+            let Ok(Some(resolved)) = resolve_best_download(
+                entry,
+                game_version.as_str(),
+                *loader,
+                &modrinth,
+                curseforge.as_ref(),
+            ) else {
+                return Vec::new();
+            };
+            (entry, game_version.as_str(), *loader, resolved)
+        }
+        ContentInstallRequest::Exact {
+            entry,
+            version,
+            game_version,
+            loader,
+        } => (
+            entry,
+            game_version.as_str(),
+            *loader,
+            resolved_download_from_version(version.clone()),
+        ),
+    };
+    let mut visited = HashSet::new();
+    let mut names = Vec::new();
+    plan_project(
+        &manifest,
+        entry,
+        &resolved,
+        game_version,
+        loader,
+        &modrinth,
+        curseforge.as_ref(),
+        &mut visited,
+        &mut names,
+    );
+    names
+}
+
+#[allow(clippy::too_many_arguments)]
+fn plan_project(
+    manifest: &ContentInstallManifest,
+    entry: &BrowserProjectEntry,
+    resolved: &ResolvedDownload,
+    game_version: &str,
+    loader: BrowserLoader,
+    modrinth: &ModrinthClient,
+    curseforge: Option<&CurseForgeClient>,
+    visited: &mut HashSet<String>,
+    names: &mut Vec<String>,
+) {
+    if !visited.insert(entry.dedupe_key.clone()) {
+        return;
+    }
+    let already_installed =
+        installed_project_for_entry(manifest, entry).is_some_and(|(_, project)| {
+            project.selected_source == Some(resolved.source)
+                && project.selected_version_id.as_deref() == Some(resolved.version_id.as_str())
+        });
+    if already_installed {
+        return;
+    }
+    names.push(entry.name.clone());
+    let Ok(dependencies) =
+        dependency_to_browser_entries(resolved.dependencies.as_slice(), modrinth, curseforge)
+    else {
+        return;
+    };
+    for dependency in dependencies {
+        let Ok(Some(dependency_resolved)) =
+            resolve_best_download(&dependency, game_version, loader, modrinth, curseforge)
+        else {
+            continue;
+        };
+        plan_project(
+            manifest,
+            &dependency,
+            &dependency_resolved,
+            game_version,
+            loader,
+            modrinth,
+            curseforge,
+            visited,
+            names,
+        );
+    }
 }
 
 pub(super) fn apply_content_install_request_with_prefetched_downloads(
@@ -283,7 +406,9 @@ fn install_project_recursive(
                     )
                 })?;
             } else {
+                report_begin_file(entry.name.as_str());
                 download_file(resolved.file_url.as_str(), target_path.as_path())?;
+                report_finish_file();
             }
             if !added_files
                 .iter()
@@ -1048,11 +1173,20 @@ fn download_file(url: &str, destination: &Path) -> Result<(), String> {
         .call()
         .map_err(|err| format!("download request failed for {url}: {err}"))?;
     let (_, body) = response.into_parts();
+    let total = body.content_length();
     let mut reader = body.into_reader();
-    let mut bytes = Vec::new();
-    reader
-        .read_to_end(&mut bytes)
-        .map_err(|err| format!("failed to read download body from {url}: {err}"))?;
+    let mut bytes = Vec::with_capacity(total.unwrap_or(0).min(256 * 1024 * 1024) as usize);
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut chunk)
+            .map_err(|err| format!("failed to read download body from {url}: {err}"))?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&chunk[..read]);
+        report_file_bytes(bytes.len() as u64, total);
+    }
     let mut file = std::fs::File::create(destination)
         .map_err(|err| format!("failed to create {:?}: {err}", destination))?;
     file.write_all(&bytes)

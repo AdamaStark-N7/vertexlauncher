@@ -198,6 +198,7 @@ impl GamepadNavigator {
 
         let mut activate = false;
         let mut back = false;
+        let mut context_menu_requested = false;
         let mut scroll_delta: f32 = 0.0;
         let mut h_scroll_delta: f32 = 0.0;
         let mut skins_preview_orbit: f32 = 0.0;
@@ -285,6 +286,11 @@ impl GamepadNavigator {
                     Button::East => {
                         controller_input_seen = true;
                         back = true
+                    }
+                    // X opens the focused item's context menu (the keyboard Shift+F10 chord).
+                    Button::West => {
+                        controller_input_seen = true;
+                        context_menu_requested = true;
                     }
                     Button::LeftThumb => {
                         controller_input_seen = true;
@@ -410,6 +416,18 @@ impl GamepadNavigator {
         // --- Activate (A / South button) ---
         if activate {
             Self::inject_key(ctx, egui::Key::Enter, egui::Modifiers::default());
+        }
+
+        // --- Context menu (X / West button) ---
+        if context_menu_requested {
+            Self::inject_key(
+                ctx,
+                egui::Key::F10,
+                egui::Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+            );
         }
 
         // --- Back (B / East button) ---

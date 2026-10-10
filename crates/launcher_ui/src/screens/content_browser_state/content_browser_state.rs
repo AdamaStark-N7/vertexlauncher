@@ -24,6 +24,8 @@ pub struct ContentBrowserState {
     pub(crate) detail_minecraft_version_filter: String,
     pub(crate) detail_versions_results: launcher_runtime::WorkerChannel<DetailVersionsResult>,
     pub(crate) available_game_versions: Vec<MinecraftVersionEntry>,
+    /// Dropdown labels for `available_game_versions`; refreshed whenever the catalog changes.
+    pub(crate) game_version_options: Vec<String>,
     pub(crate) version_catalog_error: Option<String>,
     pub(crate) version_catalog_in_flight: bool,
     pub(crate) version_catalog:
@@ -76,6 +78,7 @@ impl Default for ContentBrowserState {
             detail_minecraft_version_filter: String::new(),
             detail_versions_results: Default::default(),
             available_game_versions: Vec::new(),
+            game_version_options: game_version_option_labels(&[]),
             version_catalog_error: None,
             version_catalog_in_flight: false,
             version_catalog: Default::default(),

@@ -1,5 +1,6 @@
 use app_paths as launcher_paths;
 mod config_format;
+mod config_setting_bindings;
 mod gamepad_calibration;
 mod graphics_adapter_preference;
 mod graphics_api_preference;
@@ -1023,144 +1024,74 @@ impl Config {
 
     /// Visits each toggle setting with mutable access to its backing value.
     pub fn for_each_toggle_mut(&mut self, mut visit: impl FnMut(ToggleSettingSpec, &mut bool)) {
-        // Intentionally destructure all fields to force updates here when Config changes.
-        let Self {
-            low_power_gpu_preferred,
-            graphics_adapter_preference_type: _,
-            graphics_adapter_profile: _,
-            graphics_adapter_explicit_hash: _,
-            graphics_api_preference: _,
-            streamer_mode_enabled,
-            window_transparency: _,
-            legacy_window_blur_enabled: _,
-            windows_backdrop_type: _,
-            linux_blur_protocol: _,
-            macos_visual_effect_material: _,
-            macos_visual_effect_blending_mode: _,
-            macos_visual_effect_state: _,
-            macos_visual_effect_emphasized: _,
-            ui_opacity_percent: _,
-            legacy_windows_transparency_level: _,
-            linux_set_opengl_driver: _,
-            linux_use_zink_driver: _,
-            theme_id: _,
-            open_type_features_enabled,
-            open_type_features_to_enable: _,
-            notification_expiry_bars_empty_left,
-            notification_fade_out_seconds: _,
-            notification_easing: _,
-            ui_font_family: _,
-            ui_emoji_font_family: _,
-            text_rendering_path: _,
-            skin_preview_aa_mode: _,
-            skin_preview_texel_aa_mode: _,
-            svg_aa_mode: _,
-            skin_preview_msaa_samples: _,
-            skin_preview_motion_blur_enabled: _,
-            skin_preview_motion_blur_amount: _,
-            skin_preview_motion_blur_shutter_frames: _,
-            skin_preview_motion_blur_sample_count: _,
-            skin_preview_fresh_format_enabled,
-            skin_preview_3d_layers_enabled,
-            hdr_when_available: _,
-            ui_font_size: _,
-            ui_font_weight: _,
-            typography: _,
-            include_snapshots_and_betas,
-            include_alpha_versions,
-            include_experimental_versions,
-            force_java_21_minimum,
-            frame_limiter_enabled,
-            discord_rich_presence_enabled,
-            sync_servers_enabled,
-            sync_command_history_enabled,
-            sync_hotbars_enabled,
-            sync_servers_to_all_instances_by_default,
-            drag_scroll_enabled,
-            default_instance_max_memory_mib: _,
-            default_instance_cli_args: _,
-            minecraft_installations_root: _,
-            download_max_concurrent: _,
-            download_speed_limit_enabled: _,
-            download_speed_limit: _,
-            frame_limit_fps: _,
-            java_8_jvm_path: _,
-            java_16_jvm_path: _,
-            java_17_jvm_path: _,
-            java_21_jvm_path: _,
-            java_25_jvm_path: _,
-            curseforge_api_key: _,
-            gamepad_calibrations: _,
-        } = self;
-
+        let b = self.settings_bindings_mut();
         visit(
             ToggleSettingId::LowPowerGpuPreferred.spec(),
-            low_power_gpu_preferred,
+            b.low_power_gpu_preferred,
         );
         visit(
             ToggleSettingId::StreamerModeEnabled.spec(),
-            streamer_mode_enabled,
+            b.streamer_mode_enabled,
         );
-
         visit(
             ToggleSettingId::OpenTypeFeaturesEnabled.spec(),
-            open_type_features_enabled,
+            b.open_type_features_enabled,
         );
         visit(
             ToggleSettingId::NotificationExpiryBarsEmptyLeft.spec(),
-            notification_expiry_bars_empty_left,
+            b.notification_expiry_bars_empty_left,
         );
         visit(
             ToggleSettingId::SkinPreviewFreshFormatEnabled.spec(),
-            skin_preview_fresh_format_enabled,
+            b.skin_preview_fresh_format_enabled,
         );
         visit(
             ToggleSettingId::SkinPreview3dLayersEnabled.spec(),
-            skin_preview_3d_layers_enabled,
+            b.skin_preview_3d_layers_enabled,
         );
         visit(
             ToggleSettingId::SnapshotsAndBetasEnabled.spec(),
-            include_snapshots_and_betas,
+            b.include_snapshots_and_betas,
         );
         visit(
             ToggleSettingId::AlphaVersionsEnabled.spec(),
-            include_alpha_versions,
+            b.include_alpha_versions,
         );
         visit(
             ToggleSettingId::ExperimentalVersionsEnabled.spec(),
-            include_experimental_versions,
+            b.include_experimental_versions,
         );
         visit(
             ToggleSettingId::ForceJava21Minimum.spec(),
-            force_java_21_minimum,
+            b.force_java_21_minimum,
         );
         visit(
             ToggleSettingId::FrameLimiterEnabled.spec(),
-            frame_limiter_enabled,
+            b.frame_limiter_enabled,
         );
         visit(
             ToggleSettingId::DiscordRichPresenceEnabled.spec(),
-            discord_rich_presence_enabled,
+            b.discord_rich_presence_enabled,
         );
         visit(
             ToggleSettingId::SyncServersEnabled.spec(),
-            sync_servers_enabled,
+            b.sync_servers_enabled,
         );
         visit(
             ToggleSettingId::SyncCommandHistoryEnabled.spec(),
-            sync_command_history_enabled,
+            b.sync_command_history_enabled,
         );
         visit(
             ToggleSettingId::SyncHotbarsEnabled.spec(),
-            sync_hotbars_enabled,
+            b.sync_hotbars_enabled,
         );
         visit(
             ToggleSettingId::SyncServersToAllInstancesByDefault.spec(),
-            sync_servers_to_all_instances_by_default,
+            b.sync_servers_to_all_instances_by_default,
         );
         visit(
             ToggleSettingId::DragScrollEnabled.spec(),
-            drag_scroll_enabled,
+            b.drag_scroll_enabled,
         );
     }
 
@@ -1169,325 +1100,49 @@ impl Config {
         &mut self,
         mut visit: impl FnMut(DropdownSettingSpec, &mut UiFontFamily),
     ) {
-        // Intentionally destructure all fields to force updates here when Config changes.
-        let Self {
-            low_power_gpu_preferred: _,
-            graphics_adapter_preference_type: _,
-            graphics_adapter_profile: _,
-            graphics_adapter_explicit_hash: _,
-            graphics_api_preference: _,
-            streamer_mode_enabled: _,
-            window_transparency: _,
-            legacy_window_blur_enabled: _,
-            windows_backdrop_type: _,
-            linux_blur_protocol: _,
-            macos_visual_effect_material: _,
-            macos_visual_effect_blending_mode: _,
-            macos_visual_effect_state: _,
-            macos_visual_effect_emphasized: _,
-            ui_opacity_percent: _,
-            legacy_windows_transparency_level: _,
-            linux_set_opengl_driver: _,
-            linux_use_zink_driver: _,
-            theme_id: _,
-            open_type_features_enabled: _,
-            open_type_features_to_enable: _,
-            notification_expiry_bars_empty_left: _,
-            notification_fade_out_seconds: _,
-            notification_easing: _,
-            ui_font_family,
-            ui_emoji_font_family: _,
-            text_rendering_path: _,
-            skin_preview_aa_mode: _,
-            skin_preview_texel_aa_mode: _,
-            svg_aa_mode: _,
-            skin_preview_msaa_samples: _,
-            skin_preview_motion_blur_enabled: _,
-            skin_preview_motion_blur_amount: _,
-            skin_preview_motion_blur_shutter_frames: _,
-            skin_preview_motion_blur_sample_count: _,
-            skin_preview_fresh_format_enabled: _,
-            skin_preview_3d_layers_enabled: _,
-            hdr_when_available: _,
-            ui_font_size: _,
-            ui_font_weight: _,
-            typography: _,
-            include_snapshots_and_betas: _,
-            include_alpha_versions: _,
-            include_experimental_versions: _,
-            force_java_21_minimum: _,
-            frame_limiter_enabled: _,
-            discord_rich_presence_enabled: _,
-            sync_servers_enabled: _,
-            sync_command_history_enabled: _,
-            sync_hotbars_enabled: _,
-            sync_servers_to_all_instances_by_default: _,
-            drag_scroll_enabled: _,
-            frame_limit_fps: _,
-            default_instance_max_memory_mib: _,
-            default_instance_cli_args: _,
-            minecraft_installations_root: _,
-            download_max_concurrent: _,
-            download_speed_limit_enabled: _,
-            download_speed_limit: _,
-            curseforge_api_key: _,
-            java_8_jvm_path: _,
-            java_16_jvm_path: _,
-            java_17_jvm_path: _,
-            java_21_jvm_path: _,
-            java_25_jvm_path: _,
-            gamepad_calibrations: _,
-        } = self;
-
-        visit(DropdownSettingId::UiFontFamily.spec(), ui_font_family);
+        let b = self.settings_bindings_mut();
+        visit(DropdownSettingId::UiFontFamily.spec(), b.ui_font_family);
     }
 
     /// Visits each float setting with mutable access to its backing value.
     pub fn for_each_float_mut(&mut self, mut visit: impl FnMut(FloatSettingSpec, &mut f32)) {
-        // Intentionally destructure all fields to force updates here when Config changes.
-        let Self {
-            low_power_gpu_preferred: _,
-            graphics_adapter_preference_type: _,
-            graphics_adapter_profile: _,
-            graphics_adapter_explicit_hash: _,
-            graphics_api_preference: _,
-            streamer_mode_enabled: _,
-            window_transparency: _,
-            legacy_window_blur_enabled: _,
-            windows_backdrop_type: _,
-            linux_blur_protocol: _,
-            macos_visual_effect_material: _,
-            macos_visual_effect_blending_mode: _,
-            macos_visual_effect_state: _,
-            macos_visual_effect_emphasized: _,
-            ui_opacity_percent: _,
-            legacy_windows_transparency_level: _,
-            linux_set_opengl_driver: _,
-            linux_use_zink_driver: _,
-            theme_id: _,
-            open_type_features_enabled: _,
-            open_type_features_to_enable: _,
-            notification_expiry_bars_empty_left: _,
-            notification_fade_out_seconds,
-            notification_easing: _,
-            ui_font_family: _,
-            ui_emoji_font_family: _,
-            text_rendering_path: _,
-            skin_preview_aa_mode: _,
-            skin_preview_texel_aa_mode: _,
-            svg_aa_mode: _,
-            skin_preview_msaa_samples: _,
-            skin_preview_motion_blur_enabled: _,
-            skin_preview_motion_blur_amount,
-            skin_preview_motion_blur_shutter_frames,
-            skin_preview_fresh_format_enabled: _,
-            skin_preview_3d_layers_enabled: _,
-            hdr_when_available: _,
-            ui_font_size,
-            ui_font_weight: _,
-            typography: _,
-            include_snapshots_and_betas: _,
-            include_alpha_versions: _,
-            include_experimental_versions: _,
-            force_java_21_minimum: _,
-            frame_limiter_enabled: _,
-            discord_rich_presence_enabled: _,
-            sync_servers_enabled: _,
-            sync_command_history_enabled: _,
-            sync_hotbars_enabled: _,
-            sync_servers_to_all_instances_by_default: _,
-            drag_scroll_enabled: _,
-            frame_limit_fps: _,
-            skin_preview_motion_blur_sample_count: _,
-            default_instance_max_memory_mib: _,
-            default_instance_cli_args: _,
-            minecraft_installations_root: _,
-            download_max_concurrent: _,
-            download_speed_limit_enabled: _,
-            download_speed_limit: _,
-            curseforge_api_key: _,
-            java_8_jvm_path: _,
-            java_16_jvm_path: _,
-            java_17_jvm_path: _,
-            java_21_jvm_path: _,
-            java_25_jvm_path: _,
-            gamepad_calibrations: _,
-        } = self;
-
-        visit(FloatSettingId::UiFontSize.spec(), ui_font_size);
+        let b = self.settings_bindings_mut();
+        visit(FloatSettingId::UiFontSize.spec(), b.ui_font_size);
         visit(
             FloatSettingId::NotificationFadeOutSeconds.spec(),
-            notification_fade_out_seconds,
+            b.notification_fade_out_seconds,
         );
         visit(
             FloatSettingId::SkinPreviewMotionBlurAmount.spec(),
-            skin_preview_motion_blur_amount,
+            b.skin_preview_motion_blur_amount,
         );
         visit(
             FloatSettingId::SkinPreviewMotionBlurShutterFrames.spec(),
-            skin_preview_motion_blur_shutter_frames,
+            b.skin_preview_motion_blur_shutter_frames,
         );
     }
 
     /// Visits each integer setting with mutable access to its backing value.
     pub fn for_each_int_mut(&mut self, mut visit: impl FnMut(IntSettingSpec, &mut i32)) {
-        // Intentionally destructure all fields to force updates here when Config changes.
-        let Self {
-            low_power_gpu_preferred: _,
-            graphics_adapter_preference_type: _,
-            graphics_adapter_profile: _,
-            graphics_adapter_explicit_hash: _,
-            graphics_api_preference: _,
-            streamer_mode_enabled: _,
-            window_transparency: _,
-            legacy_window_blur_enabled: _,
-            windows_backdrop_type: _,
-            linux_blur_protocol: _,
-            macos_visual_effect_material: _,
-            macos_visual_effect_blending_mode: _,
-            macos_visual_effect_state: _,
-            macos_visual_effect_emphasized: _,
-            ui_opacity_percent: _,
-            legacy_windows_transparency_level: _,
-            linux_set_opengl_driver: _,
-            linux_use_zink_driver: _,
-            theme_id: _,
-            open_type_features_enabled: _,
-            open_type_features_to_enable: _,
-            notification_expiry_bars_empty_left: _,
-            notification_fade_out_seconds: _,
-            notification_easing: _,
-            ui_font_family: _,
-            ui_emoji_font_family: _,
-            text_rendering_path: _,
-            skin_preview_aa_mode: _,
-            skin_preview_texel_aa_mode: _,
-            svg_aa_mode: _,
-            skin_preview_motion_blur_enabled: _,
-            skin_preview_motion_blur_amount: _,
-            skin_preview_motion_blur_shutter_frames: _,
-            skin_preview_msaa_samples,
-            skin_preview_fresh_format_enabled: _,
-            skin_preview_3d_layers_enabled: _,
-            hdr_when_available: _,
-            ui_font_size: _,
-            ui_font_weight,
-            typography: _,
-            frame_limiter_enabled: _,
-            discord_rich_presence_enabled: _,
-            sync_servers_enabled: _,
-            sync_command_history_enabled: _,
-            sync_hotbars_enabled: _,
-            sync_servers_to_all_instances_by_default: _,
-            drag_scroll_enabled: _,
-            frame_limit_fps,
-            skin_preview_motion_blur_sample_count,
-            include_snapshots_and_betas: _,
-            include_alpha_versions: _,
-            include_experimental_versions: _,
-            force_java_21_minimum: _,
-            default_instance_max_memory_mib: _,
-            default_instance_cli_args: _,
-            minecraft_installations_root: _,
-            download_max_concurrent: _,
-            download_speed_limit_enabled: _,
-            download_speed_limit: _,
-            curseforge_api_key: _,
-            java_8_jvm_path: _,
-            java_16_jvm_path: _,
-            java_17_jvm_path: _,
-            java_21_jvm_path: _,
-            java_25_jvm_path: _,
-            gamepad_calibrations: _,
-        } = self;
-
-        visit(IntSettingId::UiFontWeight.spec(), ui_font_weight);
-        visit(IntSettingId::FrameLimitFps.spec(), frame_limit_fps);
+        let b = self.settings_bindings_mut();
+        visit(IntSettingId::UiFontWeight.spec(), b.ui_font_weight);
+        visit(IntSettingId::FrameLimitFps.spec(), b.frame_limit_fps);
         visit(
             IntSettingId::SkinPreviewMsaaSamples.spec(),
-            skin_preview_msaa_samples,
+            b.skin_preview_msaa_samples,
         );
         visit(
             IntSettingId::SkinPreviewMotionBlurSampleCount.spec(),
-            skin_preview_motion_blur_sample_count,
+            b.skin_preview_motion_blur_sample_count,
         );
     }
 
     /// Visits each text setting with mutable access to its backing value.
     pub fn for_each_text_mut(&mut self, mut visit: impl FnMut(TextSettingSpec, &mut String)) {
-        // Intentionally destructure all fields to force updates here when Config changes.
-        let Self {
-            low_power_gpu_preferred: _,
-            graphics_adapter_preference_type: _,
-            graphics_adapter_profile: _,
-            graphics_adapter_explicit_hash: _,
-            graphics_api_preference: _,
-            streamer_mode_enabled: _,
-            window_transparency: _,
-            legacy_window_blur_enabled: _,
-            windows_backdrop_type: _,
-            linux_blur_protocol: _,
-            macos_visual_effect_material: _,
-            macos_visual_effect_blending_mode: _,
-            macos_visual_effect_state: _,
-            macos_visual_effect_emphasized: _,
-            ui_opacity_percent: _,
-            legacy_windows_transparency_level: _,
-            linux_set_opengl_driver: _,
-            linux_use_zink_driver: _,
-            theme_id: _,
-            open_type_features_enabled: _,
-            open_type_features_to_enable,
-            notification_expiry_bars_empty_left: _,
-            notification_fade_out_seconds: _,
-            notification_easing: _,
-            ui_font_family: _,
-            ui_emoji_font_family: _,
-            text_rendering_path: _,
-            skin_preview_aa_mode: _,
-            skin_preview_texel_aa_mode: _,
-            svg_aa_mode: _,
-            skin_preview_msaa_samples: _,
-            skin_preview_motion_blur_enabled: _,
-            skin_preview_motion_blur_amount: _,
-            skin_preview_motion_blur_shutter_frames: _,
-            skin_preview_motion_blur_sample_count: _,
-            skin_preview_fresh_format_enabled: _,
-            skin_preview_3d_layers_enabled: _,
-            hdr_when_available: _,
-            ui_font_size: _,
-            ui_font_weight: _,
-            typography: _,
-            frame_limiter_enabled: _,
-            discord_rich_presence_enabled: _,
-            sync_servers_enabled: _,
-            sync_command_history_enabled: _,
-            sync_hotbars_enabled: _,
-            sync_servers_to_all_instances_by_default: _,
-            drag_scroll_enabled: _,
-            frame_limit_fps: _,
-            include_snapshots_and_betas: _,
-            include_alpha_versions: _,
-            include_experimental_versions: _,
-            force_java_21_minimum: _,
-            default_instance_max_memory_mib: _,
-            default_instance_cli_args: _,
-            minecraft_installations_root: _,
-            download_max_concurrent: _,
-            download_speed_limit_enabled: _,
-            download_speed_limit: _,
-            curseforge_api_key: _,
-            java_8_jvm_path: _,
-            java_16_jvm_path: _,
-            java_17_jvm_path: _,
-            java_21_jvm_path: _,
-            java_25_jvm_path: _,
-            gamepad_calibrations: _,
-        } = self;
-
+        let b = self.settings_bindings_mut();
         visit(
             TextSettingId::OpenTypeFeaturesToEnable.spec(),
-            open_type_features_to_enable,
+            b.open_type_features_to_enable,
         );
     }
 }

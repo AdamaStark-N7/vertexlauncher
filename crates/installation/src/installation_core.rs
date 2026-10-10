@@ -1,205 +1,18 @@
 use super::*;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MinecraftVersionType {
-    Release,
-    Snapshot,
-    OldBeta,
-    OldAlpha,
-    Unknown,
-}
+#[path = "installation_core/async_helpers.rs"]
+mod async_helpers;
+#[path = "installation_core/install_types.rs"]
+mod install_types;
+#[path = "installation_core/installation_error.rs"]
+mod installation_error;
+#[path = "installation_core/version_catalog_types.rs"]
+mod version_catalog_types;
 
-impl MinecraftVersionType {
-    pub fn label(self) -> &'static str {
-        match self {
-            MinecraftVersionType::Release => "Release",
-            MinecraftVersionType::Snapshot => "Snapshot",
-            MinecraftVersionType::OldBeta => "Old Beta",
-            MinecraftVersionType::OldAlpha => "Old Alpha",
-            MinecraftVersionType::Unknown => "Unknown",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionCatalogFilter {
-    pub include_snapshots_and_betas: bool,
-    pub include_alpha: bool,
-    pub include_experimental: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MinecraftVersionEntry {
-    pub id: String,
-    pub version_type: MinecraftVersionType,
-    /// ISO-8601 release time from Mojang's manifest; the authoritative "newer than" order.
-    /// Absent in catalogs cached by older launcher versions.
-    #[serde(default)]
-    pub release_time: Option<String>,
-}
-
-impl MinecraftVersionEntry {
-    pub fn display_label(&self) -> String {
-        format!("{} ({})", self.id, self.version_type.label())
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoaderSupportIndex {
-    pub fabric: HashSet<String>,
-    pub forge: HashSet<String>,
-    pub neoforge: HashSet<String>,
-    pub quilt: HashSet<String>,
-}
-
-impl LoaderSupportIndex {
-    pub fn supports_loader(&self, loader_label: &str, game_version: &str) -> bool {
-        match normalized_loader_label(loader_label) {
-            LoaderKind::Vanilla => true,
-            LoaderKind::Fabric => self.fabric.contains(game_version),
-            LoaderKind::Forge => self.forge.contains(game_version),
-            LoaderKind::NeoForge => self.neoforge.contains(game_version),
-            LoaderKind::Quilt => self.quilt.contains(game_version),
-            LoaderKind::Custom => true,
-        }
-    }
-
-    pub fn unavailable_reason(&self, loader_label: &str, game_version: &str) -> Option<String> {
-        if self.supports_loader(loader_label, game_version) {
-            None
-        } else {
-            Some(format!(
-                "{loader_label} is not available for Minecraft {game_version}"
-            ))
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LoaderVersionIndex {
-    pub fabric: BTreeMap<String, Vec<String>>,
-    pub forge: BTreeMap<String, Vec<String>>,
-    pub neoforge: BTreeMap<String, Vec<String>>,
-    pub quilt: BTreeMap<String, Vec<String>>,
-}
-
-impl LoaderVersionIndex {
-    pub fn versions_for_loader(&self, loader_label: &str, game_version: &str) -> Option<&[String]> {
-        match normalized_loader_label(loader_label) {
-            LoaderKind::Fabric => self.fabric.get(game_version).map(Vec::as_slice),
-            LoaderKind::Forge => self.forge.get(game_version).map(Vec::as_slice),
-            LoaderKind::NeoForge => self.neoforge.get(game_version).map(Vec::as_slice),
-            LoaderKind::Quilt => self.quilt.get(game_version).map(Vec::as_slice),
-            LoaderKind::Vanilla | LoaderKind::Custom => None,
-        }
-    }
-
-    pub(crate) fn sort_desc(&mut self) {
-        sort_loader_version_map_desc(&mut self.fabric);
-        sort_loader_version_map_desc(&mut self.forge);
-        sort_loader_version_map_desc(&mut self.neoforge);
-        sort_loader_version_map_desc(&mut self.quilt);
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VersionCatalog {
-    pub game_versions: Vec<MinecraftVersionEntry>,
-    pub loader_support: LoaderSupportIndex,
-    #[serde(default)]
-    pub loader_versions: LoaderVersionIndex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GameSetupResult {
-    pub version_json_path: PathBuf,
-    pub client_jar_path: PathBuf,
-    pub downloaded_files: u32,
-    pub resolved_modloader_version: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchRequest {
-    pub instance_root: PathBuf,
-    pub game_version: String,
-    pub modloader: String,
-    pub modloader_version: Option<String>,
-    pub account_key: Option<String>,
-    pub java_executable: Option<String>,
-    pub max_memory_mib: u128,
-    pub extra_jvm_args: Option<String>,
-    pub extra_env_vars: Option<String>,
-    pub player_name: Option<String>,
-    pub player_uuid: Option<String>,
-    pub auth_access_token: Option<String>,
-    pub auth_xuid: Option<String>,
-    pub auth_user_type: Option<String>,
-    pub quick_play_singleplayer: Option<String>,
-    pub quick_play_multiplayer: Option<String>,
-    pub linux_set_opengl_driver: bool,
-    pub linux_use_zink_driver: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchResult {
-    pub pid: u32,
-    pub profile_id: String,
-    pub launch_log_path: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FinishedInstanceProcess {
-    pub instance_root: String,
-    pub account_key: Option<String>,
-    pub pid: u32,
-    pub exit_code: Option<i32>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DownloadPolicy {
-    pub max_concurrent_downloads: u32,
-    pub max_download_bps: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DownloadBatchTask {
-    pub url: String,
-    pub destination: PathBuf,
-    pub expected_size: Option<u64>,
-}
-
-impl Default for DownloadPolicy {
-    fn default() -> Self {
-        Self {
-            max_concurrent_downloads: 8,
-            max_download_bps: None,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum InstallStage {
-    PreparingFolders,
-    ResolvingMetadata,
-    DownloadingCore,
-    InstallingModloader,
-    Complete,
-}
-
-#[derive(Clone, Debug)]
-pub struct InstallProgress {
-    pub stage: InstallStage,
-    pub message: String,
-    pub downloaded_files: u32,
-    pub total_files: u32,
-    pub downloaded_bytes: u64,
-    pub total_bytes: Option<u64>,
-    pub bytes_per_second: f64,
-    pub eta_seconds: Option<u64>,
-}
-
-pub type InstallProgressCallback = Arc<dyn Fn(InstallProgress) + Send + Sync + 'static>;
-pub(crate) type InstallProgressSink = dyn Fn(InstallProgress) + Send + Sync + 'static;
+use async_helpers::*;
+pub use install_types::*;
+pub use installation_error::*;
+pub use version_catalog_types::*;
 
 pub fn download_batch(
     tasks: Vec<DownloadBatchTask>,
@@ -223,100 +36,6 @@ pub fn download_batch_with_progress(
         })
         .collect();
     download_files_concurrent(stage, tasks, policy, 0, progress.map(Arc::as_ref))
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum InstallationError {
-    #[error("HTTP status {status} for {url}: {body}")]
-    HttpStatus {
-        url: String,
-        status: u16,
-        body: String,
-    },
-    #[error("HTTP transport error while requesting {url}: {message}")]
-    Transport { url: String, message: String },
-    #[error("JSON parse error: {0}")]
-    Json(#[from] serde_json::Error),
-    #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error(
-        "Java executable was not found: {executable}. Source: {java_source}. Requested: {requested}. OS error: {message}. Configure a valid Java path or install Java."
-    )]
-    JavaExecutableNotFound {
-        executable: String,
-        java_source: String,
-        requested: String,
-        message: String,
-    },
-    #[error("Minecraft version '{0}' was not found in Mojang manifest")]
-    UnknownMinecraftVersion(String),
-    #[error("Version metadata for '{0}' is missing client download information")]
-    MissingClientDownload(String),
-    #[error("No modloader version was provided for {loader} on Minecraft {game_version}")]
-    MissingModloaderVersion {
-        loader: String,
-        game_version: String,
-    },
-    #[error("Java runtime is required to install {loader} but was not configured")]
-    MissingJavaRuntime { loader: String },
-    #[error(
-        "{loader} installer failed for Minecraft {game_version} ({loader_version}); command: {command}; status: {status}; stderr: {stderr}"
-    )]
-    ModloaderInstallerFailed {
-        loader: String,
-        game_version: String,
-        loader_version: String,
-        command: String,
-        status: String,
-        stderr: String,
-    },
-    #[error(
-        "{loader} installer did not produce a usable version profile for Minecraft {game_version} ({loader_version}) in {}",
-        .versions_dir.display()
-    )]
-    ModloaderInstallOutputMissing {
-        loader: String,
-        game_version: String,
-        loader_version: String,
-        versions_dir: PathBuf,
-    },
-    #[error("OpenJDK provisioning is not supported on this platform ({0})")]
-    UnsupportedPlatform(String),
-    #[error("Could not resolve OpenJDK {runtime_major} package metadata from Adoptium API")]
-    OpenJdkMetadataMissing { runtime_major: u8 },
-    #[error("Could not resolve a launch profile for {modloader} on Minecraft {game_version}")]
-    LaunchProfileMissing {
-        modloader: String,
-        game_version: String,
-    },
-    #[error("Launch profile {profile_id} is missing mainClass")]
-    LaunchMainClassMissing { profile_id: String },
-    #[error("Launch profile {profile_id} is missing required file: {}", .path.display())]
-    LaunchFileMissing { profile_id: String, path: PathBuf },
-    #[error("Minecraft exited immediately (status: {status}). See launch log: {}", .log_path.display())]
-    LaunchExitedImmediately { status: String, log_path: PathBuf },
-    #[error("Minecraft for {instance_root} is already running (pid {pid})")]
-    InstanceAlreadyRunning { instance_root: String, pid: u32 },
-    #[error("Account '{account}' is already running Minecraft in {instance_root}")]
-    AccountAlreadyInUse {
-        account: String,
-        instance_root: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct CachedVersionCatalog {
-    pub(crate) fetched_at_unix_secs: u64,
-    #[serde(default)]
-    pub(crate) filter: VersionCatalogFilter,
-    pub(crate) catalog: VersionCatalog,
-}
-
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub(crate) struct CachedLoaderVersions {
-    pub(crate) fetched_at_unix_secs: u64,
-    pub(crate) loader_label: String,
-    pub(crate) versions_by_game_version: BTreeMap<String, Vec<String>>,
 }
 
 pub fn fetch_version_catalog(
@@ -439,154 +158,6 @@ pub async fn ensure_openjdk_runtime_async(runtime_major: u8) -> Result<PathBuf, 
         .await?
         .ok_or(InstallationError::OpenJdkMetadataMissing { runtime_major })?;
     Ok(canonicalize_existing_path_async(installed).await)
-}
-
-async fn find_java_executable_under_async(
-    root: PathBuf,
-) -> Result<Option<PathBuf>, InstallationError> {
-    if !tokio::fs::try_exists(&root).await? {
-        return Ok(None);
-    }
-    let binary = if cfg!(target_os = "windows") {
-        "java.exe"
-    } else {
-        "java"
-    };
-    let mut stack = vec![root];
-    while let Some(dir) = stack.pop() {
-        let mut entries = tokio::fs::read_dir(&dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            let file_type = entry.file_type().await?;
-            if file_type.is_dir() {
-                stack.push(path);
-                continue;
-            }
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-                continue;
-            };
-            if name.eq_ignore_ascii_case(binary)
-                && path
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|part| part.eq_ignore_ascii_case("bin"))
-            {
-                return Ok(Some(path));
-            }
-        }
-    }
-    Ok(None)
-}
-
-async fn canonicalize_existing_path_async(path: PathBuf) -> PathBuf {
-    tokio::fs::canonicalize(path.as_path())
-        .await
-        .unwrap_or(path)
-}
-
-fn map_tokio_join_error(err: tokio::task::JoinError) -> InstallationError {
-    InstallationError::Io(std::io::Error::other(format!(
-        "background task failed: {err}"
-    )))
-}
-
-async fn get_json_with_user_agent_async<T: DeserializeOwned>(
-    url: &str,
-    user_agent: &str,
-) -> Result<T, InstallationError> {
-    let raw = call_get_text_with_retry_async(url, user_agent).await?;
-    Ok(serde_json::from_str(&raw)?)
-}
-
-async fn call_get_text_with_retry_async(
-    url: &str,
-    user_agent: &str,
-) -> Result<String, InstallationError> {
-    let response = call_get_response_with_retry_async(url, user_agent).await?;
-    response
-        .text()
-        .await
-        .map_err(|err| InstallationError::Transport {
-            url: url.to_owned(),
-            message: err.to_string(),
-        })
-}
-
-async fn call_get_response_with_retry_async(
-    url: &str,
-    user_agent: &str,
-) -> Result<reqwest::Response, InstallationError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(HTTP_TIMEOUT_CONNECT)
-        .timeout(HTTP_TIMEOUT_GLOBAL)
-        .build()
-        .map_err(|err| InstallationError::Transport {
-            url: url.to_owned(),
-            message: err.to_string(),
-        })?;
-    let mut last_err = None;
-    for attempt in 1..=HTTP_RETRY_ATTEMPTS {
-        let response = client
-            .get(url)
-            .header("User-Agent", user_agent)
-            .send()
-            .await;
-        match response {
-            Ok(response) if response.status().is_success() => return Ok(response),
-            Ok(response) => {
-                let status = response.status().as_u16();
-                let body = response.text().await.unwrap_or_default();
-                return Err(InstallationError::HttpStatus {
-                    url: url.to_owned(),
-                    status,
-                    body,
-                });
-            }
-            Err(err) => {
-                last_err = Some(err.to_string());
-                if attempt < HTTP_RETRY_ATTEMPTS {
-                    tokio::time::sleep(Duration::from_millis(
-                        HTTP_RETRY_BASE_DELAY_MS.saturating_mul(attempt as u64),
-                    ))
-                    .await;
-                }
-            }
-        }
-    }
-    Err(InstallationError::Transport {
-        url: url.to_owned(),
-        message: last_err.unwrap_or_else(|| "request failed".to_owned()),
-    })
-}
-
-pub(crate) async fn download_file_simple_async(
-    url: &str,
-    destination: &Path,
-) -> Result<(), InstallationError> {
-    if tokio::fs::try_exists(destination).await? {
-        return Ok(());
-    }
-    if let Some(parent) = destination.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-    }
-    let mut response = call_get_response_with_retry_async(url, OPENJDK_USER_AGENT).await?;
-    let temp = temporary_download_path(destination);
-    let mut file = tokio::fs::File::create(&temp).await?;
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| InstallationError::Transport {
-            url: url.to_owned(),
-            message: err.to_string(),
-        })?
-    {
-        tokio::io::AsyncWriteExt::write_all(&mut file, chunk.as_ref()).await?;
-    }
-    tokio::io::AsyncWriteExt::flush(&mut file).await?;
-    drop(file);
-    tokio::fs::rename(temp.as_path(), destination).await?;
-    Ok(())
 }
 
 pub fn purge_cache() -> Result<(), InstallationError> {
@@ -811,77 +382,15 @@ pub fn ensure_game_files(
     let mut downloaded_files = 0;
 
     if !version_json_path.exists() || !client_jar_path.exists() {
-        tracing::info!(
-            target: "vertexlauncher/installation/process",
-            game_version = %game_version,
-            "Core version files missing; resolving metadata and scheduling core downloads."
-        );
-        report_install_progress(
-            progress.as_deref(),
-            InstallProgress {
-                stage: InstallStage::ResolvingMetadata,
-                message: format!("Resolving Minecraft {game_version} metadata..."),
-                downloaded_files,
-                total_files: 0,
-                downloaded_bytes: 0,
-                total_bytes: None,
-                bytes_per_second: 0.0,
-                eta_seconds: None,
-            },
-        );
-        let manifest: MojangVersionManifest = get_json(MOJANG_VERSION_MANIFEST_URL)?;
-        let version_entry = manifest
-            .versions
-            .into_iter()
-            .find(|entry| entry.id == game_version)
-            .ok_or_else(|| InstallationError::UnknownMinecraftVersion(game_version.to_owned()))?;
-
-        let version_meta: MojangVersionMeta = get_json(&version_entry.url)?;
-        let client_download = version_meta
-            .downloads
-            .and_then(|downloads| downloads.client)
-            .ok_or_else(|| InstallationError::MissingClientDownload(game_version.to_owned()))?;
-
-        let mut tasks = Vec::new();
-        if !version_json_path.exists() {
-            tasks.push(FileDownloadTask {
-                url: version_entry.url,
-                destination: version_json_path.clone(),
-                expected_size: None,
-            });
-        }
-        if !client_jar_path.exists() {
-            tasks.push(FileDownloadTask {
-                url: client_download.url,
-                destination: client_jar_path.clone(),
-                expected_size: client_download.size,
-            });
-        }
-        downloaded_files += download_files_concurrent(
-            InstallStage::DownloadingCore,
-            tasks,
+        downloaded_files += download_missing_core_files(
+            instance_root,
+            game_version,
+            version_json_path.as_path(),
+            client_jar_path.as_path(),
             download_policy,
             downloaded_files,
             progress.as_deref(),
-        )
-        .map_err(|err| {
-            tracing::error!(
-                target: "vertexlauncher/installation/process",
-                instance_root = %instance_root.display(),
-                game_version = %game_version,
-                version_json_path = %version_json_path.display(),
-                client_jar_path = %client_jar_path.display(),
-                error = %err,
-                "Core file download batch failed during ensure_game_files."
-            );
-            err
-        })?;
-        tracing::info!(
-            target: "vertexlauncher/installation/process",
-            game_version = %game_version,
-            downloaded_files,
-            "Core file download batch completed."
-        );
+        )?;
     }
     downloaded_files += download_version_dependencies(
         instance_root,
@@ -939,37 +448,15 @@ pub fn ensure_game_files(
         "Modloader installation phase completed."
     );
     if let Some(loader_version) = resolved_modloader_version.as_deref() {
-        let loader_kind = normalized_loader_label(modloader);
-        if matches!(loader_kind, LoaderKind::Fabric | LoaderKind::Quilt) {
-            let id_prefix = if loader_kind == LoaderKind::Fabric {
-                "fabric-loader"
-            } else {
-                "quilt-loader"
-            };
-            let version_id = format!("{id_prefix}-{loader_version}-{game_version}");
-            let loader_profile_path = instance_root
-                .join("versions")
-                .join(version_id.as_str())
-                .join(format!("{version_id}.json"));
-            downloaded_files += download_version_dependencies(
-                instance_root,
-                loader_profile_path.as_path(),
-                download_policy,
-                downloaded_files,
-                progress.as_deref(),
-            )
-            .map_err(|err| {
-                tracing::error!(
-                    target: "vertexlauncher/installation/process",
-                    instance_root = %instance_root.display(),
-                    game_version = %game_version,
-                    loader_profile_path = %loader_profile_path.display(),
-                    error = %err,
-                    "Loader profile dependency download phase failed during ensure_game_files."
-                );
-                err
-            })?;
-        }
+        downloaded_files += download_loader_profile_dependencies(
+            instance_root,
+            game_version,
+            modloader,
+            loader_version,
+            download_policy,
+            downloaded_files,
+            progress.as_deref(),
+        )?;
     }
 
     report_install_progress(
@@ -998,6 +485,132 @@ pub fn ensure_game_files(
         client_jar_path,
         downloaded_files,
         resolved_modloader_version,
+    })
+}
+
+fn download_missing_core_files(
+    instance_root: &Path,
+    game_version: &str,
+    version_json_path: &Path,
+    client_jar_path: &Path,
+    download_policy: &DownloadPolicy,
+    downloaded_files: u32,
+    progress: Option<&InstallProgressSink>,
+) -> Result<u32, InstallationError> {
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        game_version = %game_version,
+        "Core version files missing; resolving metadata and scheduling core downloads."
+    );
+    report_install_progress(
+        progress,
+        InstallProgress {
+            stage: InstallStage::ResolvingMetadata,
+            message: format!("Resolving Minecraft {game_version} metadata..."),
+            downloaded_files,
+            total_files: 0,
+            downloaded_bytes: 0,
+            total_bytes: None,
+            bytes_per_second: 0.0,
+            eta_seconds: None,
+        },
+    );
+    let manifest: MojangVersionManifest = get_json(MOJANG_VERSION_MANIFEST_URL)?;
+    let version_entry = manifest
+        .versions
+        .into_iter()
+        .find(|entry| entry.id == game_version)
+        .ok_or_else(|| InstallationError::UnknownMinecraftVersion(game_version.to_owned()))?;
+
+    let version_meta: MojangVersionMeta = get_json(&version_entry.url)?;
+    let client_download = version_meta
+        .downloads
+        .and_then(|downloads| downloads.client)
+        .ok_or_else(|| InstallationError::MissingClientDownload(game_version.to_owned()))?;
+
+    let mut tasks = Vec::new();
+    if !version_json_path.exists() {
+        tasks.push(FileDownloadTask {
+            url: version_entry.url,
+            destination: version_json_path.to_path_buf(),
+            expected_size: None,
+        });
+    }
+    if !client_jar_path.exists() {
+        tasks.push(FileDownloadTask {
+            url: client_download.url,
+            destination: client_jar_path.to_path_buf(),
+            expected_size: client_download.size,
+        });
+    }
+    let downloaded = download_files_concurrent(
+        InstallStage::DownloadingCore,
+        tasks,
+        download_policy,
+        downloaded_files,
+        progress,
+    )
+    .map_err(|err| {
+        tracing::error!(
+            target: "vertexlauncher/installation/process",
+            instance_root = %instance_root.display(),
+            game_version = %game_version,
+            version_json_path = %version_json_path.display(),
+            client_jar_path = %client_jar_path.display(),
+            error = %err,
+            "Core file download batch failed during ensure_game_files."
+        );
+        err
+    })?;
+    tracing::info!(
+        target: "vertexlauncher/installation/process",
+        game_version = %game_version,
+        downloaded_files = downloaded_files + downloaded,
+        "Core file download batch completed."
+    );
+    Ok(downloaded)
+}
+
+fn download_loader_profile_dependencies(
+    instance_root: &Path,
+    game_version: &str,
+    modloader: &str,
+    loader_version: &str,
+    download_policy: &DownloadPolicy,
+    downloaded_files: u32,
+    progress: Option<&InstallProgressSink>,
+) -> Result<u32, InstallationError> {
+    let loader_kind = normalized_loader_label(modloader);
+    if !matches!(loader_kind, LoaderKind::Fabric | LoaderKind::Quilt) {
+        return Ok(0);
+    }
+    let id_prefix = if loader_kind == LoaderKind::Fabric {
+        "fabric-loader"
+    } else {
+        "quilt-loader"
+    };
+    let version_id = format!("{id_prefix}-{loader_version}-{game_version}");
+    let loader_profile_path = instance_root
+        .join("versions")
+        .join(version_id.as_str())
+        .join(format!("{version_id}.json"));
+    download_version_dependencies(
+        instance_root,
+        loader_profile_path.as_path(),
+        download_policy,
+        downloaded_files,
+        progress,
+    )
+    .map_err(|err| {
+        tracing::error!(
+            target: "vertexlauncher/installation/process",
+            instance_root = %instance_root.display(),
+            game_version = %game_version,
+            loader_profile_path = %loader_profile_path.display(),
+            error = %err,
+            "Loader profile dependency download phase failed during ensure_game_files."
+        );
+        err
     })
 }
 

@@ -1,4 +1,9 @@
 use super::*;
+use crate::screens::home::screenshot_common::{
+    ViewerCanvas, ViewerGamepadInput, ViewerZoomLimits, is_supported_screenshot_path,
+    paint_tile_border, paint_tile_caption, paint_tile_image, render_viewer_canvas,
+    ui_pointer_over_rect,
+};
 use textui_egui::interaction;
 
 #[path = "instance_screenshots/instance_screenshot_overlay_action.rs"]
@@ -15,7 +20,12 @@ use self::instance_screenshot_overlay_button_result::InstanceScreenshotOverlayBu
 use self::instance_screenshot_overlay_result::InstanceScreenshotOverlayResult;
 use self::instance_screenshot_tile_action::InstanceScreenshotTileAction;
 
-const INSTANCE_SCREENSHOT_TILE_TEXTURE_MAX_EDGE: u32 = 1024;
+const VIEWER_ZOOM_LIMITS: ViewerZoomLimits = ViewerZoomLimits {
+    min: INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
+    max: INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
+    step: INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP,
+    scroll_sensitivity: INSTANCE_SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY,
+};
 
 pub(super) fn render_instance_screenshot_gallery(
     ui: &mut Ui,
@@ -138,45 +148,20 @@ fn render_instance_screenshot_tile(
         )),
         egui::Sense::click(),
     );
+    let image_has_focus = image_response.has_focus();
     let image_key = screenshot_uri(screenshot.path.as_path(), screenshot.modified_at_ms);
     let image_status = screenshot_images.request(image_key.clone(), screenshot.path.clone());
     let image_bytes = screenshot_images.bytes(image_key.as_str());
     retained_image_keys.insert(image_key.clone());
-    if let Some(bytes) = image_bytes.as_ref() {
-        match image_textures::request_texture_with_max_edge(
-            ui.ctx(),
-            image_key,
-            Arc::clone(bytes),
-            TextureOptions::LINEAR,
-            INSTANCE_SCREENSHOT_TILE_TEXTURE_MAX_EDGE,
-        ) {
-            image_textures::ManagedTextureStatus::Ready(texture) => {
-                texture
-                    .image()
-                    .fit_to_exact_size(rect.size())
-                    .corner_radius(egui::CornerRadius::same(14))
-                    .paint_at(ui, rect);
-            }
-            image_textures::ManagedTextureStatus::Loading => {
-                paint_instance_screenshot_placeholder(
-                    ui,
-                    text_ui,
-                    rect,
-                    LazyImageBytesStatus::Loading,
-                );
-            }
-            image_textures::ManagedTextureStatus::Failed => {
-                paint_instance_screenshot_placeholder(
-                    ui,
-                    text_ui,
-                    rect,
-                    LazyImageBytesStatus::Failed,
-                );
-            }
-        }
-    } else {
-        paint_instance_screenshot_placeholder(ui, text_ui, rect, image_status);
-    }
+    paint_tile_image(
+        ui,
+        text_ui,
+        rect,
+        image_key.as_str(),
+        image_bytes.as_ref(),
+        image_status,
+        "instance_screenshot_placeholder",
+    );
 
     let tile_contains_pointer = !viewer_open && ui_pointer_over_rect(ui, rect);
     let overlay_memory_id = image_response.id.with("instance_screenshot_overlay_active");
@@ -188,7 +173,7 @@ fn render_instance_screenshot_tile(
     let mut overlay_clicked = false;
     let mut action = InstanceScreenshotTileAction::default();
     let mut overlay_result = InstanceScreenshotOverlayResult::default();
-    if tile_contains_pointer || overlay_was_active {
+    if tile_contains_pointer || overlay_was_active || image_has_focus {
         overlay_result = render_instance_screenshot_overlay_action(
             ui,
             rect,
@@ -208,7 +193,9 @@ fn render_instance_screenshot_tile(
             None => {}
         }
     }
-    let overlay_active = tile_contains_pointer || overlay_result.contains_pointer;
+    // Keep the overlay up while the tile or one of its buttons has keyboard/controller focus.
+    let overlay_active =
+        tile_contains_pointer || overlay_result.contains_pointer || image_has_focus;
     ui.ctx()
         .data_mut(|data| data.insert_temp(overlay_memory_id, overlay_active));
     let state = interaction::InteractionState {
@@ -222,58 +209,23 @@ fn render_instance_screenshot_tile(
     if overlay_active && !viewer_open {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
-    // Media tiles highlight with the stroke only, so the picture is not tinted.
-    let hovered_stroke = egui::Stroke::new(2.0, ui.visuals().widgets.hovered.bg_stroke.color);
-    let stroke = interaction::focus_stroke(
-        state,
-        ui.visuals(),
-        interaction::hover_stroke(
-            state,
-            ui.visuals().widgets.inactive.bg_stroke,
-            hovered_stroke,
-        ),
-    );
-    ui.painter().rect_stroke(
-        rect,
-        egui::CornerRadius::same(14),
-        stroke,
-        egui::StrokeKind::Inside,
-    );
+    paint_tile_border(ui, rect, state);
 
-    let label_bg_rect = egui::Rect::from_min_max(
-        egui::pos2(rect.min.x + 10.0, rect.max.y - 34.0),
-        egui::pos2(rect.max.x - 10.0, rect.max.y - 10.0),
-    );
-    ui.painter().rect_filled(
-        label_bg_rect,
-        egui::CornerRadius::same(8),
-        egui::Color32::from_rgba_premultiplied(6, 9, 14, 185),
-    );
     let label = format!(
         "{} | {}",
         screenshot.file_name,
         format_time_ago(screenshot.modified_at_ms, current_time_millis())
     );
-    let label_style = LabelOptions {
-        color: egui::Color32::WHITE,
-        wrap: false,
-        ..style::body(ui)
-    };
-    let label_text_rect = label_bg_rect.shrink2(egui::vec2(8.0, 0.0));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(label_text_rect), |ui| {
-        ui.set_clip_rect(label_text_rect.intersect(ui.clip_rect()));
-        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-            let _ = text_ui.label(
-                ui,
-                (
-                    "instance_screenshot_tile_label",
-                    screenshot_key(screenshot.path.as_path()),
-                ),
-                label.as_str(),
-                &label_style,
-            );
-        });
-    });
+    paint_tile_caption(
+        ui,
+        text_ui,
+        rect,
+        (
+            "instance_screenshot_tile_label",
+            screenshot_key(screenshot.path.as_path()),
+        ),
+        label.as_str(),
+    );
 
     if !overlay_result.contains_pointer {
         image_response = crate::ui::style::hover_tip(
@@ -290,52 +242,6 @@ fn render_instance_screenshot_tile(
     }
     action.open_viewer = image_response.clicked() && !overlay_clicked;
     action
-}
-
-fn ui_pointer_over_rect(ui: &Ui, rect: egui::Rect) -> bool {
-    ui.input(|input| {
-        input
-            .pointer
-            .interact_pos()
-            .or_else(|| input.pointer.hover_pos())
-            .is_some_and(|pointer_pos| rect.contains(pointer_pos))
-    })
-}
-
-fn paint_instance_screenshot_placeholder(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    rect: egui::Rect,
-    image_status: LazyImageBytesStatus,
-) {
-    ui.painter().rect_filled(
-        rect,
-        egui::CornerRadius::same(14),
-        ui.visuals().widgets.inactive.bg_fill,
-    );
-    let label = match image_status {
-        LazyImageBytesStatus::Loading => "Loading...",
-        LazyImageBytesStatus::Failed => "Failed to load",
-        LazyImageBytesStatus::Ready | LazyImageBytesStatus::Unrequested => "Waiting...",
-    };
-    let label_style = LabelOptions {
-        color: ui.visuals().weak_text_color(),
-        ..style::body_strong(ui)
-    };
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-        ui.with_layout(
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                let _ = text_ui.label(
-                    ui,
-                    ("instance_screenshot_placeholder", label),
-                    label,
-                    &label_style,
-                );
-            },
-        );
-    });
 }
 
 pub(super) fn retain_instance_viewer_image(
@@ -361,32 +267,6 @@ pub(super) fn retain_instance_viewer_image(
     state
         .screenshot_images
         .request(image_key, screenshot.path.clone());
-}
-
-fn paint_instance_screenshot_centered_status(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    rect: egui::Rect,
-    label: &str,
-) {
-    let label_style = LabelOptions {
-        color: ui.visuals().weak_text_color(),
-        ..style::body_strong(ui)
-    };
-    ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        ui.set_clip_rect(rect.intersect(ui.clip_rect()));
-        ui.with_layout(
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                let _ = text_ui.label(
-                    ui,
-                    ("instance_screenshot_center_status", label),
-                    label,
-                    &label_style,
-                );
-            },
-        );
-    });
 }
 
 pub(super) fn render_instance_screenshot_viewer_modal(
@@ -423,15 +303,11 @@ pub(super) fn render_instance_screenshot_viewer_modal(
         .screenshot_images
         .request(image_key.clone(), screenshot.path.clone());
     let image_bytes = state.screenshot_images.bytes(image_key.as_str());
-    let gamepad_pan = ctx
-        .data(|data| {
-            data.get_temp::<egui::Vec2>(egui::Id::new("instance_screenshot_viewer_gamepad_pan"))
-        })
-        .unwrap_or(egui::Vec2::ZERO);
-    let gamepad_zoom = ctx
-        .data(|data| data.get_temp::<f32>(egui::Id::new("instance_screenshot_viewer_gamepad_zoom")))
-        .unwrap_or(0.0);
-    let frame_dt = ctx.input(|input| input.stable_dt).clamp(1.0 / 240.0, 0.05);
+    let gamepad = ViewerGamepadInput::read(
+        ctx,
+        "instance_screenshot_viewer_gamepad_pan",
+        "instance_screenshot_viewer_gamepad_zoom",
+    );
 
     let mut close_requested = false;
     let mut delete_requested = false;
@@ -526,8 +402,8 @@ pub(super) fn render_instance_screenshot_viewer_modal(
                         )
                         .clicked()
                     {
-                        viewer_state.zoom = adjust_instance_screenshot_zoom(viewer_state.zoom, 1.0);
-                        clamp_instance_screenshot_pan(viewer_state);
+                        viewer_state.zoom = VIEWER_ZOOM_LIMITS.adjust(viewer_state.zoom, 1.0);
+                        VIEWER_ZOOM_LIMITS.clamp_pan(viewer_state.zoom, &mut viewer_state.pan_uv);
                     }
                     if text_ui
                         .button(
@@ -538,126 +414,28 @@ pub(super) fn render_instance_screenshot_viewer_modal(
                         )
                         .clicked()
                     {
-                        viewer_state.zoom =
-                            adjust_instance_screenshot_zoom(viewer_state.zoom, -1.0);
-                        clamp_instance_screenshot_pan(viewer_state);
+                        viewer_state.zoom = VIEWER_ZOOM_LIMITS.adjust(viewer_state.zoom, -1.0);
+                        VIEWER_ZOOM_LIMITS.clamp_pan(viewer_state.zoom, &mut viewer_state.pan_uv);
                     }
                 });
             });
             ui.add_space(12.0);
 
-            let canvas_size = ui.available_size().max(egui::vec2(1.0, 1.0));
-            let (canvas_rect, response) = ui.allocate_exact_size(canvas_size, egui::Sense::drag());
-            ui.painter().rect_filled(
-                canvas_rect,
-                egui::CornerRadius::same(12),
-                ui.visuals().faint_bg_color,
-            );
-
-            let image_rect = instance_fit_rect_to_aspect(
-                canvas_rect.shrink(8.0),
-                screenshot_aspect_ratio(&screenshot),
-            );
-            if response.hovered() {
-                let scroll_delta = ui.ctx().input(|input| input.smooth_scroll_delta.y);
-                if scroll_delta.abs() > 0.0 {
-                    viewer_state.zoom = adjust_instance_screenshot_zoom_with_scroll(
-                        viewer_state.zoom,
-                        scroll_delta,
-                    );
-                    clamp_instance_screenshot_pan(viewer_state);
-                    ui.ctx().request_repaint();
-                }
-            }
-            if response.dragged() && viewer_state.zoom > INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM {
-                let visible_fraction =
-                    1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
-                let delta = ui.ctx().input(|input| input.pointer.delta());
-                viewer_state.pan_uv.x -= delta.x / image_rect.width().max(1.0) * visible_fraction;
-                viewer_state.pan_uv.y -= delta.y / image_rect.height().max(1.0) * visible_fraction;
-                clamp_instance_screenshot_pan(viewer_state);
-                ui.ctx().request_repaint();
-            }
-            if gamepad_zoom.abs() > 0.05 {
-                let zoom_scale = (1.0 + gamepad_zoom * 1.8 * frame_dt).clamp(0.7, 1.3);
-                viewer_state.zoom = (viewer_state.zoom * zoom_scale).clamp(
-                    INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
-                    INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
-                );
-                clamp_instance_screenshot_pan(viewer_state);
-                ui.ctx().request_repaint();
-            }
-            if viewer_state.zoom > INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM
-                && (gamepad_pan.x.abs() > 0.05 || gamepad_pan.y.abs() > 0.05)
-            {
-                let visible_fraction =
-                    1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
-                let pan_speed = 1.35 * 0.2 * frame_dt * visible_fraction;
-                viewer_state.pan_uv.x += gamepad_pan.x * pan_speed;
-                viewer_state.pan_uv.y += gamepad_pan.y * pan_speed;
-                clamp_instance_screenshot_pan(viewer_state);
-                ui.ctx().request_repaint();
-            }
-
-            if let Some(bytes) = image_bytes.as_ref() {
-                match image_textures::request_viewer_texture(
-                    ui.ctx(),
-                    image_key.clone(),
-                    Arc::clone(bytes),
-                ) {
-                    image_textures::ViewerTextureStatus::Ready(texture) => {
-                        texture.paint(
-                            ui,
-                            image_rect,
-                            instance_viewer_uv_rect(viewer_state),
-                            egui::CornerRadius::same(12),
-                        );
-                    }
-                    image_textures::ViewerTextureStatus::Loading => {
-                        ui.painter().rect_filled(
-                            image_rect,
-                            egui::CornerRadius::same(12),
-                            ui.visuals().widgets.inactive.bg_fill,
-                        );
-                        paint_instance_screenshot_centered_status(
-                            ui,
-                            text_ui,
-                            image_rect,
-                            "Loading screenshot...",
-                        );
-                    }
-                    image_textures::ViewerTextureStatus::Failed => {
-                        ui.painter().rect_filled(
-                            image_rect,
-                            egui::CornerRadius::same(12),
-                            ui.visuals().widgets.inactive.bg_fill,
-                        );
-                        paint_instance_screenshot_centered_status(
-                            ui,
-                            text_ui,
-                            image_rect,
-                            "Failed to load screenshot",
-                        );
-                    }
-                }
-            } else {
-                ui.painter().rect_filled(
-                    image_rect,
-                    egui::CornerRadius::same(12),
-                    ui.visuals().widgets.inactive.bg_fill,
-                );
-                let label = if image_status == LazyImageBytesStatus::Failed {
-                    "Failed to load screenshot"
-                } else {
-                    "Loading screenshot..."
-                };
-                paint_instance_screenshot_centered_status(ui, text_ui, image_rect, label);
-            }
-            ui.painter().rect_stroke(
-                image_rect,
-                egui::CornerRadius::same(12),
-                ui.visuals().widgets.inactive.bg_stroke,
-                egui::StrokeKind::Inside,
+            let canvas = ViewerCanvas {
+                limits: VIEWER_ZOOM_LIMITS,
+                gamepad,
+                aspect_ratio: screenshot_aspect_ratio(&screenshot),
+                image_key: image_key.as_str(),
+                image_bytes: image_bytes.as_ref(),
+                image_status,
+                status_salt: "instance_screenshot_center_status",
+            };
+            render_viewer_canvas(
+                ui,
+                text_ui,
+                &canvas,
+                &mut viewer_state.zoom,
+                &mut viewer_state.pan_uv,
             );
         },
     );
@@ -917,7 +695,8 @@ fn render_instance_screenshot_overlay_button(
         })
         .paint_at(ui, icon_rect);
     let clicked = response.clicked();
-    let contains_pointer = button_contains_pointer || response.is_pointer_button_down_on();
+    let contains_pointer =
+        button_contains_pointer || response.is_pointer_button_down_on() || response.has_focus();
     if button_contains_pointer {
         let _ = crate::ui::style::hover_tip(ui, response.clone(), tooltip);
     }
@@ -1114,19 +893,6 @@ fn collect_instance_screenshots(instance_root: &Path) -> Vec<InstanceScreenshotE
     screenshots
 }
 
-fn is_supported_screenshot_path(path: &Path) -> bool {
-    matches!(
-        path.extension()
-            .and_then(OsStr::to_str)
-            .map(|extension| extension.to_ascii_lowercase()),
-        Some(extension)
-            if matches!(
-                extension.as_str(),
-                "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif"
-            )
-    )
-}
-
 fn screenshot_aspect_ratio(screenshot: &InstanceScreenshotEntry) -> f32 {
     screenshot.width as f32 / screenshot.height.max(1) as f32
 }
@@ -1140,51 +906,4 @@ fn screenshot_uri(path: &Path, modified_at_ms: Option<u64>) -> String {
     path.hash(&mut hasher);
     modified_at_ms.hash(&mut hasher);
     format!("bytes://instance/screenshot/{}.png", hasher.finish())
-}
-
-fn instance_fit_rect_to_aspect(rect: egui::Rect, aspect_ratio: f32) -> egui::Rect {
-    let safe_aspect = aspect_ratio.max(0.01);
-    let rect_aspect = rect.width() / rect.height().max(1.0);
-    if rect_aspect > safe_aspect {
-        let width = rect.height() * safe_aspect;
-        let x = rect.center().x - width * 0.5;
-        egui::Rect::from_min_size(egui::pos2(x, rect.min.y), egui::vec2(width, rect.height()))
-    } else {
-        let height = rect.width() / safe_aspect;
-        let y = rect.center().y - height * 0.5;
-        egui::Rect::from_min_size(egui::pos2(rect.min.x, y), egui::vec2(rect.width(), height))
-    }
-}
-
-fn adjust_instance_screenshot_zoom(current_zoom: f32, direction: f32) -> f32 {
-    (current_zoom + direction * INSTANCE_SCREENSHOT_VIEWER_ZOOM_STEP).clamp(
-        INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
-        INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
-    )
-}
-
-fn adjust_instance_screenshot_zoom_with_scroll(current_zoom: f32, scroll_delta: f32) -> f32 {
-    let scale =
-        (1.0 + scroll_delta * INSTANCE_SCREENSHOT_VIEWER_SCROLL_ZOOM_SENSITIVITY).clamp(0.7, 1.3);
-    (current_zoom * scale).clamp(
-        INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM,
-        INSTANCE_SCREENSHOT_VIEWER_MAX_ZOOM,
-    )
-}
-
-fn clamp_instance_screenshot_pan(viewer_state: &mut InstanceScreenshotViewerState) {
-    let visible_fraction = 1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
-    let max_offset = (1.0 - visible_fraction) * 0.5;
-    viewer_state.pan_uv.x = viewer_state.pan_uv.x.clamp(-max_offset, max_offset);
-    viewer_state.pan_uv.y = viewer_state.pan_uv.y.clamp(-max_offset, max_offset);
-}
-
-fn instance_viewer_uv_rect(viewer_state: &InstanceScreenshotViewerState) -> egui::Rect {
-    let visible_fraction = 1.0 / viewer_state.zoom.max(INSTANCE_SCREENSHOT_VIEWER_MIN_ZOOM);
-    let half = visible_fraction * 0.5;
-    let center = egui::pos2(0.5 + viewer_state.pan_uv.x, 0.5 + viewer_state.pan_uv.y);
-    egui::Rect::from_min_max(
-        egui::pos2(center.x - half, center.y - half),
-        egui::pos2(center.x + half, center.y + half),
-    )
 }

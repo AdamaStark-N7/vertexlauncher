@@ -2,14 +2,21 @@ use super::content_lookup_result::ContentLookupResultEntry;
 use super::*;
 use content_resolver::detect_installed_content_kind;
 use std::collections::{BTreeMap, HashSet};
-use textui_egui::interaction;
 use textui_egui::truncate_single_line_text_with_ellipsis;
 use ui_foundation::tab_button;
 
 #[path = "content_actions.rs"]
 mod content_actions;
+#[path = "content_hash_cache.rs"]
+mod content_hash_cache;
+#[path = "content_metadata_lookup.rs"]
+mod content_metadata_lookup;
 #[path = "content_updates.rs"]
 mod content_updates;
+#[path = "content_widgets.rs"]
+mod content_widgets;
+#[path = "installed_entry_display.rs"]
+mod installed_entry_display;
 
 use self::content_actions::{
     poll_content_apply_results, refresh_installed_content_state,
@@ -17,11 +24,21 @@ use self::content_actions::{
     request_content_toggle, request_content_update, request_local_content_import,
     request_vtmpatch_apply,
 };
+use self::content_hash_cache::*;
+pub(super) use self::content_metadata_lookup::poll_content_lookup_results;
+use self::content_metadata_lookup::*;
 use self::content_updates::{
     bulk_update_button_label, bulk_update_button_tooltip, installed_content_lookup_repaint_delay,
     prefetch_bulk_update_metadata, resolve_installed_content_metadata_batch,
     tab_has_known_available_update,
 };
+use self::content_widgets::{
+    cached_tinted_svg, render_bulk_update_button, render_content_thumbnail,
+    render_installed_content_action_button, render_installed_content_badge,
+    render_installed_content_update_badge, render_installed_content_warning,
+    render_mod_enable_toggle,
+};
+use self::installed_entry_display::InstalledEntryDisplay;
 
 const CONTENT_HASH_CACHE_FLUSH_DEBOUNCE: Duration = Duration::from_millis(750);
 const CONTENT_LOOKUP_REPAINT_INTERVAL: Duration = Duration::from_millis(100);
@@ -64,20 +81,7 @@ pub(super) fn render_installed_content_section(
         "Content Browser is unavailable while instance prep is running.";
     ui.add_space(12.0);
     ui.separator();
-    // The popup closes as soon as an entry is clicked, so dialog results are collected here,
-    // outside it, on every frame.
-    if let Some(paths) =
-        crate::ui::file_dialog::take(ui.ctx(), ("instance_add_local_dialog", instance_id))
-        && !paths.is_empty()
-    {
-        request_local_content_import(state, instance_root, paths);
-    }
-    if let Some(path) =
-        crate::ui::file_dialog::take(ui.ctx(), ("instance_apply_patch_dialog", instance_id))
-            .and_then(|paths| paths.into_iter().next())
-    {
-        request_vtmpatch_apply(state, instance_root, path);
-    }
+    take_content_dialog_results(ui, instance_id, instance_root, state);
 
     ui.add_space(10.0);
     poll_installed_content_scan_results(state);
@@ -99,70 +103,14 @@ pub(super) fn render_installed_content_section(
         output.requested_screen = Some(AppScreen::ContentBrowser);
     }
 
-    let popup_id = ui.id().with(("instance_add_content_popup", instance_id));
-    let _ = egui::Popup::menu(&add_menu_button)
-        .id(popup_id)
-        .width(240.0)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
-        .show(|ui| {
-            let popup_button_style = style::neutral_button_with_min_size(
-                ui,
-                egui::vec2(ui.available_width().max(120.0), style::CONTROL_HEIGHT),
-            );
-            let add_local_response = ui
-                .add_enabled_ui(!state.content_apply_in_flight, |ui| {
-                    text_ui.button(
-                        ui,
-                        ("instance_content_popup_add_local_files", instance_id),
-                        "Add local file(s)",
-                        &popup_button_style,
-                    )
-                })
-                .inner;
-            if add_local_response.clicked() {
-                crate::ui::file_dialog::open(
-                    ui.ctx(),
-                    ("instance_add_local_dialog", instance_id),
-                    crate::ui::file_dialog::Pick::Files,
-                    crate::ui::file_dialog::Dialog::new().title("Add Local Content"),
-                );
-            }
-
-            let apply_patch_response = ui
-                .add_enabled_ui(!state.content_apply_in_flight, |ui| {
-                    text_ui.button(
-                        ui,
-                        ("instance_content_popup_apply_patch", instance_id),
-                        "Apply Patch",
-                        &popup_button_style,
-                    )
-                })
-                .inner;
-            if apply_patch_response.clicked() {
-                crate::ui::file_dialog::open(
-                    ui.ctx(),
-                    ("instance_apply_patch_dialog", instance_id),
-                    crate::ui::file_dialog::Pick::File,
-                    crate::ui::file_dialog::Dialog::new()
-                        .title("Apply Vertex Patch")
-                        .filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION]),
-                );
-            }
-
-            if text_ui
-                .button(
-                    ui,
-                    ("instance_content_popup_local", instance_id),
-                    "Refresh local files",
-                    &popup_button_style,
-                )
-                .clicked()
-            {
-                refresh_installed_content_state(state, instance_root);
-                state.status_message =
-                    Some("Refreshed installed content metadata and hash cache.".to_owned());
-            }
-        });
+    render_add_content_popup(
+        ui,
+        text_ui,
+        instance_id,
+        instance_root,
+        state,
+        &add_menu_button,
+    );
 
     ui.add_space(10.0);
     let previous_tab = state.selected_content_tab;
@@ -236,8 +184,12 @@ pub(super) fn render_installed_content_section(
     }
     ui.add_space(8.0);
 
-    let filtered_files = filter_installed_content_files(state, installed_files.as_ref());
-    if filtered_files.is_empty() {
+    // `None` means "no search query": every installed file matches, so no per-frame copy is made.
+    let filtered_indices = filter_installed_content_indices(state, installed_files.as_ref());
+    let total_items = filtered_indices
+        .as_ref()
+        .map_or(installed_files.len(), Vec::len);
+    if total_items == 0 {
         let query = state.installed_content_search_query.trim();
         let message = if query.is_empty() {
             format!(
@@ -270,7 +222,6 @@ pub(super) fn render_installed_content_section(
     };
     state.installed_content_page_size = page_size;
 
-    let total_items = filtered_files.len();
     let total_pages = total_items.div_ceil(page_size).max(1);
     state.installed_content_page = state.installed_content_page.clamp(1, total_pages);
 
@@ -289,33 +240,16 @@ pub(super) fn render_installed_content_section(
     }
 
     if has_bulk_update_available {
-        ui.add_space(2.0);
-        let bulk_update_label = bulk_update_button_label(state.selected_content_tab);
-        let bulk_update_tooltip = bulk_update_button_tooltip(state.selected_content_tab);
-        let bulk_update_clicked = render_bulk_update_button(
+        render_bulk_update_row(
             ui,
             text_ui,
-            (
-                "instance_content_bulk_update",
-                instance_id,
-                state.selected_content_tab.label(),
-            ),
-            bulk_update_label.as_str(),
-            bulk_update_tooltip.as_str(),
-            !state.content_apply_in_flight,
+            instance_id,
+            instance_root,
+            download_policy,
+            state,
+            selected_game_version.as_str(),
+            selected_modloader.as_str(),
         );
-        ui.add_space(8.0);
-
-        if bulk_update_clicked {
-            request_bulk_content_update(
-                state,
-                instance_root,
-                state.selected_content_tab,
-                selected_game_version.as_str(),
-                selected_modloader.as_str(),
-                download_policy,
-            );
-        }
     }
 
     ui.add_space(8.0);
@@ -331,7 +265,16 @@ pub(super) fn render_installed_content_section(
 
     let start_index = (state.installed_content_page - 1) * state.installed_content_page_size;
     let end_index = (start_index + state.installed_content_page_size).min(total_items);
-    let visible_files = &filtered_files[start_index..end_index];
+    let visible_files: std::borrow::Cow<[InstalledContentFile]> = match filtered_indices.as_ref() {
+        Some(indices) => std::borrow::Cow::Owned(
+            indices[start_index..end_index]
+                .iter()
+                .map(|&index| installed_files[index].clone())
+                .collect(),
+        ),
+        None => std::borrow::Cow::Borrowed(&installed_files[start_index..end_index]),
+    };
+    let visible_files = visible_files.as_ref();
     let _ = request_content_metadata_lookup_batch(
         state,
         visible_files,
@@ -343,9 +286,13 @@ pub(super) fn render_installed_content_section(
     );
     let delete_icon_color = ui.visuals().error_fg_color;
     let delete_button_icon_svg =
-        crate::ui::svg_tint::tint_svg(assets::TRASH_X_SVG, delete_icon_color);
-    let warning_icon_svg =
-        crate::ui::svg_tint::tint_svg(assets::WARN_SVG, ui.visuals().warn_fg_color);
+        cached_tinted_svg(ui.ctx(), "trash_x", assets::TRASH_X_SVG, delete_icon_color);
+    let warning_icon_svg = cached_tinted_svg(
+        ui.ctx(),
+        "warn",
+        assets::WARN_SVG,
+        ui.visuals().warn_fg_color,
+    );
 
     let mut pending_delete: Option<(PathBuf, String)> = None;
     let mut pending_update: Option<(String, String, PathBuf)> = None;
@@ -370,44 +317,7 @@ pub(super) fn render_installed_content_section(
                     .content_metadata_cache
                     .get(&entry.lookup_key)
                     .and_then(|meta| meta.as_ref());
-                // For disabled mods the disk name ends with .DISABLED; strip it for display.
-                let effective_file_name = if entry.disabled {
-                    entry
-                        .file_path
-                        .with_extension("")
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| entry.file_name.clone())
-                } else {
-                    entry.file_name.clone()
-                };
-                let display_name = metadata
-                    .map(|value| value.entry.name.clone())
-                    .unwrap_or_else(|| effective_file_name.clone());
-                let description = metadata
-                    .map(|value| {
-                        if value.entry.summary.trim().is_empty() {
-                            effective_file_name.clone()
-                        } else {
-                            value.entry.summary.clone()
-                        }
-                    })
-                    .unwrap_or_else(|| effective_file_name.clone());
-                let platform_label = metadata
-                    .map(|value| value.entry.source.label().to_owned())
-                    .unwrap_or_else(|| "Unknown".to_owned());
-                let version_label =
-                    metadata.and_then(|value| value.installed_version_label.clone());
-                let warning_message = metadata.and_then(|value| value.warning_message.clone());
-                let update_label = metadata
-                    .and_then(|value| value.update.as_ref())
-                    .map(|update| format!("Update: {}", update.latest_version_label));
-                let update_version_id = metadata
-                    .and_then(|value| value.update.as_ref())
-                    .map(|update| update.latest_version_id.clone());
-                let icon_url = metadata
-                    .and_then(|value| value.entry.icon_url.as_deref())
-                    .map(str::to_owned);
+                let display = InstalledEntryDisplay::new(entry, metadata);
 
                 let rendered = ui
                     .scope_builder(
@@ -424,16 +334,16 @@ pub(super) fn render_installed_content_section(
                                 (instance_id, entry_index),
                                 state,
                                 entry,
-                                display_name.as_str(),
-                                description.as_str(),
-                                platform_label.as_str(),
-                                version_label.as_deref(),
-                                warning_message.as_deref(),
-                                update_label.as_deref(),
-                                icon_url.as_deref(),
-                                delete_button_icon_svg.as_slice(),
+                                display.display_name.as_str(),
+                                display.description.as_str(),
+                                display.platform_label.as_str(),
+                                display.version_label.as_deref(),
+                                display.warning_message.as_deref(),
+                                display.update_label.as_deref(),
+                                display.icon_url.as_deref(),
+                                &delete_button_icon_svg,
                                 delete_icon_color,
-                                warning_icon_svg.as_slice(),
+                                &warning_icon_svg,
                                 state.selected_content_tab == InstalledContentKind::Mods,
                             )
                         },
@@ -449,7 +359,7 @@ pub(super) fn render_installed_content_section(
                 } else if rendered.delete_clicked {
                     pending_delete = Some((entry.file_path.clone(), entry.lookup_key.clone()));
                 } else if rendered.update_clicked {
-                    if let Some(version_id) = update_version_id {
+                    if let Some(version_id) = display.update_version_id.as_ref() {
                         pending_update = Some((
                             entry.lookup_key.clone(),
                             version_id.to_owned(),
@@ -457,30 +367,198 @@ pub(super) fn render_installed_content_section(
                         ));
                     }
                 } else if rendered.open_clicked {
-                    if content_browser_locked {
-                        state.status_message = Some(
-                            "Content Browser is unavailable while instance prep is running."
-                                .to_owned(),
-                        );
-                    } else if let Some(metadata) = state
-                        .content_metadata_cache
-                        .get(&entry.lookup_key)
-                        .and_then(|meta| meta.clone())
-                    {
-                        crate::screens::content_browser::request_open_detail_for_content(
-                            metadata.entry,
-                        );
-                        output.requested_screen = Some(AppScreen::ContentBrowser);
-                    } else {
-                        state.status_message = Some(
-                            "Still loading content metadata. Try again in a moment.".to_owned(),
-                        );
-                    }
+                    open_installed_content_detail(
+                        state,
+                        output,
+                        entry.lookup_key.as_str(),
+                        content_browser_locked,
+                    );
                 }
                 ui.add_space(8.0);
             }
         });
 
+    apply_pending_content_actions(
+        state,
+        instance_root,
+        pending_delete,
+        pending_toggle,
+        pending_update,
+        selected_game_version.as_str(),
+        selected_modloader.as_str(),
+    );
+    schedule_content_hash_cache_repaints_and_flush(ui, state, instance_root);
+}
+
+/// Collects results of the add-local-file and apply-patch dialogs. The popup closes as soon as
+/// an entry is clicked, so this runs on every frame outside it.
+#[allow(clippy::too_many_arguments)]
+fn render_bulk_update_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    instance_root: &Path,
+    download_policy: &DownloadPolicy,
+    state: &mut InstanceScreenState,
+    selected_game_version: &str,
+    selected_modloader: &str,
+) {
+    ui.add_space(2.0);
+    let bulk_update_label = bulk_update_button_label(state.selected_content_tab);
+    let bulk_update_tooltip = bulk_update_button_tooltip(state.selected_content_tab);
+    let bulk_update_clicked = render_bulk_update_button(
+        ui,
+        text_ui,
+        (
+            "instance_content_bulk_update",
+            instance_id,
+            state.selected_content_tab.label(),
+        ),
+        bulk_update_label.as_str(),
+        bulk_update_tooltip.as_str(),
+        !state.content_apply_in_flight,
+    );
+    ui.add_space(8.0);
+
+    if bulk_update_clicked {
+        request_bulk_content_update(
+            state,
+            instance_root,
+            state.selected_content_tab,
+            selected_game_version,
+            selected_modloader,
+            download_policy,
+        );
+    }
+}
+
+/// Handles a click on an installed row: opens the content browser detail page for the row's
+/// resolved metadata, or reports why that is not possible yet.
+fn open_installed_content_detail(
+    state: &mut InstanceScreenState,
+    output: &mut InstanceScreenOutput,
+    lookup_key: &str,
+    content_browser_locked: bool,
+) {
+    if content_browser_locked {
+        state.status_message =
+            Some("Content Browser is unavailable while instance prep is running.".to_owned());
+    } else if let Some(metadata) = state
+        .content_metadata_cache
+        .get(lookup_key)
+        .and_then(|meta| meta.clone())
+    {
+        crate::screens::content_browser::request_open_detail_for_content(metadata.entry);
+        output.requested_screen = Some(AppScreen::ContentBrowser);
+    } else {
+        state.status_message =
+            Some("Still loading content metadata. Try again in a moment.".to_owned());
+    }
+}
+
+fn take_content_dialog_results(
+    ui: &Ui,
+    instance_id: &str,
+    instance_root: &Path,
+    state: &mut InstanceScreenState,
+) {
+    if let Some(paths) =
+        crate::ui::file_dialog::take(ui.ctx(), ("instance_add_local_dialog", instance_id))
+        && !paths.is_empty()
+    {
+        request_local_content_import(state, instance_root, paths);
+    }
+    if let Some(path) =
+        crate::ui::file_dialog::take(ui.ctx(), ("instance_apply_patch_dialog", instance_id))
+            .and_then(|paths| paths.into_iter().next())
+    {
+        request_vtmpatch_apply(state, instance_root, path);
+    }
+}
+
+fn render_add_content_popup(
+    ui: &Ui,
+    text_ui: &mut TextUi,
+    instance_id: &str,
+    instance_root: &Path,
+    state: &mut InstanceScreenState,
+    add_menu_button: &egui::Response,
+) {
+    let popup_id = ui.id().with(("instance_add_content_popup", instance_id));
+    let _ = egui::Popup::menu(add_menu_button)
+        .id(popup_id)
+        .width(240.0)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
+            let popup_button_style = style::neutral_button_with_min_size(
+                ui,
+                egui::vec2(ui.available_width().max(120.0), style::CONTROL_HEIGHT),
+            );
+            let add_local_response = ui
+                .add_enabled_ui(!state.content_apply_in_flight, |ui| {
+                    text_ui.button(
+                        ui,
+                        ("instance_content_popup_add_local_files", instance_id),
+                        "Add local file(s)",
+                        &popup_button_style,
+                    )
+                })
+                .inner;
+            if add_local_response.clicked() {
+                crate::ui::file_dialog::open(
+                    ui.ctx(),
+                    ("instance_add_local_dialog", instance_id),
+                    crate::ui::file_dialog::Pick::Files,
+                    crate::ui::file_dialog::Dialog::new().title("Add Local Content"),
+                );
+            }
+
+            let apply_patch_response = ui
+                .add_enabled_ui(!state.content_apply_in_flight, |ui| {
+                    text_ui.button(
+                        ui,
+                        ("instance_content_popup_apply_patch", instance_id),
+                        "Apply Patch",
+                        &popup_button_style,
+                    )
+                })
+                .inner;
+            if apply_patch_response.clicked() {
+                crate::ui::file_dialog::open(
+                    ui.ctx(),
+                    ("instance_apply_patch_dialog", instance_id),
+                    crate::ui::file_dialog::Pick::File,
+                    crate::ui::file_dialog::Dialog::new()
+                        .title("Apply Vertex Patch")
+                        .filter("Vertex Modpack Patch", &[VTMPATCH_EXTENSION]),
+                );
+            }
+
+            if text_ui
+                .button(
+                    ui,
+                    ("instance_content_popup_local", instance_id),
+                    "Refresh local files",
+                    &popup_button_style,
+                )
+                .clicked()
+            {
+                refresh_installed_content_state(state, instance_root);
+                state.status_message =
+                    Some("Refreshed installed content metadata and hash cache.".to_owned());
+            }
+        });
+}
+
+fn apply_pending_content_actions(
+    state: &mut InstanceScreenState,
+    instance_root: &Path,
+    pending_delete: Option<(PathBuf, String)>,
+    pending_toggle: Option<(PathBuf, String, bool)>,
+    pending_update: Option<(String, String, PathBuf)>,
+    selected_game_version: &str,
+    selected_modloader: &str,
+) {
     if let Some((path, lookup_key)) = pending_delete {
         request_content_delete(
             state,
@@ -514,11 +592,17 @@ pub(super) fn render_installed_content_section(
             metadata.entry,
             file_path.as_path(),
             version_id.as_str(),
-            selected_game_version.as_str(),
-            selected_modloader.as_str(),
+            selected_game_version,
+            selected_modloader,
         );
     }
+}
 
+fn schedule_content_hash_cache_repaints_and_flush(
+    ui: &Ui,
+    state: &mut InstanceScreenState,
+    instance_root: &Path,
+) {
     if state.content_hash_cache_dirty {
         let repaint_after = state
             .content_hash_cache_dirty_since
@@ -532,35 +616,6 @@ pub(super) fn render_installed_content_section(
         ui.ctx().request_repaint_after(Duration::from_millis(100));
     }
     flush_content_hash_cache(state, instance_root);
-}
-
-fn poll_content_hash_cache_save_results(state: &mut InstanceScreenState) {
-    let drained = state.content_hash_cache_save_results.drain();
-    if drained.disconnected {
-        tracing::error!(target: "vertexlauncher/instance_content", "content_hash_cache_save_results receiver was poisoned; channel reset.");
-    }
-    for (saved_serial, result) in drained.items {
-        state.content_hash_cache_save_in_flight = false;
-        match result {
-            Ok(()) => {
-                if saved_serial == state.content_hash_cache_serial {
-                    state.content_hash_cache_dirty = false;
-                    state.content_hash_cache_dirty_since = None;
-                }
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "vertexlauncher/instance_content",
-                    serial = saved_serial,
-                    error = %err,
-                    "Failed to save installed-content hash cache."
-                );
-                if state.content_hash_cache_dirty_since.is_none() {
-                    state.content_hash_cache_dirty_since = Some(Instant::now());
-                }
-            }
-        }
-    }
 }
 
 fn render_installed_content_tab_row(
@@ -698,23 +753,26 @@ fn render_installed_content_pagination_controls(
     });
 }
 
-fn filter_installed_content_files(
+fn filter_installed_content_indices(
     state: &InstanceScreenState,
     files: &[InstalledContentFile],
-) -> Vec<InstalledContentFile> {
+) -> Option<Vec<usize>> {
     let query = state
         .installed_content_search_query
         .trim()
         .to_ascii_lowercase();
     if query.is_empty() {
-        return files.to_vec();
+        return None;
     }
 
-    files
-        .iter()
-        .filter(|file| installed_content_file_matches_search(state, file, query.as_str()))
-        .cloned()
-        .collect()
+    Some(
+        files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| installed_content_file_matches_search(state, file, query.as_str()))
+            .map(|(index, _)| index)
+            .collect(),
+    )
 }
 
 fn installed_content_file_matches_search(
@@ -758,7 +816,20 @@ fn installed_content_file_matches_search(
 
     haystack
         .iter()
-        .any(|value| value.to_ascii_lowercase().contains(query))
+        .any(|value| contains_ignore_ascii_case(value, query))
+}
+
+/// Equivalent to `value.to_ascii_lowercase().contains(query)` for an already lowercased
+/// `query`, without allocating.
+fn contains_ignore_ascii_case(value: &str, query: &str) -> bool {
+    let query = query.as_bytes();
+    if query.is_empty() {
+        return true;
+    }
+    value
+        .as_bytes()
+        .windows(query.len())
+        .any(|window| window.eq_ignore_ascii_case(query))
 }
 
 fn installed_content_count_label(matching: usize, total: usize, query: &str) -> String {
@@ -862,15 +933,13 @@ fn render_installed_content_entry(
     warning_message: Option<&str>,
     update_label: Option<&str>,
     icon_url: Option<&str>,
-    delete_button_icon_svg: &[u8],
+    delete_button_icon_svg: &Arc<[u8]>,
     delete_icon_color: egui::Color32,
-    warning_icon_svg: &[u8],
+    warning_icon_svg: &Arc<[u8]>,
     is_mod_tab: bool,
 ) -> InstalledEntryRenderResult {
     const INSTALLED_TILE_GAP: f32 = 8.0;
     const INSTALLED_TILE_THUMBNAIL_FRAME_PADDING: f32 = 8.0;
-    const INSTALLED_DESCRIPTION_LINE_HEIGHT: f32 = 20.0;
-    const INSTALLED_DESCRIPTION_FRAME_Y_PADDING: i8 = 3;
     let available_width = ui.available_width().max(1.0);
     let tile_width = (available_width - (style::SPACE_XS * 2.0)).max(1.0);
     let side_padding = ((available_width - tile_width) * 0.5).max(0.0);
@@ -978,98 +1047,29 @@ fn render_installed_content_entry(
                                         );
 
                                         ui.add_space(4.0);
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
-                                            render_installed_content_badge(
-                                                ui,
-                                                text_ui,
-                                                (id_source, "platform_badge"),
-                                                platform_label,
-                                                ui.visuals().selection.bg_fill,
-                                                ui.visuals().selection.stroke.color,
-                                            );
-                                            if let Some(version_label) = version_label {
-                                                render_installed_content_badge(
-                                                    ui,
-                                                    text_ui,
-                                                    (id_source, "version_badge"),
-                                                    version_label,
-                                                    ui.visuals().widgets.inactive.bg_fill,
-                                                    ui.visuals().text_color(),
-                                                );
-                                            }
-                                            if let Some(update) = update_label {
-                                                if render_installed_content_update_badge(
-                                                    ui,
-                                                    text_ui,
-                                                    (id_source, "update_badge"),
-                                                    update,
-                                                    !state.content_apply_in_flight,
-                                                ) {
-                                                    update_clicked = true;
-                                                }
-                                            }
-                                            if let Some(warning_message) = warning_message {
-                                                render_installed_content_warning(
-                                                    ui,
-                                                    warning_message,
-                                                    id_source,
-                                                    warning_icon_svg,
-                                                );
-                                            }
-                                        });
+                                        if render_installed_content_badge_row(
+                                            ui,
+                                            text_ui,
+                                            id_source,
+                                            state.content_apply_in_flight,
+                                            platform_label,
+                                            version_label,
+                                            update_label,
+                                            warning_message,
+                                            warning_icon_svg,
+                                        ) {
+                                            update_clicked = true;
+                                        }
 
                                         ui.add_space(4.0);
-                                        egui::Frame::new()
-                                            .fill(ui.visuals().extreme_bg_color)
-                                            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                                            .corner_radius(egui::CornerRadius::same(
-                                                style::CORNER_RADIUS_SM,
-                                            ))
-                                            .inner_margin(egui::Margin::symmetric(
-                                                6,
-                                                INSTALLED_DESCRIPTION_FRAME_Y_PADDING,
-                                            ))
-                                            .show(ui, |ui| {
-                                                ui.set_width(ui.available_width().max(1.0));
-                                                let description_style = LabelOptions {
-                                                    line_height: INSTALLED_DESCRIPTION_LINE_HEIGHT,
-                                                    wrap: false,
-                                                    ..style::body(ui)
-                                                };
-                                                let truncated_description =
-                                                    cached_truncated_description(
-                                                        state,
-                                                        text_ui,
-                                                        ui,
-                                                        entry.lookup_key.as_str(),
-                                                        description,
-                                                        ui.available_width().max(1.0),
-                                                        &description_style,
-                                                    );
-                                                ui.allocate_ui_with_layout(
-                                                    egui::vec2(
-                                                        ui.available_width().max(1.0),
-                                                        INSTALLED_DESCRIPTION_LINE_HEIGHT,
-                                                    ),
-                                                    egui::Layout::top_down(egui::Align::Min),
-                                                    |ui| {
-                                                        ui.set_min_height(
-                                                            INSTALLED_DESCRIPTION_LINE_HEIGHT,
-                                                        );
-                                                        ui.set_max_height(
-                                                            INSTALLED_DESCRIPTION_LINE_HEIGHT,
-                                                        );
-                                                        ui.set_width(ui.available_width().max(1.0));
-                                                        let _ = text_ui.label(
-                                                            ui,
-                                                            (id_source, "description"),
-                                                            truncated_description.as_str(),
-                                                            &description_style,
-                                                        );
-                                                    },
-                                                );
-                                            });
+                                        render_installed_content_description(
+                                            ui,
+                                            text_ui,
+                                            state,
+                                            id_source,
+                                            entry.lookup_key.as_str(),
+                                            description,
+                                        );
                                     },
                                 );
                             },
@@ -1100,476 +1100,110 @@ fn render_installed_content_entry(
     }
 }
 
-fn render_content_thumbnail(ui: &mut Ui, id_source: impl Hash, icon_url: Option<&str>, size: f32) {
-    let size = egui::vec2(size, size);
-    if let Some(icon_url) = icon_url {
-        remote_tiled_image::show(
+#[allow(clippy::too_many_arguments)]
+fn render_installed_content_badge_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    id_source: impl std::hash::Hash + Copy,
+    content_apply_in_flight: bool,
+    platform_label: &str,
+    version_label: Option<&str>,
+    update_label: Option<&str>,
+    warning_message: Option<&str>,
+    warning_icon_svg: &Arc<[u8]>,
+) -> bool {
+    let mut update_clicked = false;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = egui::vec2(6.0, 4.0);
+        render_installed_content_badge(
             ui,
-            icon_url,
-            size,
-            (id_source, "remote-icon"),
-            assets::LIBRARY_SVG,
+            text_ui,
+            (id_source, "platform_badge"),
+            platform_label,
+            ui.visuals().selection.bg_fill,
+            ui.visuals().selection.stroke.color,
         );
-    } else {
-        let mut hasher = DefaultHasher::new();
-        id_source.hash(&mut hasher);
-        ui.add(
-            egui::Image::from_bytes(
-                format!(
-                    "bytes://instance/default-content-icon/{}.svg",
-                    hasher.finish()
-                ),
-                assets::LIBRARY_SVG,
+        if let Some(version_label) = version_label {
+            render_installed_content_badge(
+                ui,
+                text_ui,
+                (id_source, "version_badge"),
+                version_label,
+                ui.visuals().widgets.inactive.bg_fill,
+                ui.visuals().text_color(),
+            );
+        }
+        if let Some(update) = update_label
+            && render_installed_content_update_badge(
+                ui,
+                text_ui,
+                (id_source, "update_badge"),
+                update,
+                !content_apply_in_flight,
             )
-            .fit_to_exact_size(size),
-        );
-    }
+        {
+            update_clicked = true;
+        }
+        if let Some(warning_message) = warning_message {
+            render_installed_content_warning(ui, warning_message, id_source, warning_icon_svg);
+        }
+    });
+    update_clicked
 }
 
-fn render_installed_content_action_button(
-    ui: &mut Ui,
-    icon_id: &str,
-    themed_svg: &[u8],
-    icon_color: egui::Color32,
-    tooltip: &str,
-    width: f32,
-    height: f32,
-) -> bool {
-    let uri = format!(
-        "bytes://instance-installed-content-action/{icon_id}-{:02x}{:02x}{:02x}.svg",
-        icon_color.r(),
-        icon_color.g(),
-        icon_color.b()
-    );
-    let button_size = egui::vec2(width, height);
-    let icon_size = (height - 10.0).max(12.0);
-    let (rect, response) = ui.allocate_exact_size(button_size, egui::Sense::click());
-    let visuals = ui.visuals();
-    let state = interaction::InteractionState::of(ui.ctx(), &response, true);
-    let button_fill = interaction::FillPalette::new(
-        visuals.extreme_bg_color,
-        visuals.widgets.hovered.bg_fill,
-        visuals.widgets.active.bg_fill,
-        visuals.selection.bg_fill,
-        visuals.text_color(),
-    )
-    .fill(state, false);
-    ui.painter()
-        .rect_filled(rect, egui::CornerRadius::same(8), button_fill);
-    ui.painter().rect_stroke(
-        rect,
-        egui::CornerRadius::same(8),
-        interaction::focus_stroke(
-            state,
-            visuals,
-            interaction::hover_stroke(
-                state,
-                visuals.widgets.inactive.bg_stroke,
-                visuals.widgets.hovered.bg_stroke,
-            ),
-        ),
-        egui::StrokeKind::Inside,
-    );
-    interaction::paint_focus_ring(ui.painter(), visuals, state, rect, 8);
-
-    let image = egui::Image::from_bytes(uri, themed_svg.to_vec())
-        .fit_to_exact_size(egui::vec2(icon_size, icon_size));
-    let icon_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(icon_size, icon_size));
-    let _ = ui.put(icon_rect, image);
-
-    crate::ui::style::hover_tip(ui, response, tooltip).clicked()
-}
-
-use crate::ui::color::lerp_color32_oklab;
-use crate::ui::toggle_anim::ToggleAnimState;
-
-// ── Animated toggle widget ────────────────────────────────────────────────────
-
-fn render_mod_enable_toggle(ui: &mut Ui, id: &str, enabled: bool, width: f32, height: f32) -> bool {
-    let size = egui::vec2(width, height);
-    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
-
-    // Load, advance, and persist animation state.
-    let anim_id = ui.make_persistent_id(("mod_toggle_anim", id));
-    let target = if enabled { 1.0f32 } else { 0.0f32 };
-    // Cap dt so a long frame doesn't teleport the knob.
-    let dt = ui.ctx().input(|i| i.stable_dt).min(0.1);
-
-    let mut anim: ToggleAnimState = ui
-        .ctx()
-        .data_mut(|d| d.get_temp::<ToggleAnimState>(anim_id))
-        .unwrap_or_else(|| ToggleAnimState::settled(target));
-
-    anim.redirect(target);
-    anim.advance(dt);
-    let pos = anim.visual_pos(); // 0.0 = off, 1.0 = on
-
-    if !anim.is_done() {
-        ui.ctx().request_repaint();
-    }
-    ui.ctx().data_mut(|d| d.insert_temp(anim_id, anim));
-
-    // Geometry
-    let track_h = (height * 0.68).max(14.0);
-    let track_rect = egui::Rect::from_center_size(rect.center(), egui::vec2(width - 6.0, track_h));
-    let cr = egui::CornerRadius::same((track_h * 0.5) as u8);
-    let visuals = ui.visuals();
-    let hover = interaction::InteractionState::of(ui.ctx(), &response, true);
-
-    // Track fill and stroke — interpolated in OKLab, then lifted toward the text color on hover.
-    let fill = lerp_color32_oklab(
-        visuals.widgets.inactive.bg_fill,
-        visuals.selection.bg_fill,
-        pos,
-    )
-    .lerp_to_gamma(visuals.text_color(), 0.14 * hover.hover);
-    let stroke_color = lerp_color32_oklab(
-        visuals.widgets.inactive.bg_stroke.color,
-        visuals.selection.stroke.color,
-        pos,
-    )
-    .lerp_to_gamma(visuals.widgets.hovered.bg_stroke.color, hover.hover);
-    let stroke_w = visuals.widgets.inactive.bg_stroke.width
-        + (visuals.selection.stroke.width - visuals.widgets.inactive.bg_stroke.width) * pos;
-
-    ui.painter().rect_filled(track_rect, cr, fill);
-    ui.painter().rect_stroke(
-        track_rect,
-        cr,
-        egui::Stroke::new(stroke_w, stroke_color),
-        egui::StrokeKind::Inside,
-    );
-
-    // Knob position — driven by the same eased pos.
-    let knob_r = (track_h * 0.33).max(4.0);
-    let margin = knob_r + 2.5;
-    let travel = track_rect.width() - margin * 2.0;
-    let knob_x = track_rect.left() + margin + travel * pos;
-    let knob_color = lerp_color32_oklab(
-        visuals.widgets.noninteractive.fg_stroke.color,
-        visuals.widgets.active.fg_stroke.color,
-        pos,
-    );
-    ui.painter().circle_filled(
-        egui::pos2(knob_x, track_rect.center().y),
-        knob_r,
-        knob_color,
-    );
-
-    let tooltip = if enabled { "Disable mod" } else { "Enable mod" };
-    crate::ui::style::hover_tip(ui, response, tooltip).clicked()
-}
-
-fn render_bulk_update_button(
+fn render_installed_content_description(
     ui: &mut Ui,
     text_ui: &mut TextUi,
+    state: &mut InstanceScreenState,
     id_source: impl std::hash::Hash + Copy,
-    label: &str,
-    tooltip: &str,
-    enabled: bool,
-) -> bool {
-    ui.push_id(id_source, |ui| {
-        let text_color = if enabled {
-            ui.visuals().text_color()
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        let fill = if enabled {
-            ui.visuals().selection.bg_fill
-        } else {
-            ui.visuals().widgets.inactive.bg_fill
-        };
-        let sense = if enabled {
-            egui::Sense::click()
-        } else {
-            egui::Sense::hover()
-        };
-        let button_size = egui::vec2(ui.available_width().max(220.0), 34.0);
-        let (rect, response) = ui.allocate_exact_size(button_size, sense);
-        let state = interaction::InteractionState::of(ui.ctx(), &response, enabled);
-        let button_fill = interaction::FillPalette::new(
-            fill,
-            fill.lerp_to_gamma(ui.visuals().text_color(), 0.14),
-            fill.gamma_multiply(0.9),
-            fill,
-            ui.visuals().text_color(),
-        )
-        .fill(state, false);
-        ui.painter()
-            .rect_filled(rect, egui::CornerRadius::same(8), button_fill);
-        ui.painter().rect_stroke(
-            rect,
-            egui::CornerRadius::same(8),
-            interaction::focus_stroke(
-                state,
-                ui.visuals(),
-                interaction::hover_stroke(
-                    state,
-                    ui.visuals().widgets.noninteractive.bg_stroke,
-                    ui.visuals().widgets.hovered.bg_stroke,
-                ),
-            ),
-            egui::StrokeKind::Inside,
-        );
-        interaction::paint_focus_ring(ui.painter(), ui.visuals(), state, rect, 8);
-
-        let icon_size = 16.0;
-        let icon_uri = format!(
-            "bytes://instance-content-bulk-update/{:02x}{:02x}{:02x}.svg",
-            text_color.r(),
-            text_color.g(),
-            text_color.b()
-        );
-        let icon_rect = egui::Rect::from_min_size(
-            egui::pos2(rect.min.x + 12.0, rect.center().y - (icon_size * 0.5)),
-            egui::vec2(icon_size, icon_size),
-        );
-        let refresh_icon_svg = crate::ui::svg_tint::tint_svg(assets::REFRESH_SVG, text_color);
-        let _ = ui.put(
-            icon_rect,
-            egui::Image::from_bytes(icon_uri, refresh_icon_svg)
-                .fit_to_exact_size(egui::vec2(icon_size, icon_size)),
-        );
-        let label_rect = egui::Rect::from_min_max(
-            egui::pos2(icon_rect.max.x + 8.0, rect.top()),
-            egui::pos2(rect.right() - 10.0, rect.bottom()),
-        );
-        let label_style = LabelOptions {
-            color: text_color,
-            ..style::stat_label(ui)
-        };
-        ui.scope_builder(egui::UiBuilder::new().max_rect(label_rect), |ui| {
-            ui.set_clip_rect(label_rect.intersect(ui.clip_rect()));
-            ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                let _ = text_ui.label(
-                    ui,
-                    ("instance_content_bulk_update_label", label),
-                    label,
-                    &label_style,
-                );
-            });
-        });
-
-        crate::ui::style::hover_tip(
-            ui,
-            response,
-            if enabled {
-                tooltip
-            } else {
-                "A content operation is already in progress."
-            },
-        )
-        .clicked()
-    })
-    .inner
-}
-
-fn render_installed_content_badge(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    id_source: impl std::hash::Hash + Copy,
-    label: &str,
-    fill: egui::Color32,
-    text_color: egui::Color32,
+    lookup_key: &str,
+    description: &str,
 ) {
+    const INSTALLED_DESCRIPTION_LINE_HEIGHT: f32 = 20.0;
+    const INSTALLED_DESCRIPTION_FRAME_Y_PADDING: i8 = 3;
     egui::Frame::new()
-        .fill(fill)
-        .stroke(egui::Stroke::NONE)
-        .corner_radius(egui::CornerRadius::same(6))
+        .fill(ui.visuals().extreme_bg_color)
+        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_SM))
         .inner_margin(egui::Margin::symmetric(
-            INSTALLED_CONTENT_BADGE_PADDING_X as i8,
-            INSTALLED_CONTENT_BADGE_PADDING_Y as i8,
+            6,
+            INSTALLED_DESCRIPTION_FRAME_Y_PADDING,
         ))
         .show(ui, |ui| {
-            let _ = text_ui.label(
+            ui.set_width(ui.available_width().max(1.0));
+            let description_style = LabelOptions {
+                line_height: INSTALLED_DESCRIPTION_LINE_HEIGHT,
+                wrap: false,
+                ..style::body(ui)
+            };
+            let truncated_description = cached_truncated_description(
+                state,
+                text_ui,
                 ui,
-                id_source,
-                label,
-                &LabelOptions {
-                    font_size: INSTALLED_CONTENT_BADGE_FONT_SIZE,
-                    line_height: INSTALLED_CONTENT_BADGE_LINE_HEIGHT,
-                    color: text_color,
-                    wrap: false,
-                    ..crate::ui::style::body(ui)
+                lookup_key,
+                description,
+                ui.available_width().max(1.0),
+                &description_style,
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(
+                    ui.available_width().max(1.0),
+                    INSTALLED_DESCRIPTION_LINE_HEIGHT,
+                ),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    ui.set_min_height(INSTALLED_DESCRIPTION_LINE_HEIGHT);
+                    ui.set_max_height(INSTALLED_DESCRIPTION_LINE_HEIGHT);
+                    ui.set_width(ui.available_width().max(1.0));
+                    let _ = text_ui.label(
+                        ui,
+                        (id_source, "description"),
+                        truncated_description.as_str(),
+                        &description_style,
+                    );
                 },
             );
         });
-}
-
-fn render_installed_content_update_badge(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    id_source: impl std::hash::Hash + Copy,
-    label: &str,
-    enabled: bool,
-) -> bool {
-    ui.push_id(id_source, |ui| {
-        let text_color = if enabled {
-            ui.visuals().warn_fg_color
-        } else {
-            ui.visuals().weak_text_color()
-        };
-        let fill = if enabled {
-            ui.visuals().warn_fg_color.gamma_multiply(0.16)
-        } else {
-            ui.visuals().widgets.inactive.bg_fill
-        };
-        let stroke_color = if enabled {
-            ui.visuals().warn_fg_color
-        } else {
-            ui.visuals().widgets.noninteractive.bg_stroke.color
-        };
-        let response = ui
-            .add_enabled_ui(enabled, |ui| {
-                text_ui.button(
-                    ui,
-                    ("installed_content_update_badge", label),
-                    label,
-                    &ButtonOptions {
-                        font_size: INSTALLED_CONTENT_BADGE_FONT_SIZE,
-                        line_height: INSTALLED_CONTENT_BADGE_LINE_HEIGHT,
-                        padding: egui::vec2(
-                            INSTALLED_CONTENT_BADGE_PADDING_X,
-                            INSTALLED_CONTENT_BADGE_PADDING_Y,
-                        ),
-                        min_size: egui::vec2(0.0, 0.0),
-                        corner_radius: 6,
-                        text_color,
-                        fill,
-                        fill_hovered: style::hover_fill(ui, fill),
-                        fill_active: fill.gamma_multiply(0.92),
-                        fill_selected: fill,
-                        stroke: egui::Stroke::new(1.0, stroke_color),
-                        ..ButtonOptions::default()
-                    },
-                )
-            })
-            .inner;
-        crate::ui::style::hover_tip(
-            ui,
-            response,
-            if enabled {
-                "Update to this version"
-            } else {
-                "A content operation is already in progress"
-            },
-        )
-        .clicked()
-    })
-    .inner
-}
-
-fn render_installed_content_warning(
-    ui: &mut Ui,
-    warning_message: &str,
-    id_source: impl std::hash::Hash + Copy,
-    warning_icon_svg: &[u8],
-) {
-    let mut hasher = DefaultHasher::new();
-    id_source.hash(&mut hasher);
-    let uri = format!(
-        "bytes://instance-installed-content-warning/{}.svg",
-        hasher.finish()
-    );
-    let response = ui.add(
-        egui::Image::from_bytes(uri, warning_icon_svg.to_vec())
-            .fit_to_exact_size(egui::vec2(16.0, 16.0)),
-    );
-    crate::ui::style::hover_tip(ui, response, warning_message);
-}
-
-fn poll_content_hash_cache_load_results(state: &mut InstanceScreenState) {
-    let drained = state.content_hash_cache_load_results.drain();
-    if drained.disconnected {
-        tracing::error!(target: "vertexlauncher/instance_content", "content_hash_cache_load_results receiver was poisoned; channel reset.");
-    }
-    for result in drained.items {
-        state.content_hash_cache_load_in_flight = false;
-        if state.content_hash_cache.is_some() {
-            continue;
-        }
-        match result {
-            Ok(cache) => state.content_hash_cache = Some(cache),
-            Err(err) => {
-                tracing::warn!(
-                    target: "vertexlauncher/instance_content",
-                    error = %err,
-                    "Failed to load installed-content hash cache; using an empty cache."
-                );
-                state.content_hash_cache = Some(InstalledContentHashCache::default());
-            }
-        }
-    }
-}
-
-fn ensure_content_hash_cache_loaded(state: &mut InstanceScreenState, instance_root: &Path) {
-    if state.content_hash_cache.is_some() || state.content_hash_cache_load_in_flight {
-        return;
-    }
-    let tx = state.content_hash_cache_load_results.sender();
-
-    let instance_root = instance_root.to_path_buf();
-    state.content_hash_cache_load_in_flight = true;
-    let _ = tokio_runtime::spawn_detached(async move {
-        let result = tokio_runtime::spawn_blocking(move || {
-            Ok::<_, String>(InstalledContentResolver::load_hash_cache(
-                instance_root.as_path(),
-            ))
-        })
-        .await
-        .map_err(|err| err.to_string())
-        .and_then(|result| result);
-        let _ = tx.send(result);
-    });
-}
-
-fn flush_content_hash_cache(state: &mut InstanceScreenState, instance_root: &Path) {
-    if !state.content_hash_cache_dirty || state.content_hash_cache_save_in_flight {
-        return;
-    }
-    let Some(dirty_since) = state.content_hash_cache_dirty_since else {
-        state.content_hash_cache_dirty_since = Some(Instant::now());
-        return;
-    };
-    if dirty_since.elapsed() < CONTENT_HASH_CACHE_FLUSH_DEBOUNCE {
-        return;
-    }
-
-    let Some(cache) = state.content_hash_cache.clone() else {
-        return;
-    };
-    let tx = state.content_hash_cache_save_results.sender();
-    let instance_root = instance_root.to_path_buf();
-    let serial = state.content_hash_cache_serial;
-    state.content_hash_cache_save_in_flight = true;
-    let _ = tokio_runtime::spawn_detached(async move {
-        let result = tokio_runtime::spawn_blocking(move || {
-            InstalledContentResolver::save_hash_cache(instance_root.as_path(), &cache)
-                .map_err(|err| err.to_string())
-        })
-        .await;
-        let result = match result {
-            Ok(result) => result,
-            Err(err) => Err(err.to_string()),
-        };
-        let _ = tx.send((serial, result));
-    });
-}
-
-fn clear_content_hash_cache(state: &mut InstanceScreenState, instance_root: &Path) {
-    state.content_hash_cache = Some(InstalledContentHashCache::default());
-    state.content_hash_cache_load_in_flight = false;
-    state.content_hash_cache_dirty = false;
-    state.content_hash_cache_dirty_since = None;
-    state.content_hash_cache_serial = state.content_hash_cache_serial.saturating_add(1);
-    state.content_hash_cache_save_in_flight = false;
-    let instance_root = instance_root.to_path_buf();
-    let _ = tokio_runtime::spawn_detached(async move {
-        let _ = tokio_runtime::spawn_blocking(move || {
-            InstalledContentResolver::clear_hash_cache(instance_root.as_path())
-        })
-        .await;
-    });
 }
 
 fn cached_truncated_description(
@@ -1600,280 +1234,4 @@ fn cached_truncated_description(
         },
     );
     truncated_description
-}
-
-fn should_request_content_metadata_lookup(
-    state: &mut InstanceScreenState,
-    lookup_key: &str,
-    force_refresh: bool,
-) -> bool {
-    let now = Instant::now();
-    if lookup_key.trim().is_empty() || state.content_lookup_in_flight.contains(lookup_key) {
-        return false;
-    }
-    if !force_refresh {
-        if state
-            .content_metadata_cache
-            .get(lookup_key)
-            .is_some_and(|resolution| resolution.is_some())
-        {
-            return false;
-        }
-        if let Some(retry_at) = state.content_lookup_retry_after_by_key.get(lookup_key)
-            && *retry_at > now
-        {
-            return false;
-        }
-    }
-    true
-}
-
-fn mark_content_metadata_lookup_requested(
-    state: &mut InstanceScreenState,
-    lookup_key: &str,
-) -> u64 {
-    state.content_lookup_request_serial = state.content_lookup_request_serial.saturating_add(1);
-    let request_serial = state.content_lookup_request_serial;
-    state.content_lookup_in_flight.insert(lookup_key.to_owned());
-    state.content_lookup_retry_after_by_key.remove(lookup_key);
-    state
-        .content_lookup_latest_serial_by_key
-        .insert(lookup_key.to_owned(), request_serial);
-    request_serial
-}
-
-#[allow(clippy::too_many_arguments)]
-fn request_content_metadata_lookup_batch(
-    state: &mut InstanceScreenState,
-    files: &[InstalledContentFile],
-    kind: InstalledContentKind,
-    game_version: &str,
-    loader: &str,
-    force_refresh: bool,
-    max_batch_size: usize,
-) -> usize {
-    if files.is_empty() || max_batch_size == 0 || state.content_hash_cache.is_none() {
-        return 0;
-    }
-
-    let tx = state.content_lookup_results.sender();
-
-    let mut work_items = Vec::new();
-    for file in files {
-        if work_items.len() >= max_batch_size {
-            break;
-        }
-        if !should_request_content_metadata_lookup(state, file.lookup_key.as_str(), force_refresh) {
-            continue;
-        }
-        let request_serial =
-            mark_content_metadata_lookup_requested(state, file.lookup_key.as_str());
-        work_items.push((request_serial, file.clone()));
-    }
-    if work_items.is_empty() {
-        return 0;
-    }
-    let scheduled_count = work_items.len();
-
-    let hash_cache = state.content_hash_cache.clone().unwrap_or_default();
-    let game_version = game_version.trim().to_owned();
-    let loader = loader.trim().to_owned();
-    let _ = tokio_runtime::spawn_detached(async move {
-        let join = tokio_runtime::spawn_blocking({
-            let game_version = game_version.clone();
-            let loader = loader.clone();
-            move || {
-                resolve_installed_content_lookup_batch(
-                    work_items.as_slice(),
-                    kind,
-                    game_version.as_str(),
-                    loader.as_str(),
-                    hash_cache,
-                )
-            }
-        });
-        let result = match join.await {
-            Ok(r) => r,
-            Err(err) => {
-                tracing::error!(
-                    target: "vertexlauncher/instance_content",
-                    kind = %kind.folder_name(),
-                    error = %err,
-                    "Content metadata lookup worker panicked."
-                );
-                return;
-            }
-        };
-        if let Err(_) = tx.send(result) {
-            // The result channel is closed when the instance screen state is
-            // refreshed (e.g. after a patch apply).  In-flight lookup tasks
-            // that complete after the reset simply drop their results — this
-            // is harmless and expected, so we log at debug rather than error.
-            tracing::debug!(
-                target: "vertexlauncher/instance_content",
-                kind = %kind.folder_name(),
-                scheduled_count,
-                game_version = %game_version,
-                loader = %loader,
-                "installed-content metadata lookup completed after state reset; result discarded"
-            );
-        }
-    });
-
-    scheduled_count
-}
-
-pub(super) fn poll_content_lookup_results(state: &mut InstanceScreenState) {
-    let drained = state.content_lookup_results.drain();
-    if drained.disconnected {
-        tracing::error!(target: "vertexlauncher/instance_content", "content_lookup_results receiver was poisoned; channel reset.");
-    }
-    for result in drained.items {
-        let cache = state
-            .content_hash_cache
-            .get_or_insert_with(InstalledContentHashCache::default);
-        if cache.apply_updates(result.hash_cache_updates) {
-            state.content_hash_cache_serial = state.content_hash_cache_serial.saturating_add(1);
-            state.content_hash_cache_dirty = true;
-            state.content_hash_cache_dirty_since = Some(Instant::now());
-        }
-
-        for result in result.results {
-            let is_latest = state
-                .content_lookup_latest_serial_by_key
-                .get(result.lookup_key.as_str())
-                .copied()
-                == Some(result.request_serial);
-            if !is_latest {
-                continue;
-            }
-            state
-                .content_lookup_in_flight
-                .remove(result.lookup_key.as_str());
-            if let Some(resolution) = result.resolution {
-                state
-                    .content_lookup_retry_after_by_key
-                    .remove(result.lookup_key.as_str());
-                state
-                    .content_lookup_failure_count_by_key
-                    .remove(result.lookup_key.as_str());
-                state
-                    .content_metadata_cache
-                    .insert(result.lookup_key, Some(resolution));
-                continue;
-            }
-
-            let failure_count = state
-                .content_lookup_failure_count_by_key
-                .entry(result.lookup_key.clone())
-                .and_modify(|count| *count = count.saturating_add(1))
-                .or_insert(1);
-            state.content_lookup_retry_after_by_key.insert(
-                result.lookup_key.clone(),
-                Instant::now() + content_lookup_retry_delay(*failure_count),
-            );
-            state
-                .content_metadata_cache
-                .entry(result.lookup_key)
-                .or_insert(None);
-        }
-    }
-}
-
-fn resolve_installed_content_lookup_batch(
-    work_items: &[(u64, InstalledContentFile)],
-    kind: InstalledContentKind,
-    game_version: &str,
-    loader_label: &str,
-    mut hash_cache: InstalledContentHashCache,
-) -> ContentLookupResult {
-    let installed_files = work_items
-        .iter()
-        .map(|(_, file)| file.clone())
-        .collect::<Vec<_>>();
-    let original_hash_cache = hash_cache.clone();
-    let resolved_by_lookup_key = resolve_installed_content_metadata_batch(
-        installed_files.as_slice(),
-        kind,
-        game_version,
-        loader_label,
-        &mut hash_cache,
-    )
-    .into_iter()
-    .map(|(file, resolution)| (file.lookup_key, resolution))
-    .collect::<std::collections::HashMap<_, _>>();
-
-    ContentLookupResult {
-        results: work_items
-            .iter()
-            .map(|(request_serial, file)| ContentLookupResultEntry {
-                request_serial: *request_serial,
-                lookup_key: file.lookup_key.clone(),
-                resolution: resolved_by_lookup_key
-                    .get(file.lookup_key.as_str())
-                    .cloned(),
-            })
-            .collect(),
-        hash_cache_updates: hash_cache_diff_updates(&original_hash_cache, &hash_cache),
-    }
-}
-
-fn hash_cache_diff_updates(
-    previous: &InstalledContentHashCache,
-    current: &InstalledContentHashCache,
-) -> Vec<content_resolver::InstalledContentHashCacheUpdate> {
-    current
-        .entries
-        .iter()
-        .filter(|(hash_key, resolution)| {
-            previous.entries.get(hash_key.as_str()) != Some(*resolution)
-        })
-        .map(
-            |(hash_key, resolution)| content_resolver::InstalledContentHashCacheUpdate {
-                hash_key: hash_key.clone(),
-                resolution: resolution.clone(),
-            },
-        )
-        .collect()
-}
-
-fn refresh_cached_metadata_after_apply(
-    state: &mut InstanceScreenState,
-    instance_root: &Path,
-    kind: InstalledContentKind,
-    focus_lookup_keys: &[String],
-) {
-    let key_prefix = format!("{}::", kind.folder_name());
-    let focus_keys = focus_lookup_keys.iter().cloned().collect::<HashSet<_>>();
-
-    state.installed_content_cache.files_by_tab.remove(&kind);
-    state
-        .content_metadata_cache
-        .retain(|key, _| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-    state
-        .installed_content_entry_ui_cache
-        .retain(|key, _| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-    state
-        .content_lookup_in_flight
-        .retain(|key| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-    state
-        .content_lookup_latest_serial_by_key
-        .retain(|key, _| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-    state
-        .content_lookup_retry_after_by_key
-        .retain(|key, _| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-    state
-        .content_lookup_failure_count_by_key
-        .retain(|key, _| !key.starts_with(key_prefix.as_str()) || focus_keys.contains(key));
-
-    request_installed_content_scan(state, instance_root, kind);
-}
-
-fn content_lookup_retry_delay(failure_count: u8) -> Duration {
-    match failure_count {
-        0 | 1 => Duration::from_secs(2),
-        2 => Duration::from_secs(10),
-        3 => Duration::from_secs(30),
-        _ => Duration::from_secs(120),
-    }
 }

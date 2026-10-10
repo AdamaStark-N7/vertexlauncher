@@ -21,6 +21,8 @@ pub struct DiscoverState {
     pub(crate) masonry_layout_cache: Option<CachedDiscoverMasonryLayout>,
     pub(crate) cached_snapshots: HashMap<DiscoverSearchRequest, DiscoverSearchSnapshot>,
     pub(crate) available_game_versions: Vec<MinecraftVersionEntry>,
+    /// Dropdown labels for `available_game_versions`; refreshed whenever the catalog changes.
+    pub(crate) game_version_options: Vec<String>,
     pub(crate) version_catalog_error: Option<String>,
     pub(crate) version_catalog_in_flight: bool,
     pub(crate) version_catalog:
@@ -62,6 +64,7 @@ impl Default for DiscoverState {
             masonry_layout_cache: None,
             cached_snapshots: HashMap::new(),
             available_game_versions: Vec::new(),
+            game_version_options: game_version_option_labels(&[]),
             version_catalog_error: None,
             version_catalog_in_flight: false,
             version_catalog: Default::default(),

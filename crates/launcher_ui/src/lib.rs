@@ -14,6 +14,7 @@ pub mod launch_settings;
 pub mod notification;
 pub mod privacy;
 pub mod screens;
+pub mod screenshot_watch;
 pub mod sync_runner;
 pub mod ui;
 pub mod window_effects;

@@ -547,6 +547,69 @@ pub(crate) fn bulk_update_installed_content(
     Ok(applied)
 }
 
+/// Prefix of the temporary backups made while replacing a file during an update.
+const UPDATE_BACKUP_PREFIX: &str = ".vertex-update-backup-";
+
+/// Clears what an interrupted or finished update can leave behind in an instance: the prefetch
+/// folder and `.vertex-update-backup-*` files in the content folder. A backup whose original
+/// file is missing (the update died mid-replacement) is restored instead of deleted, so no
+/// mod is lost. Returns how many leftovers were removed.
+pub(crate) fn remove_launcher_artifacts(instance_root: &Path, content_folder: &str) -> usize {
+    let mut removed = 0usize;
+    let prefetch_root = instance_root.join(VERTEX_PREFETCH_DIR_NAME);
+    if prefetch_root.exists() {
+        match remove_content_path(prefetch_root.as_path()) {
+            Ok(()) => removed += 1,
+            Err(err) => tracing::warn!(target: CONTENT_UPDATE_LOG_TARGET, "{err}"),
+        }
+    }
+
+    let folder = instance_root.join(content_folder);
+    let Ok(entries) = std::fs::read_dir(folder.as_path()) else {
+        return removed;
+    };
+    for entry in entries.flatten() {
+        let backup_path = entry.path();
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let Some(rest) = name.strip_prefix(UPDATE_BACKUP_PREFIX) else {
+            continue;
+        };
+        // Backup names are `<original>-<timestamp>-<attempt>`.
+        let original = rest
+            .rsplitn(3, '-')
+            .nth(2)
+            .filter(|value| !value.is_empty());
+        if let Some(original) = original
+            && !folder.join(original).exists()
+        {
+            match std::fs::rename(backup_path.as_path(), folder.join(original)) {
+                Ok(()) => {
+                    tracing::warn!(
+                        target: CONTENT_UPDATE_LOG_TARGET,
+                        "restored {original} from an interrupted update backup"
+                    );
+                    continue;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: CONTENT_UPDATE_LOG_TARGET,
+                        "failed to restore {original} from {}: {err}",
+                        backup_path.display()
+                    );
+                    continue;
+                }
+            }
+        }
+        match remove_content_path(backup_path.as_path()) {
+            Ok(()) => removed += 1,
+            Err(err) => tracing::warn!(target: CONTENT_UPDATE_LOG_TARGET, "{err}"),
+        }
+    }
+    removed
+}
+
 fn update_installed_content_to_version_with_prefetched_downloads(
     instance_root: &Path,
     entry: &UnifiedContentEntry,

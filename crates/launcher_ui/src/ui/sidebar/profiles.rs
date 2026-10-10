@@ -119,11 +119,7 @@ pub fn render(
                 output.selected_profile_id = Some(profile.id.clone());
             }
 
-            if response.secondary_clicked() {
-                let anchor = response
-                    .interact_pointer_pos()
-                    .or_else(|| ui.ctx().pointer_latest_pos())
-                    .unwrap_or(response.rect.left_bottom());
+            if let Some(anchor) = crate::ui::context_menu::trigger_anchor(ui.ctx(), &response) {
                 instance_context_menu::request_for_instance(ui.ctx(), context_id, anchor, true);
             }
 
