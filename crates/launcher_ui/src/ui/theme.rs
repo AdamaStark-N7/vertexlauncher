@@ -32,6 +32,10 @@ pub struct Theme {
     pub warning: Oklch,
     pub success: Oklch,
     pub info: Oklch,
+    /// Text drawn on top of accent fills (primary buttons, toggles). Defaults to `text`, which
+    /// is only readable on an accent when the theme's text and accent are far apart in lightness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_primary: Option<Oklch>,
     #[serde(default)]
     pub motion: ThemeMotion,
 }
@@ -177,7 +181,10 @@ impl Theme {
 
         visuals.widgets.active.bg_fill = highlight;
         visuals.widgets.active.weak_bg_fill = highlight;
-        visuals.widgets.active.fg_stroke = Stroke::new(1.0, text);
+        // Convention in this launcher: the active widget state is the accent state, so its
+        // foreground is the text drawn on accent fills.
+        let on_primary = self.on_primary.map_or(text, Oklch::to_color32);
+        visuals.widgets.active.fg_stroke = Stroke::new(1.0, on_primary);
         visuals.widgets.active.bg_stroke = Stroke::new(1.0, border);
 
         visuals.widgets.open.bg_fill = bg_hovered;
@@ -285,6 +292,7 @@ impl Theme {
                 c: 0.2,
                 h: 260.0,
             },
+            on_primary: None,
             motion: ThemeMotion::default(),
         }
     }
@@ -364,6 +372,7 @@ impl Theme {
                 c: 0.20,
                 h: 260.0,
             },
+            on_primary: None,
             motion: ThemeMotion::default(),
         }
     }
@@ -444,6 +453,7 @@ impl Theme {
                 c: 0.25,
                 h: 260.0,
             },
+            on_primary: None,
             motion: ThemeMotion::default(),
         }
     }
@@ -523,6 +533,7 @@ impl Theme {
                 c: 0.20,
                 h: 210.0,
             },
+            on_primary: None,
             motion: ThemeMotion::default(),
         }
     }
@@ -531,14 +542,18 @@ impl Theme {
 /// The Catppuccin colors a launcher theme is built from. Every flavor shares the same roles, so
 /// one mapping (see [`Theme::from_catppuccin`]) covers all four.
 struct CatppuccinPalette {
-    mantle: u32,
-    base: u32,
-    surface0: u32,
-    surface1: u32,
-    surface2: u32,
-    overlay0: u32,
+    /// Outermost surface and text-input wells.
+    bg_dark: u32,
+    /// Panels.
+    bg: u32,
+    /// Raised surfaces: settings sections, idle widgets.
+    bg_light: u32,
+    border: u32,
+    border_muted: u32,
     text: u32,
-    subtext0: u32,
+    text_muted: u32,
+    /// Text on top of the accent colors.
+    on_accent: u32,
     mauve: u32,
     blue: u32,
     red: u32,
@@ -553,20 +568,21 @@ impl Theme {
             id: id.to_owned(),
             name: format!("Catppuccin {flavor}"),
             description: format!("The {flavor} flavor of the Catppuccin palette."),
-            bg_dark: Oklch::from_hex(palette.mantle),
-            bg: Oklch::from_hex(palette.base),
-            bg_light: Oklch::from_hex(palette.surface0),
+            bg_dark: Oklch::from_hex(palette.bg_dark),
+            bg: Oklch::from_hex(palette.bg),
+            bg_light: Oklch::from_hex(palette.bg_light),
             text: Oklch::from_hex(palette.text),
-            text_muted: Oklch::from_hex(palette.subtext0),
-            highlight: Oklch::from_hex(palette.surface2),
-            border: Oklch::from_hex(palette.overlay0),
-            border_muted: Oklch::from_hex(palette.surface1),
+            text_muted: Oklch::from_hex(palette.text_muted),
+            highlight: Oklch::from_hex(palette.mauve),
+            border: Oklch::from_hex(palette.border),
+            border_muted: Oklch::from_hex(palette.border_muted),
             primary: Oklch::from_hex(palette.mauve),
             secondary: Oklch::from_hex(palette.blue),
             danger: Oklch::from_hex(palette.red),
             warning: Oklch::from_hex(palette.yellow),
             success: Oklch::from_hex(palette.green),
             info: Oklch::from_hex(palette.sky),
+            on_primary: Some(Oklch::from_hex(palette.on_accent)),
             motion: ThemeMotion::default(),
         }
     }
@@ -576,14 +592,14 @@ impl Theme {
             "catppuccin_latte",
             "Latte",
             &CatppuccinPalette {
-                mantle: 0xe6e9ef,
-                base: 0xeff1f5,
-                surface0: 0xccd0da,
-                surface1: 0xbcc0cc,
-                surface2: 0xacb0be,
-                overlay0: 0x9ca0b0,
+                bg_dark: 0xdce0e8,
+                bg: 0xe6e9ef,
+                bg_light: 0xeff1f5,
+                border: 0x9ca0b0,
+                border_muted: 0xbcc0cc,
                 text: 0x4c4f69,
-                subtext0: 0x6c6f85,
+                text_muted: 0x6c6f85,
+                on_accent: 0xeff1f5,
                 mauve: 0x8839ef,
                 blue: 0x1e66f5,
                 red: 0xd20f39,
@@ -599,14 +615,14 @@ impl Theme {
             "catppuccin_frappe",
             "Frappé",
             &CatppuccinPalette {
-                mantle: 0x292c3c,
-                base: 0x303446,
-                surface0: 0x414559,
-                surface1: 0x51576d,
-                surface2: 0x626880,
-                overlay0: 0x737994,
+                bg_dark: 0x292c3c,
+                bg: 0x303446,
+                bg_light: 0x414559,
+                border: 0x737994,
+                border_muted: 0x51576d,
                 text: 0xc6d0f5,
-                subtext0: 0xa5adce,
+                text_muted: 0xa5adce,
+                on_accent: 0x232634,
                 mauve: 0xca9ee6,
                 blue: 0x8caaee,
                 red: 0xe78284,
@@ -622,14 +638,14 @@ impl Theme {
             "catppuccin_macchiato",
             "Macchiato",
             &CatppuccinPalette {
-                mantle: 0x1e2030,
-                base: 0x24273a,
-                surface0: 0x363a4f,
-                surface1: 0x494d64,
-                surface2: 0x5b6078,
-                overlay0: 0x6e738d,
+                bg_dark: 0x1e2030,
+                bg: 0x24273a,
+                bg_light: 0x363a4f,
+                border: 0x6e738d,
+                border_muted: 0x494d64,
                 text: 0xcad3f5,
-                subtext0: 0xa5adcb,
+                text_muted: 0xa5adcb,
+                on_accent: 0x181926,
                 mauve: 0xc6a0f6,
                 blue: 0x8aadf4,
                 red: 0xed8796,
@@ -645,14 +661,14 @@ impl Theme {
             "catppuccin_mocha",
             "Mocha",
             &CatppuccinPalette {
-                mantle: 0x181825,
-                base: 0x1e1e2e,
-                surface0: 0x313244,
-                surface1: 0x45475a,
-                surface2: 0x585b70,
-                overlay0: 0x6c7086,
+                bg_dark: 0x181825,
+                bg: 0x1e1e2e,
+                bg_light: 0x313244,
+                border: 0x6c7086,
+                border_muted: 0x45475a,
                 text: 0xcdd6f4,
-                subtext0: 0xa6adc8,
+                text_muted: 0xa6adc8,
+                on_accent: 0x11111b,
                 mauve: 0xcba6f7,
                 blue: 0x89b4fa,
                 red: 0xf38ba8,
@@ -761,7 +777,7 @@ fn ensure_themes_dir_and_defaults(dir: &Path) {
         Theme::catppuccin_mocha(),
     ] {
         let path = dir.join(format!("{}.toml", theme.id));
-        if path.exists() {
+        if path.exists() && !is_outdated_generated_catppuccin(&theme, &path) {
             continue;
         }
 
@@ -772,6 +788,14 @@ fn ensure_themes_dir_and_defaults(dir: &Path) {
             }
         }
     }
+}
+
+/// The first Catppuccin files (before `on_primary` existed) used a surface mapping that looked
+/// wrong in Latte. They were only ever generated by the launcher, so rewrite those, and only
+/// those: any file that already has an `on_primary` entry is the current version or hand-edited.
+fn is_outdated_generated_catppuccin(theme: &Theme, path: &Path) -> bool {
+    theme.id.starts_with("catppuccin_")
+        && std::fs::read_to_string(path).is_ok_and(|contents| !contents.contains("on_primary"))
 }
 
 fn load_themes_from_dir(dir: &Path) -> Vec<Theme> {
