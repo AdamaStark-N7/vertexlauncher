@@ -73,6 +73,10 @@ impl TextUi {
             &options.fundamentals,
         );
 
+        let (script_spans, split) = self
+            .script_fonts(&options.fundamentals)
+            .split_spans(&[(text, attrs_owned.clone())]);
+
         {
             let mut borrowed = buffer.borrow_with(&mut self.font_system);
             borrowed.set_wrap(if options.wrap {
@@ -81,7 +85,15 @@ impl TextUi {
                 Wrap::None
             });
             let attrs = attrs_owned.as_attrs();
-            borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+            if split {
+                let rich_text = script_spans
+                    .iter()
+                    .map(|(text, attrs)| (*text, attrs.as_attrs()))
+                    .collect::<Vec<_>>();
+                borrowed.set_rich_text(rich_text, &attrs, Shaping::Advanced, None);
+            } else {
+                borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+            }
             borrowed.shape_until_scroll(true);
         }
 

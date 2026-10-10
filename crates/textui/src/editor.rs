@@ -45,6 +45,8 @@ pub(super) struct InputState {
     pub(super) undo_stack: Vec<UndoEntry>,
     pub(super) redo_stack: Vec<UndoEntry>,
     pub(super) last_undo_op: UndoOpKind,
+    /// IME composition text currently shown in `editor`, if any.
+    pub(super) preedit: Option<PreeditRange>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]

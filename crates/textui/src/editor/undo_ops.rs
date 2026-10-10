@@ -3,6 +3,7 @@ use super::*;
 pub(crate) fn classify_modify_op(event: &TextInputEvent) -> UndoOpKind {
     match event {
         TextInputEvent::Text(t) if !t.is_empty() => UndoOpKind::TextInsert,
+        TextInputEvent::ImeCommit(t) if !t.is_empty() => UndoOpKind::TextInsert,
         TextInputEvent::Paste(p) if !p.is_empty() => UndoOpKind::Paste,
         TextInputEvent::Cut => UndoOpKind::Cut,
         TextInputEvent::Key {

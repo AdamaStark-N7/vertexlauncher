@@ -43,7 +43,7 @@ pub use typography::{
     ROLE_FONT_SIZE_MAX, ROLE_FONT_SIZE_MIN, ROLE_FONT_SIZE_STEP, ResolvedTypography, RoleDefaults,
     RoleOverride, TextRole, TypographySettings,
 };
-pub use ui_fonts::{UiEmojiFontFamily, UiFontFamily};
+pub use ui_fonts::{UiCjkFontFamily, UiEmojiFontFamily, UiFontFamily};
 pub use window_transparency::WindowTransparency;
 pub use windows_backdrop_type::WindowsBackdropType;
 pub use windows_transparency_level::WindowsTransparencyLevel;
@@ -253,6 +253,7 @@ pub struct Config {
     notification_easing: NotificationEasing,
     ui_font_family: UiFontFamily,
     ui_emoji_font_family: UiEmojiFontFamily,
+    ui_cjk_font_family: UiCjkFontFamily,
     text_rendering_path: TextRenderingPath,
     skin_preview_aa_mode: SkinPreviewAaMode,
     skin_preview_texel_aa_mode: SkinPreviewTexelAaMode,
@@ -432,6 +433,15 @@ impl Config {
     /// Sets the emoji font family.
     pub fn set_ui_emoji_font_family(&mut self, value: UiEmojiFontFamily) {
         self.ui_emoji_font_family = value;
+    }
+
+    /// The launcher-wide font for CJK characters. A text group can override it.
+    pub fn ui_cjk_font_family(&self) -> UiCjkFontFamily {
+        self.ui_cjk_font_family.clone()
+    }
+
+    pub fn set_ui_cjk_font_family(&mut self, value: UiCjkFontFamily) {
+        self.ui_cjk_font_family = value;
     }
 
     pub fn text_rendering_path(&self) -> TextRenderingPath {
@@ -942,6 +952,7 @@ impl Config {
         }
         self.ui_font_family.normalize();
         self.ui_emoji_font_family.normalize();
+        self.ui_cjk_font_family.normalize();
         if !TextRenderingPath::ALL.contains(&self.text_rendering_path) {
             self.text_rendering_path = TextRenderingPath::Auto;
         }
@@ -1205,6 +1216,7 @@ impl Default for Config {
             notification_easing: default_notification_easing(),
             ui_font_family: UiFontFamily::included_default(),
             ui_emoji_font_family: UiEmojiFontFamily::included_default(),
+            ui_cjk_font_family: UiCjkFontFamily::included_default(),
             text_rendering_path: TextRenderingPath::Auto,
             skin_preview_aa_mode: SkinPreviewAaMode::Fxaa,
             skin_preview_texel_aa_mode: SkinPreviewTexelAaMode::Off,

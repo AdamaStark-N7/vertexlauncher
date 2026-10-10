@@ -153,7 +153,7 @@ impl TextUi {
             let painter = ui
                 .painter()
                 .with_clip_rect(content_rect.intersect(ui.clip_rect()));
-            self.paint_editor_gpu(
+            let _ = self.paint_editor_gpu(
                 &painter,
                 content_rect,
                 &state.editor,
@@ -161,6 +161,7 @@ impl TextUi {
                 scale,
                 false,
                 true,
+                None,
             );
         }
 
@@ -239,6 +240,11 @@ impl TextUi {
             state = Self::new_input_state(&mut self.font_system, text, multiline);
         }
 
+        // A composition cannot outlive focus; drop its text so it never lingers unseen.
+        if !has_focus {
+            clear_preedit(&mut state.editor, &mut state.preedit);
+        }
+
         let needs_text_sync = !has_focus && state.last_text != *text;
         let needs_attrs_sync = state.attrs_fingerprint != attrs_fingerprint;
         if needs_text_sync || needs_attrs_sync {
@@ -271,6 +277,7 @@ impl TextUi {
             || response.dragged();
 
         let mut changed = false;
+        let composing_at_frame_start = state.preedit.is_some();
         if has_focus || pointer_interacted {
             let (undo_pressed, redo_pressed) = if has_focus {
                 ui.input(|i| {
@@ -282,6 +289,10 @@ impl TextUi {
             } else {
                 (false, false)
             };
+
+            if undo_pressed || redo_pressed {
+                clear_preedit(&mut state.editor, &mut state.preedit);
+            }
 
             if undo_pressed {
                 changed |= self.apply_undo_step(
@@ -303,7 +314,17 @@ impl TextUi {
                 );
             } else {
                 if has_focus {
-                    let pending_op = pending_modify_op(&self.frame_events);
+                    // A composition is one undo step, snapshotted before its first pre-edit text
+                    // (which may replace a selection); its commit then joins that step.
+                    let starting_composition = state.preedit.is_none()
+                        && self.frame_events.iter().any(
+                            |event| matches!(event, TextInputEvent::ImePreedit(text) if !text.is_empty()),
+                        );
+                    let pending_op = if starting_composition {
+                        UndoOpKind::Paste
+                    } else {
+                        pending_modify_op(&self.frame_events)
+                    };
                     if pending_op != UndoOpKind::None {
                         let should_push = matches!(pending_op, UndoOpKind::Paste | UndoOpKind::Cut)
                             || state.last_undo_op != pending_op;
@@ -311,14 +332,19 @@ impl TextUi {
                             push_undo(
                                 &mut state.undo_stack,
                                 UndoEntry {
-                                    text: editor_to_string(&state.editor),
-                                    cursor: state.editor.cursor(),
+                                    text: text_without_preedit(&state.editor, state.preedit),
+                                    cursor: cursor_without_preedit(&state.editor, state.preedit),
                                     selection: state.editor.selection(),
                                 },
                             );
                             state.redo_stack.clear();
                         }
-                        state.last_undo_op = pending_op;
+                        state.last_undo_op = if starting_composition {
+                            // The commit that follows must not push a second snapshot.
+                            UndoOpKind::TextInsert
+                        } else {
+                            pending_op
+                        };
                     } else if self.frame_events.iter().any(is_navigation_event) {
                         state.last_undo_op = UndoOpKind::None;
                     }
@@ -335,18 +361,29 @@ impl TextUi {
                     &options.fundamentals,
                     has_focus,
                     &mut state.scroll_metrics,
+                    &mut state.preedit,
                 );
             }
 
-            if !multiline && ui.input(|i| i.key_pressed(Key::Enter)) {
+            // Enter confirms an IME candidate; it must not also leave the field.
+            if !multiline
+                && state.preedit.is_none()
+                && !composing_at_frame_start
+                && ui.input(|i| i.key_pressed(Key::Enter))
+            {
                 response.surrender_focus();
             }
         }
 
         let context_actions = self.input_context_menu(&response, &state.editor);
-        changed |= apply_input_context_actions(ui.ctx(), &mut state, context_actions, multiline);
+        let context_changed =
+            apply_input_context_actions(ui.ctx(), &mut state, context_actions, multiline);
+        if context_changed {
+            self.reapply_script_fonts(&mut state.editor, &options.fundamentals);
+        }
+        changed |= context_changed;
 
-        let latest_text = editor_to_string(&state.editor);
+        let latest_text = text_without_preedit(&state.editor, state.preedit);
         if latest_text != *text {
             *text = latest_text.clone();
             state.last_text = latest_text;
@@ -366,7 +403,7 @@ impl TextUi {
             let painter = ui
                 .painter()
                 .with_clip_rect(content_rect.intersect(ui.clip_rect()));
-            self.paint_editor_gpu(
+            let cursor_rect = self.paint_editor_gpu(
                 &painter,
                 content_rect,
                 &state.editor,
@@ -374,7 +411,11 @@ impl TextUi {
                 scale,
                 has_focus,
                 false,
+                state.preedit.map(PreeditRange::bounds),
             );
+            if has_focus {
+                report_ime_area(ui, rect, content_rect, cursor_rect, options.line_height);
+            }
         }
         self.input_states.insert(id, state);
         if !has_focus
@@ -398,4 +439,30 @@ impl TextUi {
 
         response
     }
+}
+
+/// Tells the OS where the focused input and its cursor are. Without this the window's IME stays
+/// off entirely, so nothing could be composed, and its candidate list could not follow the
+/// cursor.
+fn report_ime_area(
+    ui: &Ui,
+    widget_rect: Rect,
+    content_rect: Rect,
+    cursor_rect: Option<Rect>,
+    line_height: f32,
+) {
+    // Fall back to the start of the content when the cursor is scrolled out of view.
+    let cursor_rect = cursor_rect.unwrap_or_else(|| {
+        Rect::from_min_size(content_rect.min, egui::vec2(1.0, line_height.max(1.0)))
+    });
+    let to_global = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .unwrap_or_default();
+    ui.output_mut(|output| {
+        output.ime = Some(egui::output::IMEOutput {
+            rect: to_global * widget_rect,
+            cursor_rect: to_global * cursor_rect,
+        });
+    });
 }

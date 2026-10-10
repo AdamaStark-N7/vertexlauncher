@@ -67,6 +67,8 @@ pub fn role_color_ctx(
             letter_spacing_points: resolved.letter_spacing,
             case_sensitive_forms: role == TextRole::Badge,
             font_family: resolved.font_family,
+            cjk_font_family: resolved.cjk_font_family,
+            emoji_font_family: resolved.emoji_font_family,
             ..TextFundamentals::default()
         },
         ..LabelOptions::default()

@@ -65,6 +65,7 @@ impl Config {
             notification_easing: _,
             ui_font_family,
             ui_emoji_font_family: _,
+            ui_cjk_font_family: _,
             text_rendering_path: _,
             skin_preview_aa_mode: _,
             skin_preview_texel_aa_mode: _,

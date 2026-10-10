@@ -84,13 +84,22 @@ pub(super) fn update_cached_profile(
         // Only announce after the new list is persisted so a cape is congratulated exactly once.
         // Accounts with no cache entry never reach here: with nothing to compare against, every
         // cape would look new.
-        if let Some(message) = new_capes_message(display_name, &new_capes) {
-            crate::notification::emit_with_icon(
+        if !new_capes.is_empty() {
+            // Capes found by separate checks while a congratulation is still showing merge into
+            // it ("...got three new capes: A, B, and C, Congrats!").
+            let account_name = display_name.to_owned();
+            crate::notification::NotificationBuilder::new(
                 crate::notification::Severity::Info,
                 "skins",
-                message,
-                crate::assets::CONFETTI_SVG,
-            );
+                String::new(),
+            )
+            .icon(crate::assets::CONFETTI_SVG)
+            .stack(
+                format!("new_capes:{account_name}"),
+                new_capes,
+                move |capes| new_capes_message(&account_name, capes).unwrap_or_default(),
+            )
+            .emit();
         }
     } else {
         tracing::info!(
@@ -103,29 +112,18 @@ pub(super) fn update_cached_profile(
     Ok(())
 }
 
-/// Congratulation text for the capes an account gained since the last check, worded for one,
-/// two, or many capes. `None` when there is nothing new.
+/// Congratulation text for the capes an account gained, worded for one, two, or many capes.
+/// `None` when there is nothing new.
 fn new_capes_message(account_name: &str, cape_names: &[String]) -> Option<String> {
-    let body = match cape_names {
-        [] => return None,
-        [only] => format!("got a new cape: {only}"),
-        [first, second] => format!("got two new capes: {first} and {second}"),
-        [init @ .., last] => format!(
-            "got {} new capes: {}, and {last}",
-            count_word(cape_names.len()),
-            init.join(", ")
-        ),
-    };
-    Some(format!("Your account {account_name} {body}, Congrats!"))
-}
-
-fn count_word(count: usize) -> String {
-    const WORDS: [&str; 11] = [
-        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
-    ];
-    WORDS
-        .get(count)
-        .map_or_else(|| "several".to_owned(), |word| (*word).to_owned())
+    use crate::notification::natural_language::{a_or_count, join_natural};
+    if cape_names.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "Your account {account_name} got {}: {}, Congrats!",
+        a_or_count(cape_names.len(), "new cape"),
+        join_natural(cape_names)
+    ))
 }
 
 #[cfg(test)]

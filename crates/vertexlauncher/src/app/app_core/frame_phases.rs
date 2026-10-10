@@ -415,6 +415,8 @@ impl VertexApp {
             ui_font_labels: self.fonts.available_ui_font_labels(),
             emoji_fonts: self.fonts.available_emoji_fonts(),
             emoji_font_labels: self.fonts.available_emoji_font_labels(),
+            cjk_fonts: self.fonts.available_cjk_fonts(),
+            cjk_font_labels: self.fonts.available_cjk_font_labels(),
             themes: self.theme_catalog.themes(),
             theme_labels: self.theme_catalog.theme_labels(),
             settings_info: &settings_info,

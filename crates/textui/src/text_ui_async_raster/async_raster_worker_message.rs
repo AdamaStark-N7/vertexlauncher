@@ -1,6 +1,6 @@
 use super::*;
 
 pub(crate) enum AsyncRasterWorkerMessage {
-    RegisterFont(Vec<u8>),
+    RegisterFont(SharedFontBytes),
     Render(AsyncRasterRequest),
 }

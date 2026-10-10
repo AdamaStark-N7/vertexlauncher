@@ -31,6 +31,7 @@ impl TextUi {
         fundamentals: &TextFundamentals,
         process_keyboard: bool,
         scroll_metrics: &mut EditorScrollMetrics,
+        preedit: &mut Option<PreeditRange>,
     ) -> bool {
         let mut changed = false;
         let modifiers = ui.ctx().input(|i| i.modifiers);
@@ -107,6 +108,17 @@ impl TextUi {
                             changed = true;
                         }
                     }
+                    TextInputEvent::ImePreedit(text) => {
+                        *preferred_cursor_x_px = None;
+                        changed |= set_preedit(editor, preedit, text);
+                    }
+                    TextInputEvent::ImeCommit(text) => {
+                        *preferred_cursor_x_px = None;
+                        changed |= commit_preedit(editor, preedit, text, multiline);
+                    }
+                    TextInputEvent::ImeDisabled => {
+                        changed |= clear_preedit(editor, preedit);
+                    }
                     TextInputEvent::Copy => {
                         if let Some(selection) = editor.copy_selection() {
                             copy_sanitized(ui.ctx(), selection);
@@ -177,6 +189,9 @@ impl TextUi {
         }
 
         if changed {
+            // Newly typed, pasted or composed CJK text and emoji need their chosen fonts before
+            // the layout is shaped.
+            self.reapply_script_fonts(editor, fundamentals);
             editor
                 .borrow_with(&mut self.font_system)
                 .shape_as_needed(false);

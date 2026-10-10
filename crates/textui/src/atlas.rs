@@ -273,7 +273,7 @@ impl GlyphAtlas {
         self.free_all_pages();
     }
 
-    pub(super) fn register_font(&self, bytes: Vec<u8>) {
+    pub(super) fn register_font(&self, bytes: SharedFontBytes) {
         if let Some(tx) = self.tx.as_ref() {
             let _ = tx.send(GlyphAtlasWorkerMessage::RegisterFont(bytes));
         }

@@ -10,7 +10,8 @@ impl TextUi {
         scale: f32,
         has_focus: bool,
         show_selection_without_focus: bool,
-    ) {
+        preedit_bounds: Option<(Cursor, Cursor)>,
+    ) -> Option<Rect> {
         let horizontal_scroll_px = editor.with_buffer(|b| b.scroll().horizontal.max(0.0));
         let selection_visible =
             has_focus || (show_selection_without_focus && editor.selection() != Selection::None);
@@ -31,6 +32,8 @@ impl TextUi {
         }
 
         let mut sel_rects: Vec<Rect> = Vec::new();
+        let mut preedit_underlines: Vec<Rect> = Vec::new();
+        let underline_px = (scale * 1.5).max(1.0);
         let mut cursor_rect: Option<Rect> = None;
         let mut glyph_cmds: Vec<GlyphCmd> = Vec::new();
         let variation_settings = shared_variation_settings(&options.fundamentals);
@@ -106,6 +109,33 @@ impl TextUi {
                             mx,
                             line_top,
                             line_height,
+                            horizontal_scroll_px,
+                            origin,
+                            scale,
+                        ));
+                    }
+                }
+
+                if let Some((preedit_start, preedit_end)) = preedit_bounds
+                    && line_i == preedit_start.line
+                {
+                    // Underline the IME's in-progress text, across every wrapped row it spans.
+                    let mut span: Option<(f32, f32)> = None;
+                    for (glyph_index, glyph) in run.glyphs.iter().enumerate() {
+                        if glyph.start < preedit_end.index && glyph.end > preedit_start.index {
+                            let x = adjusted_glyph_x_px(glyph, prefixes[glyph_index]);
+                            span = Some(match span {
+                                Some((min_x, max_x)) => (min_x.min(x), max_x.max(x + glyph.w)),
+                                None => (x, x + glyph.w),
+                            });
+                        }
+                    }
+                    if let Some((min_x, max_x)) = span {
+                        preedit_underlines.push(editor_sel_rect(
+                            min_x as i32,
+                            max_x.ceil() as i32,
+                            line_top + line_height - underline_px,
+                            underline_px,
                             horizontal_scroll_px,
                             origin,
                             scale,
@@ -221,6 +251,14 @@ impl TextUi {
 
         self.paint_text_quads(&painter, content_rect, &quads);
 
+        for underline in preedit_underlines {
+            painter.add(egui::Shape::rect_filled(
+                underline,
+                CornerRadius::ZERO,
+                options.text_color,
+            ));
+        }
+
         if let Some(cursor_rect) = cursor_rect {
             painter.add(egui::Shape::rect_filled(
                 cursor_rect,
@@ -228,5 +266,6 @@ impl TextUi {
                 options.cursor_color,
             ));
         }
+        cursor_rect
     }
 }

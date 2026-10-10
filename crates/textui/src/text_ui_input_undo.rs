@@ -64,6 +64,7 @@ impl TextUi {
             .editor
             .set_selection(clamp_selection_to_editor(&state.editor, restored_selection));
         state.last_text = restored_text;
+        state.preedit = None;
         state.last_undo_op = UndoOpKind::None;
         state.preferred_cursor_x_px = None;
         true

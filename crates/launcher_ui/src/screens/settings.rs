@@ -3,7 +3,8 @@ use config::{
     GraphicsAdapterPreferenceType, GraphicsAdapterProfile, GraphicsApiPreference,
     INSTANCE_DEFAULT_MAX_MEMORY_MIB_MIN, INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP, IntSettingId,
     JavaRuntimeVersion, NotificationEasing, SkinPreviewAaMode, SkinPreviewTexelAaMode, SvgAaMode,
-    TextRenderingPath, UiEmojiFontFamily, UiFontFamily, WindowTransparency, parse_bitrate_to_bps,
+    TextRenderingPath, UiCjkFontFamily, UiEmojiFontFamily, UiFontFamily, WindowTransparency,
+    parse_bitrate_to_bps,
 };
 use egui::Ui;
 use installation::{ensure_openjdk_runtime_async, purge_cache_async as purge_installation_cache};
@@ -109,6 +110,8 @@ fn render_settings_contents(
         ui_font_labels: available_ui_font_labels,
         emoji_fonts: available_emoji_fonts,
         emoji_font_labels: available_emoji_font_labels,
+        cjk_fonts: available_cjk_fonts,
+        cjk_font_labels: available_cjk_font_labels,
         themes: available_themes,
         theme_labels: available_theme_labels,
         settings_info,
@@ -210,13 +213,26 @@ fn render_settings_contents(
                 available_emoji_fonts,
                 available_emoji_font_labels,
             );
+            render_cjk_font_settings(
+                ui,
+                text_ui,
+                config,
+                available_cjk_fonts,
+                available_cjk_font_labels,
+            );
             render_text_rendering_path_setting(ui, text_ui, config);
             render_typography_settings(
                 ui,
                 text_ui,
                 config,
-                available_ui_fonts,
-                available_ui_font_labels,
+                &TypographyFonts {
+                    ui_fonts: available_ui_fonts,
+                    ui_font_labels: available_ui_font_labels,
+                    cjk_fonts: available_cjk_fonts,
+                    cjk_font_labels: available_cjk_font_labels,
+                    emoji_fonts: available_emoji_fonts,
+                    emoji_font_labels: available_emoji_font_labels,
+                },
             );
             render_selected_toggles(
                 ui,

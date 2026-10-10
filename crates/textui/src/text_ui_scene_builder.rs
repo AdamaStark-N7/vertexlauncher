@@ -140,6 +140,16 @@ impl TextUi {
             })
             .collect::<Vec<_>>();
 
+        let owned_spans: Vec<(&str, AttrsOwned)> = spans
+            .iter()
+            .zip(span_attrs_owned.iter())
+            .map(|(span, attrs)| (span.text.as_str(), attrs.clone()))
+            .collect();
+        // CJK and emoji runs are shaped with their own chosen fonts.
+        let (script_spans, _) = self
+            .script_fonts(&options.fundamentals)
+            .split_spans(&owned_spans);
+
         {
             let width_px_opt = width_points_opt.map(|w| (w * scale).max(1.0));
             let mut borrowed = buffer.borrow_with(&mut self.font_system);
@@ -149,10 +159,9 @@ impl TextUi {
                 Wrap::None
             });
             borrowed.set_size(width_px_opt, None);
-            let rich_text = spans
+            let rich_text = script_spans
                 .iter()
-                .zip(span_attrs_owned.iter())
-                .map(|(span, attrs)| (span.text.as_str(), attrs.as_attrs()))
+                .map(|(text, attrs)| (*text, attrs.as_attrs()))
                 .collect::<Vec<_>>();
             let default_attrs = default_attrs_owned.as_attrs();
             borrowed.set_rich_text(rich_text, &default_attrs, Shaping::Advanced, None);

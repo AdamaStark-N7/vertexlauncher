@@ -67,6 +67,7 @@ mod path_text;
 mod prepared_layout;
 #[path = "text_ui_scene_builder.rs"]
 mod scene_builder;
+mod script_fonts;
 mod text_helpers;
 #[path = "text_ui.rs"]
 mod text_ui;
@@ -86,6 +87,8 @@ mod text_ui_input_attrs;
 mod text_ui_input_chrome;
 #[path = "text_ui_input_editor_state.rs"]
 mod text_ui_input_editor_state;
+#[path = "text_ui_input_ime.rs"]
+mod text_ui_input_ime;
 #[path = "text_ui_input_paint.rs"]
 mod text_ui_input_paint;
 #[path = "text_ui_input_undo.rs"]
@@ -145,9 +148,17 @@ use crate::path_layout::{
 pub(crate) use crate::prepared_layout::{
     PreparedGlyph, PreparedTextCacheEntry, PreparedTextLayout,
 };
+use crate::script_fonts::ScriptFonts;
+
+/// Font file bytes shared between the main text engine and its worker threads without copying.
+pub(crate) type SharedFontBytes = Arc<dyn AsRef<[u8]> + Send + Sync>;
 use crate::text_ui_gpu_scene_assembly::GpuSceneAssembly;
 use crate::text_ui_input_chrome::{
     apply_input_context_actions, lock_input_focus_filter, paint_input_frame,
+};
+use crate::text_ui_input_ime::{
+    PreeditRange, clear_preedit, commit_preedit, cursor_without_preedit, set_preedit,
+    text_without_preedit,
 };
 use crate::text_ui_input_undo::UndoDirection;
 use crate::{

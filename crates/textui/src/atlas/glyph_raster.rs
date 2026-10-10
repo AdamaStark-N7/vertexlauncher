@@ -11,7 +11,9 @@ pub(super) fn glyph_atlas_worker_loop(
     while let Ok(message) = rx.recv() {
         match message {
             GlyphAtlasWorkerMessage::RegisterFont(bytes) => {
-                font_system.db_mut().load_font_data(bytes);
+                font_system
+                    .db_mut()
+                    .load_font_source(cosmic_text::fontdb::Source::Binary(bytes));
             }
             GlyphAtlasWorkerMessage::Rasterize {
                 generation,

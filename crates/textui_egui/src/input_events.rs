@@ -56,6 +56,12 @@ pub(super) fn translate_input_events(events: &[egui::Event]) -> Vec<TextInputEve
         .iter()
         .filter_map(|event| match event {
             egui::Event::Text(text) => Some(TextInputEvent::Text(text.clone())),
+            egui::Event::Ime(ime) => match ime {
+                egui::ImeEvent::Enabled => None,
+                egui::ImeEvent::Preedit(text) => Some(TextInputEvent::ImePreedit(text.clone())),
+                egui::ImeEvent::Commit(text) => Some(TextInputEvent::ImeCommit(text.clone())),
+                egui::ImeEvent::Disabled => Some(TextInputEvent::ImeDisabled),
+            },
             egui::Event::Copy => Some(TextInputEvent::Copy),
             egui::Event::Cut => Some(TextInputEvent::Cut),
             egui::Event::Paste(text) => Some(TextInputEvent::Paste(text.clone())),
@@ -82,4 +88,28 @@ pub(super) fn translate_input_events(events: &[egui::Event]) -> Vec<TextInputEve
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ime_events_become_composition_events() {
+        let events = [
+            egui::Event::Ime(egui::ImeEvent::Enabled),
+            egui::Event::Ime(egui::ImeEvent::Preedit("にほ".to_owned())),
+            egui::Event::Ime(egui::ImeEvent::Commit("日本".to_owned())),
+            egui::Event::Ime(egui::ImeEvent::Disabled),
+        ];
+        assert_eq!(
+            translate_input_events(&events),
+            vec![
+                TextInputEvent::ImePreedit("にほ".to_owned()),
+                TextInputEvent::ImeCommit("日本".to_owned()),
+                TextInputEvent::ImeDisabled,
+            ],
+            "Enabled carries no text and is dropped"
+        );
+    }
 }

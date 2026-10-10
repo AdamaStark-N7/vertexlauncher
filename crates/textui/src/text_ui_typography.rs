@@ -5,11 +5,24 @@ impl TextUi {
     ///
     /// This clears cached textures/input states so new faces are picked up.
     pub fn register_font_data(&mut self, bytes: Vec<u8>) {
+        self.register_shared_font(Arc::new(bytes));
+    }
+
+    /// Registers font bytes that live for the whole program, such as an embedded font, without
+    /// copying them. Every text worker shares the one allocation, which matters for large fonts
+    /// (a CJK font alone is tens of megabytes).
+    pub fn register_static_font_data(&mut self, bytes: &'static [u8]) {
+        self.register_shared_font(Arc::new(bytes));
+    }
+
+    fn register_shared_font(&mut self, bytes: SharedFontBytes) {
         if let Some(tx) = self.async_raster.tx.as_ref() {
-            let _ = tx.send(AsyncRasterWorkerMessage::RegisterFont(bytes.clone()));
+            let _ = tx.send(AsyncRasterWorkerMessage::RegisterFont(Arc::clone(&bytes)));
         }
-        self.glyph_atlas.register_font(bytes.clone());
-        self.font_system.db_mut().load_font_data(bytes);
+        self.glyph_atlas.register_font(Arc::clone(&bytes));
+        self.font_system
+            .db_mut()
+            .load_font_source(cosmic_text::fontdb::Source::Binary(bytes));
         self.invalidate_text_caches(true);
     }
 
@@ -30,6 +43,38 @@ impl TextUi {
         self.ui_font_size_scale = size_scale;
         self.ui_font_weight = clamped_weight;
         self.invalidate_text_caches(false);
+    }
+
+    /// Whether the text engine can find a font family by this name.
+    pub fn has_font_family(&self, name: &str) -> bool {
+        self.resolve_family_candidate(&[name]).is_some()
+    }
+
+    /// Sets the launcher-wide fonts for CJK characters and emoji. A name that is not an installed
+    /// family is ignored, leaving that script to cosmic-text's own fallback.
+    pub fn apply_script_fonts(&mut self, cjk_candidates: &[&str], emoji_candidates: &[&str]) {
+        let cjk = self.resolve_family_candidate(cjk_candidates);
+        let emoji = self.resolve_family_candidate(emoji_candidates);
+        if self.ui_cjk_font_family == cjk && self.ui_emoji_font_family == emoji {
+            return;
+        }
+        self.ui_cjk_font_family = cjk;
+        self.ui_emoji_font_family = emoji;
+        self.invalidate_text_caches(false);
+    }
+
+    /// The CJK and emoji families to use for text with `fundamentals`: the group's own choice,
+    /// else the launcher-wide preference.
+    pub(crate) fn script_fonts<'a>(
+        &'a self,
+        fundamentals: &'a TextFundamentals,
+    ) -> ScriptFonts<'a> {
+        ScriptFonts::resolve(
+            fundamentals.cjk_font_family.as_deref(),
+            fundamentals.emoji_font_family.as_deref(),
+            self.ui_cjk_font_family.as_deref(),
+            self.ui_emoji_font_family.as_deref(),
+        )
     }
 
     /// Enables/disables OpenType features and updates active tag selection.
@@ -146,6 +191,8 @@ impl TextUi {
 
     pub(super) fn hash_typography<H: Hasher>(&self, state: &mut H) {
         self.ui_font_family.hash(state);
+        self.ui_cjk_font_family.hash(state);
+        self.ui_emoji_font_family.hash(state);
         self.ui_font_size_scale.to_bits().hash(state);
         self.ui_font_weight.hash(state);
         self.open_type_features_enabled.hash(state);

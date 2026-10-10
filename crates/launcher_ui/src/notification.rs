@@ -1,5 +1,7 @@
 #[path = "notification/emitters.rs"]
 mod emitters;
+#[path = "notification/natural_language.rs"]
+pub mod natural_language;
 #[path = "notification/popups.rs"]
 mod popups;
 #[path = "notification/store.rs"]
@@ -15,8 +17,10 @@ use config::NotificationEasing;
 use crate::assets;
 
 pub use emitters::{
-    emit, emit_progress, emit_replace, emit_spinner, emit_with_actions, emit_with_icon,
+    NotificationBuilder, emit, emit_progress, emit_replace, emit_spinner, emit_with_actions,
+    emit_with_icon, retract_from_stack,
 };
+pub use natural_language::{count_word, join_natural};
 pub use popups::render_popups;
 use store::{drain_notifications, entry_fade_opacity, entry_ttl};
 
@@ -78,6 +82,31 @@ impl std::fmt::Debug for NotificationAction {
     }
 }
 
+/// How a notification with its own details merges into similar ones that arrive while it is
+/// still showing, instead of piling up as separate popups.
+///
+/// Notifications sharing a `key` become one popup. Each arrival adds its `items`, and the
+/// message is rewritten from *all* items by `render`, so the text stays natural ("got two new
+/// capes: A and B") rather than being appended to. Notifications with no details of their own
+/// need no spec: identical ones collapse automatically and show an "xN" badge by the icon.
+#[derive(Clone)]
+pub struct StackSpec {
+    pub key: String,
+    pub items: Vec<String>,
+    pub render: Arc<dyn Fn(&[String]) -> String + Send + Sync>,
+    /// Takes `items` back out of the stack instead of adding them (see [`retract_from_stack`]).
+    pub remove: bool,
+}
+
+impl std::fmt::Debug for StackSpec {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StackSpec")
+            .field("key", &self.key)
+            .field("items", &self.items)
+            .finish_non_exhaustive()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub severity: Severity,
@@ -89,6 +118,7 @@ pub struct Notification {
     pub actions: Vec<NotificationAction>,
     /// SVG shown instead of the severity icon.
     pub icon: Option<&'static [u8]>,
+    pub stack: Option<StackSpec>,
     pub when: Instant,
 }
 
@@ -103,6 +133,7 @@ struct NotificationEntry {
     replace_key: Option<String>,
     actions: Vec<NotificationAction>,
     icon: Option<&'static [u8]>,
+    stack: Option<StackSpec>,
     count: u32,
     last_seen: Instant,
 }

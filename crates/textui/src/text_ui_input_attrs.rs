@@ -58,6 +58,8 @@ impl TextUi {
         wrap.hash(&mut hasher);
         hash_text_fundamentals(&options.fundamentals, &mut hasher);
         self.ui_font_family.hash(&mut hasher);
+        self.ui_cjk_font_family.hash(&mut hasher);
+        self.ui_emoji_font_family.hash(&mut hasher);
         self.ui_font_size_scale.to_bits().hash(&mut hasher);
         self.ui_font_weight.hash(&mut hasher);
         self.open_type_features_enabled.hash(&mut hasher);
@@ -111,6 +113,8 @@ impl TextUi {
         hash_text_fundamentals(&options.fundamentals, &mut hasher);
         scale.to_bits().hash(&mut hasher);
         self.ui_font_family.hash(&mut hasher);
+        self.ui_cjk_font_family.hash(&mut hasher);
+        self.ui_emoji_font_family.hash(&mut hasher);
         self.ui_font_size_scale.to_bits().hash(&mut hasher);
         self.ui_font_weight.hash(&mut hasher);
         self.open_type_features_enabled.hash(&mut hasher);

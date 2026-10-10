@@ -6,9 +6,14 @@ pub struct FontController {
     pub(super) available_ui_font_labels: Vec<String>,
     pub(super) available_emoji_fonts: Vec<UiEmojiFontFamily>,
     pub(super) available_emoji_font_labels: Vec<String>,
+    pub(super) available_cjk_fonts: Vec<UiCjkFontFamily>,
+    pub(super) available_cjk_font_labels: Vec<String>,
+    /// The launcher-wide CJK and emoji fonts last handed to the text engine.
+    pub(super) applied_script_fonts: Option<(UiCjkFontFamily, UiEmojiFontFamily)>,
+    /// System families already offered to the text engine, so each is registered once.
+    pub(super) registered_script_families: std::collections::HashSet<String>,
     pub(super) applied_font_signature: Option<AppliedFontSignature>,
     pub(super) applied_text_signature: Option<AppliedTextSignature>,
-    pub(super) applied_emoji_font: Option<UiEmojiFontFamily>,
     pub(super) effective_ui_font_family: UiFontFamily,
 }
 
@@ -27,7 +32,15 @@ impl FontController {
             .map(UiEmojiFontFamily::settings_label)
             .collect();
 
+        let available_cjk_fonts = detect_available_cjk_fonts(&catalog);
+        let available_cjk_font_labels = available_cjk_fonts
+            .iter()
+            .map(UiCjkFontFamily::settings_label)
+            .collect();
+
         Self {
+            available_cjk_fonts,
+            available_cjk_font_labels,
             available_ui_fonts,
             available_ui_font_labels,
             available_emoji_fonts,
@@ -35,14 +48,18 @@ impl FontController {
             font_catalog: catalog,
             applied_font_signature: None,
             applied_text_signature: None,
-            applied_emoji_font: None,
+            applied_script_fonts: None,
+            registered_script_families: std::collections::HashSet::new(),
             effective_ui_font_family: initial_family,
         }
     }
 
+    /// Registers the fonts built into the executable. They are static, so the text engine shares
+    /// the embedded bytes instead of copying them, which matters for the CJK font (about 20 MB).
     pub fn register_included_fonts(text_ui: &mut TextUi) {
-        text_ui.register_font_data(MAPLE_MONO_NF_REGULAR_TTF.to_vec());
-        text_ui.register_font_data(NOTO_COLOR_EMOJI_TTF.to_vec());
+        text_ui.register_static_font_data(MAPLE_MONO_NF_REGULAR_TTF);
+        text_ui.register_static_font_data(MAPLE_MONO_NF_CN_REGULAR_TTF);
+        text_ui.register_static_font_data(NOTO_COLOR_EMOJI_TTF);
     }
 
     pub fn available_ui_fonts(&self) -> &[UiFontFamily] {
@@ -59,6 +76,65 @@ impl FontController {
 
     pub fn available_emoji_font_labels(&self) -> &[String] {
         &self.available_emoji_font_labels
+    }
+
+    pub fn available_cjk_fonts(&self) -> &[UiCjkFontFamily] {
+        &self.available_cjk_fonts
+    }
+
+    pub fn available_cjk_font_labels(&self) -> &[String] {
+        &self.available_cjk_font_labels
+    }
+
+    /// Makes sure the text engine can find `family_name`, handing it the system font's bytes the
+    /// first time if it cannot. Included fonts are registered at startup and need nothing.
+    fn ensure_script_family_registered(&mut self, text_ui: &mut TextUi, family_name: &str) {
+        if text_ui.has_font_family(family_name)
+            || !self
+                .registered_script_families
+                .insert(family_name.to_lowercase())
+        {
+            return;
+        }
+        let families = [family_name];
+        let spec = FontSpec::new(&families)
+            .weight(Weight(400))
+            .slant(Slant::Upright)
+            .stretch(Stretch::Normal);
+        match self.font_catalog.query_bytes(&spec) {
+            Ok((bytes, _)) => text_ui.register_font_data(bytes),
+            Err(_) => tracing::warn!(
+                target: "vertexlauncher/app/fonts",
+                configured_font = family_name,
+                "configured CJK/emoji font not available; the text engine will fall back"
+            ),
+        }
+    }
+
+    /// Hands the launcher-wide CJK and emoji fonts to the text engine, and makes sure any font a
+    /// text group names for itself can be found.
+    fn apply_script_fonts(&mut self, config: &Config, text_ui: &mut TextUi) {
+        for role in config::TextRole::ALL {
+            let role_override = config.typography().override_for(role);
+            for family in [
+                role_override.cjk_font_family,
+                role_override.emoji_font_family,
+            ]
+            .into_iter()
+            .flatten()
+            {
+                self.ensure_script_family_registered(text_ui, &family);
+            }
+        }
+
+        let desired = (config.ui_cjk_font_family(), config.ui_emoji_font_family());
+        if self.applied_script_fonts.as_ref() == Some(&desired) {
+            return;
+        }
+        self.ensure_script_family_registered(text_ui, desired.0.family_name());
+        self.ensure_script_family_registered(text_ui, desired.1.family_name());
+        text_ui.apply_script_fonts(&[desired.0.family_name()], &[desired.1.family_name()]);
+        self.applied_script_fonts = Some(desired);
     }
 
     pub fn ensure_selected_font_is_available(&self, config: &mut Config) {
@@ -131,6 +207,8 @@ impl FontController {
             self.applied_font_signature = Some(desired_font);
         }
 
+        self.apply_script_fonts(config, text_ui);
+
         let desired_text = AppliedTextSignature {
             family: self.effective_ui_font_family.clone(),
             size: config.ui_font_size(),
@@ -162,32 +240,6 @@ impl FontController {
         if open_type_features_changed {
             console::mark_text_for_redraw();
             ctx.request_repaint();
-        }
-
-        let desired_emoji_font = config.ui_emoji_font_family();
-        if self
-            .applied_emoji_font
-            .as_ref()
-            .is_none_or(|prev| !prev.matches(&desired_emoji_font))
-        {
-            if !desired_emoji_font.is_included_default() {
-                let family_name = desired_emoji_font.family_name().to_owned();
-                let family_candidates: Vec<&str> = vec![family_name.as_str()];
-                let spec = FontSpec::new(&family_candidates)
-                    .weight(Weight(400))
-                    .slant(Slant::Upright)
-                    .stretch(Stretch::Normal);
-                if let Ok((bytes, _)) = self.font_catalog.query_bytes(&spec) {
-                    text_ui.register_font_data(bytes);
-                } else {
-                    tracing::warn!(
-                        target: "vertexlauncher/app/fonts",
-                        configured_font = desired_emoji_font.label(),
-                        "configured emoji font not available; falling back to included default"
-                    );
-                }
-            }
-            self.applied_emoji_font = Some(desired_emoji_font);
         }
     }
 }

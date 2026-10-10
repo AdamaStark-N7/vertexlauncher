@@ -4,9 +4,7 @@ use auth::{
 };
 use launcher_runtime as tokio_runtime;
 use launcher_ui::{notification, privacy};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 

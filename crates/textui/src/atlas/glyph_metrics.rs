@@ -19,6 +19,8 @@ pub(crate) fn hash_text_fundamentals<H: Hasher>(fundamentals: &TextFundamentals,
         feature.hash(state);
     }
     fundamentals.font_family.hash(state);
+    fundamentals.cjk_font_family.hash(state);
+    fundamentals.emoji_font_family.hash(state);
     fundamentals.variation_settings.len().hash(state);
     for variation in &fundamentals.variation_settings {
         variation.hash(state);

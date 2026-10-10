@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 egui.workspace = true
 fontdb.workspace = true
+skrifa = "*"
 thiserror.workspace = true
 eframe.workspace = true

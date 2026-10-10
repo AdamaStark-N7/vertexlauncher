@@ -8,14 +8,35 @@ const MAPLE_FONT_FAMILIES: &[&str] = &[
 ];
 const INCLUDED_DEFAULT_EMOJI_FONT_FAMILY: &str = "Noto Color Emoji";
 const INCLUDED_EMOJI_FONT_SETTINGS_LABEL: &str = "Noto Color Emoji (Included)";
+const INCLUDED_DEFAULT_CJK_FONT_FAMILY: &str = "Maple Mono NF CN";
+const INCLUDED_CJK_FONT_SETTINGS_LABEL: &str = "Maple Mono NF CN (Included)";
 
+#[path = "ui_fonts/ui_cjk_font_family.rs"]
+mod ui_cjk_font_family;
 #[path = "ui_fonts/ui_emoji_font_family.rs"]
 mod ui_emoji_font_family;
 #[path = "ui_fonts/ui_font_family.rs"]
 mod ui_font_family;
 
+pub use self::ui_cjk_font_family::UiCjkFontFamily;
 pub use self::ui_emoji_font_family::UiEmojiFontFamily;
 pub use self::ui_font_family::UiFontFamily;
+
+fn normalize_cjk_font_family_name(name: String) -> String {
+    let trimmed = name.trim();
+    let key = normalize_cjk_font_family_key(trimmed);
+    if trimmed.is_empty()
+        || key == normalize_cjk_font_family_key(INCLUDED_DEFAULT_CJK_FONT_FAMILY)
+        || key == normalize_cjk_font_family_key(INCLUDED_CJK_FONT_SETTINGS_LABEL)
+    {
+        return INCLUDED_CJK_FONT_SETTINGS_LABEL.to_owned();
+    }
+    trimmed.to_owned()
+}
+
+fn normalize_cjk_font_family_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
 
 fn normalize_emoji_font_family_name(name: String) -> String {
     let trimmed = name.trim();

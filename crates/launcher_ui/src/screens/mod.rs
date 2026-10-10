@@ -1,6 +1,6 @@
 use std::env;
 
-use config::{Config, UiEmojiFontFamily, UiFontFamily};
+use config::{Config, UiCjkFontFamily, UiEmojiFontFamily, UiFontFamily};
 use curseforge::set_api_key_override as set_curseforge_api_key_override;
 use eframe::egui_wgpu::wgpu;
 use egui::Ui;
@@ -99,6 +99,8 @@ pub struct AvailableOptions<'a> {
     pub ui_font_labels: &'a [String],
     pub emoji_fonts: &'a [UiEmojiFontFamily],
     pub emoji_font_labels: &'a [String],
+    pub cjk_fonts: &'a [UiCjkFontFamily],
+    pub cjk_font_labels: &'a [String],
     pub themes: &'a [Theme],
     pub theme_labels: &'a [String],
     pub settings_info: &'a SettingsInfo,

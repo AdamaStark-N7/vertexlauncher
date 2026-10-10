@@ -19,6 +19,10 @@ pub struct TextFundamentals {
     pub variation_settings: Vec<TextVariationSetting>,
     /// Named font family overriding the launcher-wide UI font for this text.
     pub font_family: Option<String>,
+    /// Font for CJK characters in this text, overriding the launcher-wide CJK preference.
+    pub cjk_font_family: Option<String>,
+    /// Font for emoji in this text, overriding the launcher-wide emoji preference.
+    pub emoji_font_family: Option<String>,
 }
 
 impl Default for TextFundamentals {
@@ -40,6 +44,8 @@ impl Default for TextFundamentals {
             feature_settings: Vec::new(),
             variation_settings: Vec::new(),
             font_family: None,
+            cjk_font_family: None,
+            emoji_font_family: None,
         }
     }
 }

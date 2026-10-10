@@ -65,16 +65,17 @@ pub fn poll(ctx: &Context, instances: &InstanceStore, config: &Config, player_na
             let baseline = state.seeded_dirs.insert(listing.dir.clone());
             for file in listing.files {
                 if state.known_files.insert(file.clone()) && !baseline {
-                    let message = match player_name {
-                        Some(name) => format!("{name} took a screenshot!"),
-                        None => "We detected a new screenshot!".to_owned(),
-                    };
-                    notification::emit_with_actions(
-                        Severity::Info,
-                        "screenshots",
-                        message,
-                        screenshot_actions(file),
-                    );
+                    // Screenshots arriving close together merge into one notification
+                    // ("Steve took three screenshots!"); its buttons act on the newest one.
+                    let player = player_name.map(str::to_owned);
+                    let stack_key = format!("screenshots:{}", player.as_deref().unwrap_or(""));
+                    let item = file.to_string_lossy().into_owned();
+                    notification::NotificationBuilder::new(Severity::Info, "screenshots", "")
+                        .actions(screenshot_actions(file))
+                        .stack(stack_key, vec![item], move |shots| {
+                            screenshot_message(player.as_deref(), shots.len())
+                        })
+                        .emit();
                 }
             }
         }
@@ -132,6 +133,14 @@ fn list_screenshots(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+fn screenshot_message(player: Option<&str>, count: usize) -> String {
+    use notification::natural_language::a_or_count;
+    match player {
+        Some(name) => format!("{name} took {}!", a_or_count(count, "screenshot")),
+        None => format!("We detected {}!", a_or_count(count, "new screenshot")),
+    }
+}
+
 fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
     let view_path = path.clone();
     let copy_path = path.clone();
@@ -181,4 +190,26 @@ fn copy_to_clipboard(ctx: &Context, path: &Path) -> Result<(), String> {
         rgba.as_raw(),
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::screenshot_message;
+
+    #[test]
+    fn screenshot_messages_follow_the_count() {
+        assert_eq!(
+            screenshot_message(Some("Steve"), 1),
+            "Steve took a screenshot!"
+        );
+        assert_eq!(
+            screenshot_message(Some("Steve"), 3),
+            "Steve took three screenshots!"
+        );
+        assert_eq!(screenshot_message(None, 1), "We detected a new screenshot!");
+        assert_eq!(
+            screenshot_message(None, 12),
+            "We detected several new screenshots!"
+        );
+    }
 }

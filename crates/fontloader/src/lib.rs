@@ -168,6 +168,41 @@ impl FontCatalog {
     /// `fontdb` stores multiple faces per family and may expose localized names.
     /// For the selector we prefer the primary family name from each face and
     /// collapse duplicates case-insensitively.
+    /// Family names (sorted, deduplicated) whose first face has a glyph for at least one of
+    /// `probes`.
+    ///
+    /// Only each family's first face is checked, which is almost always the regular weight and
+    /// keeps the scan to one lookup per family. Choose probes that only fonts meant for the
+    /// script contain: a Han ideograph, a kana, a Hangul syllable, an emoji.
+    pub fn families_covering_any(&self, probes: &[char]) -> Vec<String> {
+        let mut covered: BTreeSet<String> = BTreeSet::new();
+        let mut checked: BTreeSet<String> = BTreeSet::new();
+        for face in self.db.faces() {
+            let Some((family, _)) = face.families.first() else {
+                continue;
+            };
+            if !checked.insert(family.clone()) {
+                continue;
+            }
+            let has_glyph = self
+                .db
+                .with_face_data(face.id, |data, index| {
+                    skrifa::FontRef::from_index(data, index)
+                        .map(|font| {
+                            use skrifa::MetadataProvider;
+                            let charmap = font.charmap();
+                            probes.iter().any(|probe| charmap.map(*probe).is_some())
+                        })
+                        .unwrap_or(false)
+                })
+                .unwrap_or(false);
+            if has_glyph {
+                covered.insert(family.clone());
+            }
+        }
+        covered.into_iter().collect()
+    }
+
     pub fn deduplicated_family_names(&self) -> Vec<String> {
         let mut out = BTreeMap::new();
         for face in self.db.faces() {

@@ -1,6 +1,50 @@
 use super::*;
 
+/// Gives every CJK and emoji run in `lines` its chosen font, leaving other text on the line's own
+/// base attributes. Lines that already match are left alone, so calling this is cheap.
+pub(crate) fn apply_script_fonts_to_lines(
+    lines: &mut [cosmic_text::BufferLine],
+    fonts: ScriptFonts<'_>,
+) {
+    for line in lines {
+        let base = AttrsOwned::new(&line.attrs_list().defaults());
+        let list = fonts.attrs_list(line.text(), &base);
+        line.set_attrs_list(list);
+    }
+}
+
 impl TextUi {
+    /// Owned copies of the CJK and emoji families for `fundamentals`, for code that needs them
+    /// while the font system is borrowed mutably.
+    pub(crate) fn script_font_names(
+        &self,
+        fundamentals: &TextFundamentals,
+    ) -> (Option<String>, Option<String>) {
+        let fonts = self.script_fonts(fundamentals);
+        (fonts.cjk.map(str::to_owned), fonts.emoji.map(str::to_owned))
+    }
+
+    /// Re-applies script fonts to an editor after its text changed, so text typed or composed
+    /// since the last sync gets the right font, then reshapes what changed.
+    pub(crate) fn reapply_script_fonts(
+        &mut self,
+        editor: &mut Editor<'static>,
+        fundamentals: &TextFundamentals,
+    ) {
+        let (cjk_font, emoji_font) = self.script_font_names(fundamentals);
+        let fonts = ScriptFonts {
+            cjk: cjk_font.as_deref(),
+            emoji: emoji_font.as_deref(),
+        };
+        if fonts.is_empty() {
+            return;
+        }
+        editor.with_buffer_mut(|buffer| apply_script_fonts_to_lines(&mut buffer.lines, fonts));
+        editor
+            .borrow_with(&mut self.font_system)
+            .shape_as_needed(false);
+    }
+
     pub(crate) fn new_input_state(
         font_system: &mut FontSystem,
         text: &str,
@@ -29,6 +73,7 @@ impl TextUi {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             last_undo_op: UndoOpKind::None,
+            preedit: None,
         }
     }
 
@@ -48,6 +93,7 @@ impl TextUi {
         let previous_cursor = editor.cursor();
         let previous_selection = editor.selection();
         let previous_scroll = editor.with_buffer(|buffer| buffer.scroll());
+        let (cjk_font, emoji_font) = self.script_font_names(&options.fundamentals);
         let mut scroll_metrics = EditorScrollMetrics::default();
         editor.with_buffer_mut(|buffer| {
             let mut borrowed = buffer.borrow_with(&mut self.font_system);
@@ -63,6 +109,13 @@ impl TextUi {
             });
             let attrs = attrs_owned.as_attrs();
             borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+            apply_script_fonts_to_lines(
+                &mut borrowed.lines,
+                ScriptFonts {
+                    cjk: cjk_font.as_deref(),
+                    emoji: emoji_font.as_deref(),
+                },
+            );
             borrowed.set_scroll(previous_scroll);
             borrowed.shape_until_scroll(true);
             scroll_metrics =
@@ -124,6 +177,14 @@ impl TextUi {
             .iter()
             .map(|span| self.input_span_attrs_owned(&span.style, options, scale))
             .collect::<Vec<_>>();
+        let owned_spans: Vec<(&str, AttrsOwned)> = spans
+            .iter()
+            .zip(span_attrs_owned.iter())
+            .map(|(span, attrs)| (span.text.as_str(), attrs.clone()))
+            .collect();
+        let (script_spans, _) = self
+            .script_fonts(&options.fundamentals)
+            .split_spans(&owned_spans);
         let mut scroll_metrics = EditorScrollMetrics::default();
 
         editor.with_buffer_mut(|buffer| {
@@ -134,10 +195,9 @@ impl TextUi {
                 Some(height_px),
             );
             borrowed.set_wrap(if wrap { Wrap::WordOrGlyph } else { Wrap::None });
-            let rich_text = spans
+            let rich_text = script_spans
                 .iter()
-                .zip(span_attrs_owned.iter())
-                .map(|(span, attrs)| (span.text.as_str(), attrs.as_attrs()))
+                .map(|(text, attrs)| (*text, attrs.as_attrs()))
                 .collect::<Vec<_>>();
             borrowed.set_rich_text(
                 rich_text,

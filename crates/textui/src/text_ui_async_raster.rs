@@ -41,6 +41,8 @@ impl TextUi {
     pub(super) fn typography_snapshot(&self) -> TypographySnapshot {
         TypographySnapshot {
             ui_font_family: self.ui_font_family.clone(),
+            ui_cjk_font_family: self.ui_cjk_font_family.clone(),
+            ui_emoji_font_family: self.ui_emoji_font_family.clone(),
             ui_font_size_scale: self.ui_font_size_scale,
             ui_font_weight: self.ui_font_weight,
             open_type_feature_tags: self.open_type_feature_tags.clone(),
@@ -200,7 +202,9 @@ fn async_raster_worker_loop(
     while let Ok(msg) = rx.recv() {
         match msg {
             AsyncRasterWorkerMessage::RegisterFont(bytes) => {
-                font_system.db_mut().load_font_data(bytes);
+                font_system
+                    .db_mut()
+                    .load_font_source(cosmic_text::fontdb::Source::Binary(bytes));
             }
             AsyncRasterWorkerMessage::Render(req) => {
                 let layout = async_prepare_text_layout(&mut font_system, &req);
@@ -244,7 +248,17 @@ fn async_prepare_text_layout(
                     },
                 );
                 let attrs = attrs_owned.as_attrs();
-                borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+                let (script_spans, split) =
+                    async_script_fonts(req).split_spans(&[(text.as_str(), attrs_owned.clone())]);
+                if split {
+                    let rich_text = script_spans
+                        .iter()
+                        .map(|(text, attrs)| (*text, attrs.as_attrs()))
+                        .collect::<Vec<_>>();
+                    borrowed.set_rich_text(rich_text, &attrs, Shaping::Advanced, None);
+                } else {
+                    borrowed.set_text(text, &attrs, Shaping::Advanced, None);
+                }
             }
             AsyncRasterKind::Rich(spans) => {
                 let default_attrs_owned = async_build_text_attrs_owned(
@@ -260,10 +274,15 @@ fn async_prepare_text_layout(
                     .iter()
                     .map(|span| async_build_text_attrs_owned(req, &span.style))
                     .collect::<Vec<_>>();
-                let rich_text = spans
+                let owned_spans: Vec<(&str, AttrsOwned)> = spans
                     .iter()
                     .zip(span_attrs_owned.iter())
-                    .map(|(span, attrs)| (span.text.as_str(), attrs.as_attrs()))
+                    .map(|(span, attrs)| (span.text.as_str(), attrs.clone()))
+                    .collect();
+                let (script_spans, _) = async_script_fonts(req).split_spans(&owned_spans);
+                let rich_text = script_spans
+                    .iter()
+                    .map(|(text, attrs)| (*text, attrs.as_attrs()))
                     .collect::<Vec<_>>();
                 let default_attrs = default_attrs_owned.as_attrs();
                 borrowed.set_rich_text(rich_text, &default_attrs, Shaping::Advanced, None);
@@ -293,6 +312,17 @@ fn async_prepare_text_layout(
             height_px as f32 / req.scale,
         ),
     }
+}
+
+/// The CJK and emoji families for an async layout request, from the request's own fundamentals
+/// and the typography snapshot taken when it was queued.
+fn async_script_fonts(req: &AsyncRasterRequest) -> ScriptFonts<'_> {
+    ScriptFonts::resolve(
+        req.options.fundamentals.cjk_font_family.as_deref(),
+        req.options.fundamentals.emoji_font_family.as_deref(),
+        req.typography.ui_cjk_font_family.as_deref(),
+        req.typography.ui_emoji_font_family.as_deref(),
+    )
 }
 
 fn async_build_text_attrs_owned(req: &AsyncRasterRequest, style: &SpanStyle) -> AttrsOwned {

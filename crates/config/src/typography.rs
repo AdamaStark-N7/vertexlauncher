@@ -127,6 +127,12 @@ pub struct RoleOverride {
     /// Named font family; `None` uses the launcher UI font (or monospace for `Code`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_family: Option<String>,
+    /// Font for CJK characters in this group; `None` uses the launcher-wide CJK font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cjk_font_family: Option<String>,
+    /// Font for emoji in this group; `None` uses the launcher-wide emoji font.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emoji_font_family: Option<String>,
 }
 
 impl RoleOverride {
@@ -144,6 +150,10 @@ pub struct ResolvedTypography {
     pub letter_spacing: f32,
     pub monospace: bool,
     pub font_family: Option<String>,
+    /// This group's own CJK font, or `None` to use the launcher-wide one.
+    pub cjk_font_family: Option<String>,
+    /// This group's own emoji font, or `None` to use the launcher-wide one.
+    pub emoji_font_family: Option<String>,
 }
 
 /// Per-role typography overrides, stored by role slug.
@@ -178,12 +188,16 @@ impl TypographySettings {
             .size
             .unwrap_or(defaults.size)
             .clamp(ROLE_FONT_SIZE_MIN, ROLE_FONT_SIZE_MAX);
-        let font_family = user
-            .font_family
-            .as_deref()
-            .map(str::trim)
-            .filter(|name| !name.is_empty())
-            .map(str::to_owned);
+        let named = |family: &Option<String>| {
+            family
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned)
+        };
+        let font_family = named(&user.font_family);
+        let cjk_font_family = named(&user.cjk_font_family);
+        let emoji_font_family = named(&user.emoji_font_family);
         ResolvedTypography {
             size,
             // Keep the built-in line-height ratio when the size changes.
@@ -192,6 +206,8 @@ impl TypographySettings {
             letter_spacing: defaults.letter_spacing,
             monospace: defaults.monospace && font_family.is_none(),
             font_family,
+            cjk_font_family,
+            emoji_font_family,
         }
     }
 
@@ -205,11 +221,16 @@ impl TypographySettings {
                 .size
                 .map(|size| size.clamp(ROLE_FONT_SIZE_MIN, ROLE_FONT_SIZE_MAX));
             value.weight = value.weight.map(|weight| weight.clamp(100, 900));
-            value.font_family = value
-                .font_family
-                .take()
-                .map(|name| name.trim().to_owned())
-                .filter(|name| !name.is_empty());
+            for family in [
+                &mut value.font_family,
+                &mut value.cjk_font_family,
+                &mut value.emoji_font_family,
+            ] {
+                *family = family
+                    .take()
+                    .map(|name| name.trim().to_owned())
+                    .filter(|name| !name.is_empty());
+            }
             !value.is_empty()
         });
     }
@@ -252,5 +273,55 @@ mod tests {
         let code = settings.resolve(TextRole::Code);
         assert!(!code.monospace);
         assert_eq!(code.font_family.as_deref(), Some("JetBrains Mono"));
+    }
+
+    #[test]
+    fn script_fonts_default_to_the_launcher_wide_choice_and_can_be_set_per_group() {
+        let mut settings = TypographySettings::default();
+        let body = settings.resolve(TextRole::Body);
+        assert_eq!((body.cjk_font_family, body.emoji_font_family), (None, None));
+
+        settings.set_override(
+            TextRole::Body,
+            RoleOverride {
+                cjk_font_family: Some("  Noto Sans CJK JP ".to_owned()),
+                emoji_font_family: Some("Twemoji".to_owned()),
+                ..RoleOverride::default()
+            },
+        );
+        let body = settings.resolve(TextRole::Body);
+        assert_eq!(body.cjk_font_family.as_deref(), Some("Noto Sans CJK JP"));
+        assert_eq!(body.emoji_font_family.as_deref(), Some("Twemoji"));
+        // Another group is untouched, and the main font is independent of both.
+        let caption = settings.resolve(TextRole::Caption);
+        assert_eq!(caption.cjk_font_family, None);
+        assert_eq!(body.font_family, None);
+        assert!(!body.monospace, "script fonts do not change the main font");
+    }
+
+    #[test]
+    fn script_font_overrides_round_trip_and_blank_ones_are_dropped() {
+        let mut settings = TypographySettings::default();
+        settings.set_override(
+            TextRole::Button,
+            RoleOverride {
+                cjk_font_family: Some("Noto Sans CJK JP".to_owned()),
+                ..RoleOverride::default()
+            },
+        );
+        let json = serde_json::to_string(&settings).unwrap();
+        assert!(json.contains("cjk_font_family") && !json.contains("emoji_font_family"));
+        let mut back: TypographySettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, settings);
+
+        back.set_override(
+            TextRole::Button,
+            RoleOverride {
+                cjk_font_family: Some("   ".to_owned()),
+                ..RoleOverride::default()
+            },
+        );
+        back.normalize();
+        assert_eq!(back.resolve(TextRole::Button).cjk_font_family, None);
     }
 }

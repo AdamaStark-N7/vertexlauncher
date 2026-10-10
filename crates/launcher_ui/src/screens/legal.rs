@@ -25,7 +25,10 @@ macro_rules! legal_notice {
 
 const LEGAL_NOTICES: &[LegalNotice] = &[
     legal_notice!("Tabler Icons (MIT)", "../legal/TABLER_LICENSE.txt"),
-    legal_notice!("Maple Mono NF (SIL OFL 1.1)", "../legal/MAPLE_LICENSE.txt"),
+    legal_notice!(
+        "Maple Mono NF and Maple Mono NF CN (SIL OFL 1.1)",
+        "../legal/MAPLE_LICENSE.txt"
+    ),
     legal_notice!(
         "Noto Color Emoji (SIL OFL 1.1)",
         "../legal/NOTO_EMOJI_LICENSE.txt"

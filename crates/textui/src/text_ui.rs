@@ -9,6 +9,10 @@ pub struct TextUi {
     pub(crate) glyph_atlas: GlyphAtlas,
     pub(crate) input_states: FxHashMap<Id, InputState>,
     pub(crate) ui_font_family: Option<String>,
+    /// Launcher-wide font for CJK characters; a text group's own choice overrides it.
+    pub(crate) ui_cjk_font_family: Option<String>,
+    /// Launcher-wide font for emoji; a text group's own choice overrides it.
+    pub(crate) ui_emoji_font_family: Option<String>,
     pub(crate) ui_font_size_scale: f32,
     pub(crate) ui_font_weight: i32,
     pub(crate) open_type_features_enabled: bool,
@@ -68,6 +72,8 @@ impl TextUi {
             glyph_atlas,
             input_states: FxHashMap::default(),
             ui_font_family: None,
+            ui_cjk_font_family: None,
+            ui_emoji_font_family: None,
             ui_font_size_scale: 1.0,
             ui_font_weight: 400,
             open_type_features_enabled: false,

@@ -1,4 +1,4 @@
-use config::{Config, DropdownSettingId, UiEmojiFontFamily, UiFontFamily};
+use config::{Config, DropdownSettingId, UiCjkFontFamily, UiEmojiFontFamily, UiFontFamily};
 use eframe::egui;
 use fontloader::{FontCatalog, FontSpec, Slant, Stretch, Weight};
 use launcher_ui::console;
@@ -8,7 +8,16 @@ use textui::TextUi;
 const MAPLE_MONO_NF_REGULAR_TTF: &[u8] =
     include_bytes!("../included_fonts/MapleMono-NF-Regular.ttf");
 
+const MAPLE_MONO_NF_CN_REGULAR_TTF: &[u8] =
+    include_bytes!("../included_fonts/MapleMono-NF-CN-Regular.ttf");
+
 const NOTO_COLOR_EMOJI_TTF: &[u8] = include_bytes!("../included_fonts/NotoColorEmoji.ttf");
+
+/// Probes for fonts that draw CJK text: a Han ideograph (Chinese, Japanese), a hiragana (Japanese)
+/// and a Hangul syllable (Korean).
+const CJK_COVERAGE_PROBES: [char; 3] = ['\u{4E2D}', '\u{3042}', '\u{D55C}'];
+/// A probe for fonts that draw emoji: the grinning face.
+const EMOJI_COVERAGE_PROBES: [char; 1] = ['\u{1F600}'];
 
 #[path = "fonts/applied_font_signature.rs"]
 mod applied_font_signature;
@@ -31,10 +40,26 @@ fn install_included_maple_font(ctx: &egui::Context, size_pt: f32) {
     );
 }
 
+fn detect_available_cjk_fonts(font_catalog: &FontCatalog) -> Vec<UiCjkFontFamily> {
+    let mut available = vec![UiCjkFontFamily::included_default()];
+
+    for family_name in font_catalog.families_covering_any(&CJK_COVERAGE_PROBES) {
+        let family = UiCjkFontFamily::new(family_name);
+        if family.is_included_default()
+            || available.iter().any(|existing| existing.matches(&family))
+        {
+            continue;
+        }
+        available.push(family);
+    }
+
+    available
+}
+
 fn detect_available_emoji_fonts(font_catalog: &FontCatalog) -> Vec<UiEmojiFontFamily> {
     let mut available = vec![UiEmojiFontFamily::included_default()];
 
-    for family_name in font_catalog.deduplicated_family_names() {
+    for family_name in font_catalog.families_covering_any(&EMOJI_COVERAGE_PROBES) {
         let family = UiEmojiFontFamily::new(family_name);
         if family.is_included_default()
             || available.iter().any(|existing| existing.matches(&family))
