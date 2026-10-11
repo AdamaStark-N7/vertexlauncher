@@ -119,20 +119,21 @@ pub(crate) struct MinecraftBox {
     pub(crate) mirror: bool,
 }
 
-/// Adds a [`MinecraftBox`] using the same per-face vertex/UV assignment as
-/// `ModelPart.Cube`. `transform` maps Minecraft model space into preview space.
+/// One textured face of a [`MinecraftBox`]: `vertices` are wound to line up with `uv`'s
+/// corners (top-left, top-right, bottom-right, bottom-left), and `normal` points out of the
+/// box.
+#[derive(Clone, Copy)]
+pub(crate) struct MinecraftBoxQuad {
+    pub(crate) vertices: [Vec3; 4],
+    pub(crate) normal: Vec3,
+    pub(crate) uv: Rect,
+}
+
+/// Builds the six faces of a [`MinecraftBox`] with the same per-face vertex and UV
+/// assignment as `ModelPart.Cube`, in Minecraft model space.
 ///
 /// This function does not panic.
-pub(in super::super) fn add_minecraft_box_triangles(
-    out: &mut Vec<RenderTriangle>,
-    texture: TriangleTexture,
-    transform: ModelTransform,
-    cube: MinecraftBox,
-    camera: &Camera,
-    projection: Projection,
-    rect: Rect,
-    light_dir: Vec3,
-) {
+pub(crate) fn minecraft_box_quads(cube: MinecraftBox) -> [MinecraftBoxQuad; 6] {
     let (w, h, d) = (cube.size.x, cube.size.y, cube.size.z);
     let [u, v] = cube.tex_offset;
     let (u0, u1, u2, u3, u4, u5) = (
@@ -164,7 +165,9 @@ pub(in super::super) fn add_minecraft_box_triangles(
         Vec3::new(max_x, max_y, max_z),
         Vec3::new(min_x, max_y, max_z),
     ];
+    // Mirroring swaps which x side the west/east faces land on, so their normals swap too.
     let mirror_x = if cube.mirror { -1.0 } else { 1.0 };
+    let [tex_w, tex_h] = cube.texture_size;
     // (vertices, u_a, v_a, u_b, v_b, normal) in `ModelPart.Polygon` order: vertex 0 gets
     // (u_b, v_a), 1 gets (u_a, v_a), 2 gets (u_a, v_b), 3 gets (u_b, v_b).
     let faces = [
@@ -217,18 +220,37 @@ pub(in super::super) fn add_minecraft_box_triangles(
             Vec3::new(0.0, 0.0, 1.0),
         ),
     ];
-    let [tex_w, tex_h] = cube.texture_size;
-    for (vertices, u_a, v_a, u_b, v_b, normal) in faces {
+    faces.map(|(vertices, u_a, v_a, u_b, v_b, normal)| MinecraftBoxQuad {
+        vertices: [vertices[1], vertices[0], vertices[3], vertices[2]],
+        normal,
+        uv: Rect::from_min_max(
+            egui::pos2(u_a / tex_w, v_a / tex_h),
+            egui::pos2(u_b / tex_w, v_b / tex_h),
+        ),
+    })
+}
+
+/// Adds a [`MinecraftBox`]. `transform` maps Minecraft model space into preview space.
+///
+/// This function does not panic.
+pub(in super::super) fn add_minecraft_box_triangles(
+    out: &mut Vec<RenderTriangle>,
+    texture: TriangleTexture,
+    transform: ModelTransform,
+    cube: MinecraftBox,
+    camera: &Camera,
+    projection: Projection,
+    rect: Rect,
+    light_dir: Vec3,
+) {
+    for quad in minecraft_box_quads(cube) {
         add_transformed_quad_triangles(
             out,
             texture,
             transform,
-            [vertices[1], vertices[0], vertices[3], vertices[2]],
-            normal,
-            Rect::from_min_max(
-                egui::pos2(u_a / tex_w, v_a / tex_h),
-                egui::pos2(u_b / tex_w, v_b / tex_h),
-            ),
+            quad.vertices,
+            quad.normal,
+            quad.uv,
             false,
             camera,
             projection,
@@ -338,4 +360,140 @@ fn color_with_brightness(base: Color32, brightness: f32) -> Color32 {
         ((base.b() as f32) * b).round() as u8,
         base.a(),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (x, y, z, u, v) of every face vertex in model space and texels, sorted; produced by
+    /// vanilla's `ModelPart.Cube` for the elytra wing box.
+    const RIGHT_WING_FACE_VERTICES: [[f32; 5]; 24] = [
+        [-1.0, -1.0, -1.0, 34.0, 2.0],
+        [-1.0, -1.0, -1.0, 34.0, 2.0],
+        [-1.0, -1.0, -1.0, 34.0, 2.0],
+        [-1.0, -1.0, 3.0, 34.0, 0.0],
+        [-1.0, -1.0, 3.0, 36.0, 2.0],
+        [-1.0, -1.0, 3.0, 36.0, 2.0],
+        [-1.0, 21.0, -1.0, 34.0, 22.0],
+        [-1.0, 21.0, -1.0, 34.0, 22.0],
+        [-1.0, 21.0, -1.0, 44.0, 2.0],
+        [-1.0, 21.0, 3.0, 36.0, 22.0],
+        [-1.0, 21.0, 3.0, 36.0, 22.0],
+        [-1.0, 21.0, 3.0, 44.0, 0.0],
+        [11.0, -1.0, -1.0, 24.0, 2.0],
+        [11.0, -1.0, -1.0, 24.0, 2.0],
+        [11.0, -1.0, -1.0, 24.0, 2.0],
+        [11.0, -1.0, 3.0, 22.0, 2.0],
+        [11.0, -1.0, 3.0, 24.0, 0.0],
+        [11.0, -1.0, 3.0, 46.0, 2.0],
+        [11.0, 21.0, -1.0, 24.0, 22.0],
+        [11.0, 21.0, -1.0, 24.0, 22.0],
+        [11.0, 21.0, -1.0, 34.0, 2.0],
+        [11.0, 21.0, 3.0, 22.0, 22.0],
+        [11.0, 21.0, 3.0, 34.0, 0.0],
+        [11.0, 21.0, 3.0, 46.0, 22.0],
+    ];
+
+    /// (x, y, z, u, v) of every face vertex in model space and texels, sorted; produced by
+    /// vanilla's `ModelPart.Cube` for the elytra wing box.
+    const LEFT_WING_FACE_VERTICES: [[f32; 5]; 24] = [
+        [-11.0, -1.0, -1.0, 24.0, 2.0],
+        [-11.0, -1.0, -1.0, 24.0, 2.0],
+        [-11.0, -1.0, -1.0, 24.0, 2.0],
+        [-11.0, -1.0, 3.0, 22.0, 2.0],
+        [-11.0, -1.0, 3.0, 24.0, 0.0],
+        [-11.0, -1.0, 3.0, 46.0, 2.0],
+        [-11.0, 21.0, -1.0, 24.0, 22.0],
+        [-11.0, 21.0, -1.0, 24.0, 22.0],
+        [-11.0, 21.0, -1.0, 34.0, 2.0],
+        [-11.0, 21.0, 3.0, 22.0, 22.0],
+        [-11.0, 21.0, 3.0, 34.0, 0.0],
+        [-11.0, 21.0, 3.0, 46.0, 22.0],
+        [1.0, -1.0, -1.0, 34.0, 2.0],
+        [1.0, -1.0, -1.0, 34.0, 2.0],
+        [1.0, -1.0, -1.0, 34.0, 2.0],
+        [1.0, -1.0, 3.0, 34.0, 0.0],
+        [1.0, -1.0, 3.0, 36.0, 2.0],
+        [1.0, -1.0, 3.0, 36.0, 2.0],
+        [1.0, 21.0, -1.0, 34.0, 22.0],
+        [1.0, 21.0, -1.0, 34.0, 22.0],
+        [1.0, 21.0, -1.0, 44.0, 2.0],
+        [1.0, 21.0, 3.0, 36.0, 22.0],
+        [1.0, 21.0, 3.0, 36.0, 22.0],
+        [1.0, 21.0, 3.0, 44.0, 0.0],
+    ];
+
+    fn wing_box(origin_x: f32, mirror: bool) -> MinecraftBox {
+        MinecraftBox {
+            origin: Vec3::new(origin_x, 0.0, 0.0),
+            size: Vec3::new(10.0, 20.0, 2.0),
+            inflate: 1.0,
+            tex_offset: [22.0, 0.0],
+            texture_size: [64.0, 32.0],
+            mirror,
+        }
+    }
+
+    /// Every face vertex as `(x, y, z, u, v)` in model space and texels, sorted.
+    fn face_vertices(cube: MinecraftBox) -> Vec<[f32; 5]> {
+        let [tex_w, tex_h] = cube.texture_size;
+        let mut out = Vec::new();
+        for quad in minecraft_box_quads(cube) {
+            let corners = [
+                quad.uv.left_top(),
+                quad.uv.right_top(),
+                quad.uv.right_bottom(),
+                quad.uv.left_bottom(),
+            ];
+            for (vertex, uv) in quad.vertices.iter().zip(corners) {
+                out.push([vertex.x, vertex.y, vertex.z, uv.x * tex_w, uv.y * tex_h]);
+            }
+        }
+        out.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        out
+    }
+
+    fn assert_matches_vanilla(actual: Vec<[f32; 5]>, expected: [[f32; 5]; 24]) {
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, e)) in actual.iter().zip(expected).enumerate() {
+            for axis in 0..5 {
+                assert!(
+                    (a[axis] - e[axis]).abs() < 0.001,
+                    "vertex {index}: got {a:?}, expected {e:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn right_wing_faces_match_vanilla_mirrored_cube() {
+        assert_matches_vanilla(face_vertices(wing_box(0.0, true)), RIGHT_WING_FACE_VERTICES);
+    }
+
+    #[test]
+    fn left_wing_faces_match_vanilla_cube() {
+        assert_matches_vanilla(
+            face_vertices(wing_box(-10.0, false)),
+            LEFT_WING_FACE_VERTICES,
+        );
+    }
+
+    #[test]
+    fn face_normals_point_out_of_the_box() {
+        for mirror in [false, true] {
+            let cube = wing_box(0.0, mirror);
+            let center = Vec3::new(5.0, 10.0, 1.0);
+            for quad in minecraft_box_quads(cube) {
+                let face_center =
+                    (quad.vertices[0] + quad.vertices[1] + quad.vertices[2] + quad.vertices[3])
+                        * 0.25;
+                assert!(
+                    quad.normal.dot(face_center - center) > 0.0,
+                    "mirror={mirror}: normal {:?} points into the box",
+                    (quad.normal.x, quad.normal.y, quad.normal.z)
+                );
+            }
+        }
+    }
 }

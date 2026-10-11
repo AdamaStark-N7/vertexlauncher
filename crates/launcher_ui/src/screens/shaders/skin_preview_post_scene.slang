@@ -49,6 +49,11 @@ TexelRegion texel_region(float4 uv_bounds, float2 dims)
     return region;
 }
 
+float4 premultiply(float4 color)
+{
+    return float4(color.rgb * color.a, color.a);
+}
+
 float4 load_region_texel(int2 texel, TexelRegion region)
 {
     return preview_tex.Load(int3(clamp(texel, region.min_texel, region.max_texel), 0));
@@ -91,13 +96,22 @@ float4 sample_preview_texel_border_aa(float2 uv, float4 uv_bounds)
     float2 f = frac(p);
     float2 edge_width = clamp(max(fwidth(p), 0.0001.xx) * 0.75, 0.0.xx, 0.5.xx);
     float2 t = smoothstep(0.5.xx - edge_width, 0.5.xx + edge_width, f);
-    float4 c00 = load_region_texel(base, region);
-    float4 c10 = load_region_texel(base + int2(1, 0), region);
-    float4 c01 = load_region_texel(base + int2(0, 1), region);
-    float4 c11 = load_region_texel(base + int2(1, 1), region);
+    // Blend in premultiplied space: transparent texels are stored as black, so blending
+    // straight-alpha colours would darken every silhouette edge (the elytra's cut-out shape
+    // in particular). Un-premultiplying afterwards keeps the texel colour and only fades
+    // the alpha.
+    float4 c00 = premultiply(load_region_texel(base, region));
+    float4 c10 = premultiply(load_region_texel(base + int2(1, 0), region));
+    float4 c01 = premultiply(load_region_texel(base + int2(0, 1), region));
+    float4 c11 = premultiply(load_region_texel(base + int2(1, 1), region));
     float4 cx0 = lerp(c00, c10, t.x);
     float4 cx1 = lerp(c01, c11, t.x);
-    return lerp(cx0, cx1, t.y);
+    float4 blended = lerp(cx0, cx1, t.y);
+    if (blended.a <= 0.0001)
+    {
+        return float4(0.0, 0.0, 0.0, 0.0);
+    }
+    return float4(blended.rgb / blended.a, blended.a);
 }
 
 [shader("vertex")]
