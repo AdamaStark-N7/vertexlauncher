@@ -2,47 +2,51 @@ use super::*;
 
 pub(super) struct CharacterSceneMotion {
     pub(super) arm_width: f32,
-    pub(super) locomotion_blend: f32,
-    pub(super) bob: f32,
-    pub(super) leg_swing: f32,
-    pub(super) arm_swing: f32,
-    pub(super) torso_idle_tilt: f32,
-    pub(super) head_idle_tilt: f32,
-    pub(super) cape_walk_phase: f32,
+    pub(super) limb_speed: f32,
+    pub(super) age_ticks: f32,
+    pub(super) entity_random: f32,
+    pub(super) pose: PlayerMotionPose,
 }
 
 impl CharacterSceneMotion {
-    pub(super) fn new(preview_pose: PreviewPose, variant: MinecraftSkinVariant) -> Self {
+    pub(super) fn new(
+        preview_pose: PreviewPose,
+        variant: MinecraftSkinVariant,
+        skin_hash: Option<u64>,
+    ) -> Self {
         let arm_width = if variant == MinecraftSkinVariant::Slim {
             3.0
         } else {
             4.0
         };
-        let idle_sway = preview_pose.idle_cycle;
-        let walk_phase = preview_pose.walk_cycle;
-        let locomotion_blend = preview_pose.locomotion_blend;
-        let stride_phase = walk_phase * locomotion_blend;
-        let bob_idle = 0.08 + (idle_sway * 0.5 + 0.5) * 0.12;
-        let bob_walk = stride_phase.abs() * 0.58
-            + (preview_pose.time_seconds * 6.6).cos().abs() * 0.04 * locomotion_blend;
-        let bob = egui::lerp(bob_idle..=bob_walk, locomotion_blend);
-        let leg_swing = stride_phase * 0.72;
-        let arm_idle = (preview_pose.time_seconds * 1.35).sin() * 0.055;
-        let arm_swing = (-stride_phase * 0.82) + arm_idle * (1.0 - locomotion_blend * 0.45);
-        let torso_idle_tilt =
-            idle_sway * 0.035 * (1.0 - locomotion_blend * 0.6) + stride_phase * 0.05;
-        let head_idle_tilt =
-            idle_sway * 0.055 * (1.0 - locomotion_blend * 0.55) - stride_phase * 0.035;
+        let limb_speed = preview_pose.limb_speed();
+        let age_ticks = preview_pose.time_seconds * 20.0;
+        let entity_random = skin_hash.map_or(0.5, preview_entity_random);
+        let pose = player_motion_pose(PlayerMotionInput {
+            age_ticks,
+            limb_swing: preview_pose.limb_swing,
+            limb_speed,
+            entity_random,
+        });
 
         Self {
             arm_width,
-            locomotion_blend,
-            bob,
-            leg_swing,
-            arm_swing,
-            torso_idle_tilt,
-            head_idle_tilt,
-            cape_walk_phase: stride_phase,
+            limb_speed,
+            age_ticks,
+            entity_random,
+            pose,
         }
     }
+}
+
+/// Stable per-player random value, derived from the skin so each skin keeps
+/// its own breathing and blink timing.
+fn preview_entity_random(skin_hash: u64) -> f32 {
+    let mut value = skin_hash ^ 0x5bd1_e995_9e37_79b9;
+    value ^= value >> 30;
+    value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value ^= value >> 27;
+    value = value.wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^= value >> 31;
+    ((value >> 40) as f32) / ((1u64 << 24) as f32)
 }

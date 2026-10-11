@@ -1,5 +1,7 @@
 use super::*;
 
+/// Texture rectangles for each cuboid face. `left`/`right` are the -x/+x faces; preview
+/// space keeps Minecraft's handedness, so on body parts -x is the player's right side.
 #[derive(Clone, Copy)]
 pub(crate) struct FaceUvs {
     pub(crate) top: Rect,

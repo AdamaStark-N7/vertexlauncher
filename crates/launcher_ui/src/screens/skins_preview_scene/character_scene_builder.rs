@@ -11,6 +11,8 @@ mod character_scene_build_context;
 mod character_scene_motion;
 #[path = "character_scene_builder/limb_scene_parts.rs"]
 mod limb_scene_parts;
+#[path = "character_scene_builder/player_motion_pose.rs"]
+mod player_motion_pose;
 #[path = "character_scene_builder/scene_camera.rs"]
 mod scene_camera;
 
@@ -19,6 +21,9 @@ use self::body_core_scene_parts::add_body_core_scene_parts;
 use self::character_scene_build_context::CharacterSceneBuildContext;
 use self::character_scene_motion::CharacterSceneMotion;
 use self::limb_scene_parts::add_limb_scene_parts;
+use self::player_motion_pose::{
+    McPartPose, PlayerMotionInput, PlayerMotionPose, player_motion_pose,
+};
 use self::scene_camera::build_character_scene_camera;
 
 /// Builds the full preview scene for the current pose and render options.
@@ -42,14 +47,13 @@ pub(in super::super) fn build_character_scene(
     cape_sample: Option<Arc<RgbaImage>>,
     default_elytra_sample: Option<Arc<RgbaImage>>,
 ) -> BuiltCharacterScene {
-    let motion = CharacterSceneMotion::new(preview_pose, variant);
-    let (camera, projection, model_offset, light_dir) =
-        build_character_scene_camera(yaw, motion.bob);
+    let skin_hash = skin_sample.as_deref().map(hash_preview_image);
+    let motion = CharacterSceneMotion::new(preview_pose, variant, skin_hash);
+    let (camera, projection, model_offset, light_dir) = build_character_scene_camera(yaw);
     let mut context = CharacterSceneBuildContext {
         rect,
         variant,
         cape_uv,
-        preview_pose,
         preview_3d_layers_enabled,
         show_elytra,
         expressions_enabled,

@@ -8,25 +8,24 @@ mod elytra_pose;
 mod elytra_triangles;
 #[path = "skins_preview_gpu_geometry/elytra_wing_pose.rs"]
 mod elytra_wing_pose;
-#[path = "skins_preview_gpu_geometry/elytra_wing_uvs.rs"]
-mod elytra_wing_uvs;
 
 pub(in super::super) use self::cape_triangles::add_cape_triangles;
 use self::elytra_pose::ElytraPose;
-pub(in super::super) use self::elytra_triangles::add_elytra_triangles;
+pub(in super::super) use self::elytra_triangles::{ElytraMotion, add_elytra_triangles};
 use self::elytra_wing_pose::ElytraWingPose;
-pub(in super::super) use self::elytra_wing_uvs::ElytraWingUvs;
 
+// Vanilla `ElytraModel` wing poses in Minecraft model space (y down, front -z). `left` is
+// the player's left wing (pivot x = +5), `right` the mirrored one (pivot x = -5).
 const VANILLA_ELYTRA_POSE_STANDING: ElytraPose = ElytraPose {
     left: ElytraWingPose {
         rotate_x: 0.261_799_4,
-        rotate_y: -0.087_266_46,
+        rotate_y: 0.0,
         rotate_z: -0.261_799_4,
         pivot_y_offset: 0.0,
     },
     right: ElytraWingPose {
         rotate_x: 0.261_799_4,
-        rotate_y: 0.087_266_46,
+        rotate_y: 0.0,
         rotate_z: 0.261_799_4,
         pivot_y_offset: 0.0,
     },

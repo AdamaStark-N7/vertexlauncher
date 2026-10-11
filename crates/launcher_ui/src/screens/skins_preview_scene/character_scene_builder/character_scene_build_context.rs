@@ -4,7 +4,6 @@ pub(super) struct CharacterSceneBuildContext {
     pub(super) rect: Rect,
     pub(super) variant: MinecraftSkinVariant,
     pub(super) cape_uv: FaceUvs,
-    pub(super) preview_pose: PreviewPose,
     pub(super) preview_3d_layers_enabled: bool,
     pub(super) show_elytra: bool,
     pub(super) expressions_enabled: bool,

@@ -46,6 +46,7 @@ pub(super) struct SkinManagerState {
     pub(super) cached_expression_layout: Option<DetectedExpressionsLayout>,
     pub(super) preview_motion_mode: PreviewMotionMode,
     pub(super) preview_motion_blend: f32,
+    pub(super) preview_limb_swing: f32,
     pub(super) skin_texture_hash: Option<u64>,
     pub(super) skin_texture: Option<TextureHandle>,
     pub(super) skin_sample: Option<Arc<RgbaImage>>,
@@ -108,6 +109,7 @@ impl Default for SkinManagerState {
             cached_expression_layout: None,
             preview_motion_mode: PreviewMotionMode::Idle,
             preview_motion_blend: 0.0,
+            preview_limb_swing: 0.0,
             skin_texture_hash: None,
             skin_texture: None,
             skin_sample: None,
@@ -887,40 +889,12 @@ impl SkinManagerState {
         self.cached_expression_layout_hash = Some(hash);
         self.cached_expression_layout = detect_expression_layout(sample);
         if let Some(layout) = self.cached_expression_layout {
-            let (right_eye_rect, left_eye_rect) = eye_face_rects(layout.eye);
-            let (right_lid_rect, left_lid_rect) = eye_lid_rects(layout.eye);
-            let right_lid_base_h = right_lid_rect.h as f32;
-            let left_lid_base_h = left_lid_rect.h as f32;
-            let right_upper_travel = (right_eye_rect.height - right_lid_base_h).max(0.0);
-            let left_upper_travel = (left_eye_rect.height - left_lid_base_h).max(0.0);
-            let right_lower_top_min = right_eye_rect.bottom_y() - right_eye_rect.height;
-            let right_lower_top_max = right_eye_rect.bottom_y() - right_lid_base_h;
-            let left_lower_top_min = left_eye_rect.bottom_y() - left_eye_rect.height;
-            let left_lower_top_max = left_eye_rect.bottom_y() - left_lid_base_h;
             tracing::info!(
                 target: "vertexlauncher/skins_expressions",
                 eye_id = layout.eye.id,
                 eye_family = ?layout.eye.family,
                 eye_offset = ?layout.eye.offset,
-                eye_width = layout.eye.width,
-                eye_height = layout.eye.height,
-                gaze_scale_x = layout.eye.gaze_scale_x,
-                gaze_scale_y = layout.eye.gaze_scale_y,
-                pupil_size = format_args!("{}x{}", layout.eye.pupil_width, layout.eye.pupil_height),
-                upper_lid_right_top_range = format_args!(
-                    "{:.3}..{:.3}",
-                    right_eye_rect.top_y(),
-                    right_eye_rect.top_y() + right_upper_travel
-                ),
-                upper_lid_left_top_range = format_args!(
-                    "{:.3}..{:.3}",
-                    left_eye_rect.top_y(),
-                    left_eye_rect.top_y() + left_upper_travel
-                ),
-                lower_lid_right_top_range =
-                    format_args!("{:.3}..{:.3}", right_lower_top_min, right_lower_top_max),
-                lower_lid_left_top_range =
-                    format_args!("{:.3}..{:.3}", left_lower_top_min, left_lower_top_max),
+                brow_id = layout.brow.map(|brow| brow.id),
                 "Detected skin expression layout."
             );
         }

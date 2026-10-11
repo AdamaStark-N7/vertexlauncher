@@ -68,12 +68,7 @@ pub(in super::super) fn build_motion_blur_scene_samples(
         };
         let time_offset = (sample_t - 0.5) * shutter_seconds;
         let sample_yaw = yaw + time_offset * yaw_velocity;
-        let sample_pose = PreviewPose {
-            time_seconds: preview_pose.time_seconds + time_offset,
-            idle_cycle: ((preview_pose.time_seconds + time_offset) * 1.15).sin(),
-            walk_cycle: ((preview_pose.time_seconds + time_offset) * 3.3).sin(),
-            locomotion_blend: preview_pose.locomotion_blend,
-        };
+        let sample_pose = preview_pose.offset_by(time_offset);
         let scene = build_character_scene(
             rect,
             cape_uv,

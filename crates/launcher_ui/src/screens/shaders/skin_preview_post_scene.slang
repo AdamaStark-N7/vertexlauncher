@@ -6,6 +6,7 @@ struct VertexIn
     float camera_z : LOC1;
     float2 uv : LOC2;
     float4 color : LOC3;
+    float4 uv_bounds : LOC4;
 };
 
 struct Globals
@@ -24,6 +25,7 @@ struct VertexOut
     float4 pos : SV_Position;
     float2 uv : TEXCOORD0;
     float4 color : COLOR0;
+    nointerpolation float4 uv_bounds : TEXCOORD1;
 };
 
 [[vk::binding(0, 0)]] Texture2D<float4> preview_tex;
@@ -31,53 +33,68 @@ struct VertexOut
 [[vk::binding(0, 1)]] ConstantBuffer<Globals> globals;
 [[vk::binding(0, 2)]] ConstantBuffer<Scalars> scalars;
 
-float4 sample_preview_pixel_art(float2 uv)
+// The texel rectangle [min, max) a face owns, snapped from its (possibly inset) UV bounds.
+// Every fetch is clamped into it so neighbouring texture regions can never bleed in.
+struct TexelRegion
+{
+    int2 min_texel;
+    int2 max_texel;
+};
+
+TexelRegion texel_region(float4 uv_bounds, float2 dims)
+{
+    TexelRegion region;
+    region.min_texel = int2(floor(uv_bounds.xy * dims + 0.01));
+    region.max_texel = max(int2(ceil(uv_bounds.zw * dims - 0.01)) - 1, region.min_texel);
+    return region;
+}
+
+float4 load_region_texel(int2 texel, TexelRegion region)
+{
+    return preview_tex.Load(int3(clamp(texel, region.min_texel, region.max_texel), 0));
+}
+
+float4 sample_preview_pixel_art(float2 uv, float4 uv_bounds)
 {
     uint2 dims_i;
     preview_tex.GetDimensions(dims_i.x, dims_i.y);
     float2 dims = float2(dims_i);
-    float2 texel = 0.5 / dims;
-    float2 clamped_uv = clamp(uv, texel, 1.0.xx - texel);
-    float2 uv_grad_x = ddx(clamped_uv);
-    float2 uv_grad_y = ddy(clamped_uv);
+    TexelRegion region = texel_region(uv_bounds, dims);
+    float2 uv_grad_x = ddx(uv);
+    float2 uv_grad_y = ddy(uv);
     float2 texel_grad_x = uv_grad_x * dims;
     float2 texel_grad_y = uv_grad_y * dims;
     float footprint = max(
         max(abs(texel_grad_x.x), abs(texel_grad_x.y)),
         max(abs(texel_grad_y.x), abs(texel_grad_y.y)));
-    int2 pixel = clamp(int2(clamped_uv * dims), int2(0, 0), int2(dims_i) - 1);
-    float4 nearest = preview_tex.Load(int3(pixel, 0));
+    float4 nearest = load_region_texel(int2(floor(uv * dims)), region);
+    // Keep the filtered footprint centred inside the region as well.
+    float2 region_lo = (float2(region.min_texel) + 0.5) / dims;
+    float2 region_hi = (float2(region.max_texel) + 0.5) / dims;
     float4 filtered = preview_tex.SampleGrad(
         preview_sampler,
-        clamped_uv,
+        clamp(uv, region_lo, region_hi),
         uv_grad_x,
         uv_grad_y);
     float filtered_mix = smoothstep(0.85, 1.35, footprint);
     return lerp(nearest, filtered, filtered_mix);
 }
 
-float4 load_preview_texel(int2 texel, uint2 dims_i)
-{
-    int2 max_texel = int2(dims_i) - 1;
-    return preview_tex.Load(int3(clamp(texel, int2(0, 0), max_texel), 0));
-}
-
-float4 sample_preview_texel_border_aa(float2 uv)
+float4 sample_preview_texel_border_aa(float2 uv, float4 uv_bounds)
 {
     uint2 dims_i;
     preview_tex.GetDimensions(dims_i.x, dims_i.y);
     float2 dims = float2(dims_i);
-    float2 texel = 0.5 / dims;
-    float2 clamped_uv = clamp(uv, texel, 1.0.xx - texel);
-    float2 p = clamped_uv * dims - 0.5.xx;
+    TexelRegion region = texel_region(uv_bounds, dims);
+    float2 p = uv * dims - 0.5.xx;
     int2 base = int2(floor(p));
     float2 f = frac(p);
     float2 edge_width = clamp(max(fwidth(p), 0.0001.xx) * 0.75, 0.0.xx, 0.5.xx);
     float2 t = smoothstep(0.5.xx - edge_width, 0.5.xx + edge_width, f);
-    float4 c00 = load_preview_texel(base, dims_i);
-    float4 c10 = load_preview_texel(base + int2(1, 0), dims_i);
-    float4 c01 = load_preview_texel(base + int2(0, 1), dims_i);
-    float4 c11 = load_preview_texel(base + int2(1, 1), dims_i);
+    float4 c00 = load_region_texel(base, region);
+    float4 c10 = load_region_texel(base + int2(1, 0), region);
+    float4 c01 = load_region_texel(base + int2(0, 1), region);
+    float4 c11 = load_region_texel(base + int2(1, 1), region);
     float4 cx0 = lerp(c00, c10, t.x);
     float4 cx1 = lerp(c01, c11, t.x);
     return lerp(cx0, cx1, t.y);
@@ -95,6 +112,7 @@ VertexOut vs_main(VertexIn input)
     output.pos = float4(x_ndc * clip_w, y_ndc * clip_w, clip_z, clip_w);
     output.uv = input.uv;
     output.color = input.color;
+    output.uv_bounds = input.uv_bounds;
     return output;
 }
 
@@ -108,8 +126,8 @@ struct FragOut
 FragOut fs_main(VertexOut input)
 {
     float4 sampled = (scalars.value.x > 0.5
-            ? sample_preview_texel_border_aa(input.uv)
-            : sample_preview_pixel_art(input.uv))
+            ? sample_preview_texel_border_aa(input.uv, input.uv_bounds)
+            : sample_preview_pixel_art(input.uv, input.uv_bounds))
         * input.color;
     if (sampled.a <= 0.001)
     {

@@ -34,10 +34,3 @@ pub(in super::super) fn uv_rect_with_inset(
     let max_y = ((y + h) as f32 / tex_h) - inset_y;
     Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
 }
-
-pub(in super::super) fn flip_uv_rect_x(rect: Rect) -> Rect {
-    Rect::from_min_max(
-        egui::pos2(rect.max.x, rect.min.y),
-        egui::pos2(rect.min.x, rect.max.y),
-    )
-}

@@ -66,10 +66,7 @@ mod skins_state;
 mod worker_event;
 use self::auth_error_format::format_auth_error;
 use self::cape_choice::CapeChoice;
-use self::cape_uv_layout::{
-    cape_outer_face_uv, cape_uv_layout, default_cape_uv_layout, default_elytra_wing_uvs,
-    elytra_wing_uvs,
-};
+use self::cape_uv_layout::{cape_outer_face_uv, cape_uv_layout, default_cape_uv_layout};
 use self::default_elytra_texture::default_elytra_texture_image;
 use self::loaded_profile::LoadedProfile;
 use self::profile_cache::{fetch_and_cache_profile, update_cached_profile};
@@ -91,6 +88,9 @@ use self::{preview_panel::render_preview_panel, screen_sections::render_skin_scr
 const PREVIEW_ORBIT_SECONDS: f64 = 45.0;
 const PREVIEW_TARGET_FPS: f32 = 60.0;
 const PREVIEW_HEIGHT: f32 = 460.0;
+/// Minecraft's walk-animation speed for a player walking on flat ground (≈0.216 blocks per
+/// tick × 4, capped at 1). Drives the preview's walk cycle.
+const PREVIEW_WALK_LIMB_SPEED: f32 = 0.86;
 const CAMERA_DRAG_SENSITIVITY_RAD_PER_POINT: f32 = 0.0046;
 const GAMEPAD_ORBIT_MAX_RAD_PER_SEC: f32 = 3.4;
 const GAMEPAD_ORBIT_DEADZONE: f32 = 0.18;
@@ -98,6 +98,9 @@ const CAMERA_INERTIA_FRICTION_PER_SEC: f32 = 2.0;
 const CAMERA_INERTIA_STOP_THRESHOLD_RAD_PER_SEC: f32 = 0.015;
 const UV_EDGE_INSET_BASE_TEXELS: f32 = 0.08;
 const UV_EDGE_INSET_OVERLAY_TEXELS: f32 = 0.5;
+/// Just enough inset to keep nearest sampling inside a region while staying aligned to the
+/// texel grid (used where panels must meet face texels exactly).
+const FACE_TEXEL_EXACT_INSET_TEXELS: f32 = 0.002;
 const CAPE_TILE_WIDTH_MIN: f32 = 132.0;
 const CAPE_TILE_HEIGHT: f32 = 186.0;
 const SKIN_PREVIEW_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -108,6 +111,12 @@ const FORCE_MOTION_FOCUS_ID: &str = "skins_force_motion_focus";
 const FORCE_MODEL_FOCUS_ID: &str = "skins_force_model_focus";
 const CLASSIC_MODEL_BUTTON_ID_KEY: &str = "skins_classic_model_button_id";
 const SLIM_MODEL_BUTTON_ID_KEY: &str = "skins_slim_model_button_id";
+
+/// Minecraft's `Mth.clamp`, used by the preview animations: returns `min` when below
+/// it, otherwise caps at `max` (so `min > max` yields `max` for in-range values).
+fn mc_clamp(value: f32, min: f32, max: f32) -> f32 {
+    if value < min { min } else { value.min(max) }
+}
 
 /// Frees the skin preview's GPU resources (render targets, pipelines). Call after leaving the
 /// skins screen.

@@ -163,7 +163,8 @@ impl SkinPreviewPostProcessWgpuResources {
                         0 => Float32x2,
                         1 => Float32,
                         2 => Float32x2,
-                        3 => Float32x4
+                        3 => Float32x4,
+                        4 => Float32x4
                     ],
                 }],
             },

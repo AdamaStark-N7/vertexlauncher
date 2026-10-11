@@ -96,11 +96,14 @@ pub(super) fn render_preview_canvas(
     let blend_alpha = 1.0 - (-blend_speed * dt.max(0.0)).exp();
     state.preview_motion_blend += (blend_target - state.preview_motion_blend) * blend_alpha;
     state.preview_motion_blend = state.preview_motion_blend.clamp(0.0, 1.0);
+    // Like Minecraft's walk animation, the swing position only advances while moving, so
+    // the idle stance keeps whatever stride phase the walk ended on.
+    state.preview_limb_swing +=
+        dt.clamp(0.0, 0.1) * 20.0 * PREVIEW_WALK_LIMB_SPEED * state.preview_motion_blend;
     let preview_pose = PreviewPose {
         time_seconds: now as f32,
-        idle_cycle: (now as f32 * 1.15).sin(),
-        walk_cycle: (now as f32 * 3.3).sin(),
         locomotion_blend: state.preview_motion_blend,
+        limb_swing: state.preview_limb_swing,
     };
 
     state.refresh_expression_layout_cache();

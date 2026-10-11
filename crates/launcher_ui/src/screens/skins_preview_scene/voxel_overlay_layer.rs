@@ -50,23 +50,19 @@ pub(super) fn add_voxel_overlay_layer(
                     VOXEL_GAP,
                 );
 
-                add_cuboid_triangles_with_y(
+                add_transformed_cuboid_triangles(
                     out,
                     TriangleTexture::Skin,
-                    CuboidSpec {
-                        size,
-                        pivot_top_center: part.pivot_top_center,
-                        rotate_x: part.rotate_x,
-                        rotate_z: part.rotate_z,
-                        uv: voxel_uv,
-                        cull_backfaces: false,
-                    },
+                    part.transform,
+                    size,
+                    // The cuboid is placed by its top-center; `local_center` is its center.
+                    part.local_top_center + local_center + Vec3::new(0.0, size.y * 0.5, 0.0),
+                    voxel_uv,
+                    false,
                     camera,
                     projection,
                     rect,
                     light_dir,
-                    0.0,
-                    local_center,
                 );
             }
         }

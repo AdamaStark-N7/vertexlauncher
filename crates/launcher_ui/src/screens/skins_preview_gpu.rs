@@ -31,6 +31,6 @@ use self::scene_batch::{
     PreparedGpuPreviewSceneBatch, build_preview_scene_batch, prepare_preview_scene_batch_buffers,
 };
 pub(super) use self::skins_preview_gpu_geometry::{
-    ElytraWingUvs, add_cape_triangles, add_elytra_triangles,
+    ElytraMotion, add_cape_triangles, add_elytra_triangles,
 };
 pub(super) use self::skins_preview_gpu_post_process::release_gpu_resources as release_preview_gpu_resources;

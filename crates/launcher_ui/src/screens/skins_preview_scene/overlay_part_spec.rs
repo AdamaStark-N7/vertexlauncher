@@ -3,7 +3,7 @@ use super::*;
 #[derive(Clone, Copy)]
 pub(super) struct OverlayPartSpec {
     pub(super) size: Vec3,
-    pub(super) pivot_top_center: Vec3,
-    pub(super) rotate_x: f32,
-    pub(super) rotate_z: f32,
+    pub(super) transform: ModelTransform,
+    /// Top-center of the base cuboid in `transform`'s local space.
+    pub(super) local_top_center: Vec3,
 }

@@ -2,12 +2,12 @@ use super::*;
 
 #[path = "skins_preview/camera.rs"]
 mod camera;
-#[path = "skins_preview/cuboid_spec.rs"]
-mod cuboid_spec;
 #[path = "skins_preview/cuboid_triangles.rs"]
 mod cuboid_triangles;
 #[path = "skins_preview/face_uvs.rs"]
 mod face_uvs;
+#[path = "skins_preview/model_transform.rs"]
+mod model_transform;
 #[path = "skins_preview/preview_character_renderer.rs"]
 mod preview_character_renderer;
 #[path = "skins_preview/projection.rs"]
@@ -28,17 +28,18 @@ mod vec3;
 mod weighted_preview_scene;
 
 pub(crate) use self::camera::Camera;
-pub(crate) use self::cuboid_spec::CuboidSpec;
-pub(super) use self::cuboid_triangles::{add_cuboid_triangles, add_cuboid_triangles_with_y};
+pub(super) use self::cuboid_triangles::{
+    MinecraftBox, add_minecraft_box_triangles, add_transformed_cuboid_triangles,
+    add_transformed_quad_triangles,
+};
 pub(crate) use self::face_uvs::FaceUvs;
+pub(crate) use self::model_transform::ModelTransform;
 pub(super) use self::preview_character_renderer::render_preview_character;
 pub(crate) use self::projection::Projection;
 pub(crate) use self::render_triangle::RenderTriangle;
-pub(super) use self::skins_preview_expressions::{
-    compatibility_score, eye_face_rects, eye_lid_rects,
-};
+pub(super) use self::skins_preview_expressions::{compatibility_score, eye_lid_rects};
 use self::skins_preview_scene::{build_character_scene, build_motion_blur_scene_samples};
 pub(crate) use self::triangle_texture::TriangleTexture;
-pub(super) use self::uv_rects::{flip_uv_rect_x, uv_rect, uv_rect_overlay, uv_rect_with_inset};
+pub(super) use self::uv_rects::{uv_rect, uv_rect_overlay, uv_rect_with_inset};
 pub(crate) use self::vec3::Vec3;
 pub(crate) use self::weighted_preview_scene::WeightedPreviewScene;

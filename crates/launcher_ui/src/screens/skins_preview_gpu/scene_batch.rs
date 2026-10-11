@@ -7,6 +7,8 @@ pub(super) struct GpuPreviewVertex {
     pub(super) camera_z: f32,
     pub(super) uv: [f32; 2],
     pub(super) color: [f32; 4],
+    /// `[min_u, min_v, max_u, max_v]` of the face's texture area.
+    pub(super) uv_bounds: [f32; 4],
 }
 
 #[repr(C)]
@@ -68,6 +70,12 @@ pub(super) fn build_preview_scene_batch(
                 camera_z: tri.depth[i].max(SKIN_PREVIEW_NEAR + 0.000_1),
                 uv: [tri.uv[i].x, tri.uv[i].y],
                 color: tri.color.to_normalized_gamma_f32(),
+                uv_bounds: [
+                    tri.uv_bounds.min.x,
+                    tri.uv_bounds.min.y,
+                    tri.uv_bounds.max.x,
+                    tri.uv_bounds.max.y,
+                ],
             });
         }
         target

@@ -1,4 +1,6 @@
-use super::skins_preview_expressions::{add_expression_triangles, compute_expression_pose};
+use super::skins_preview_expressions::{
+    FaceAnimationInput, add_expression_triangles, compute_face_pose,
+};
 use super::*;
 
 #[path = "skins_preview_scene/built_character_scene.rs"]
@@ -22,3 +24,7 @@ pub(super) use self::motion_blur_scene_samples::build_motion_blur_scene_samples;
 use self::overlay_part_spec::OverlayPartSpec;
 use self::overlay_region_spec::OverlayRegionSpec;
 use self::overlay_voxel_face::OverlayVoxelFace;
+
+#[cfg(test)]
+#[path = "skins_preview_scene/character_scene_tests.rs"]
+mod character_scene_tests;
