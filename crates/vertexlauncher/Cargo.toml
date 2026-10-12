@@ -1,7 +1,9 @@
 [package]
 name = "vertexlauncher"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
+# egui 0.34 (and so the whole dependency graph) requires Rust 1.92.
+rust-version = "1.92"
 build = "build.rs"
 
 [lints.rust]
@@ -38,19 +40,19 @@ toml.workspace = true
 modrinth.workspace = true
 curseforge.workspace = true
 image.workspace = true
-flate2 = "*"
+flate2 = "1.1"
 ureq.workspace = true
-tar = "*"
-xz2 = "*"
+tar = "0.4"
+xz2 = "0.1"
 vtmpack.workspace = true
 vertex_constants.workspace = true
 vertex_3d.workspace = true
-zip = { version = "*", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 discord-rich-presence = "1.1.0"
 gilrs.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-rfd = "*"
+rfd = "0.11"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 wry = "=0.31.1"
@@ -60,7 +62,7 @@ windows = { version = "=0.37.0", features = ["Win32_Foundation", "Win32_Graphics
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rfd = { version = "*", default-features = false, features = ["gtk3"] }
+rfd = { version = "0.11", default-features = false, features = ["gtk3"] }
 wry = "=0.31.1"
 tao = "=0.22.0"
 
@@ -68,9 +70,9 @@ tao = "=0.22.0"
 [target.'cfg(target_os = "macos")'.dependencies]
 wry = "=0.31.1"
 tao = "=0.22.0"
-objc = "*"
+objc = "0.2"
 
 
 [build-dependencies]
 image.workspace = true
-winresource = "*"
+winresource = "0.1"

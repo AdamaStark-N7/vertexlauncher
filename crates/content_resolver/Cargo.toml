@@ -1,6 +1,6 @@
 [package]
 name = "content_resolver"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -13,4 +13,4 @@ modrinth.workspace = true
 curseforge.workspace = true
 tracing.workspace = true
 vertex_constants.workspace = true
-zip = { version = "*", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

@@ -1,6 +1,6 @@
 [package]
 name = "auth"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -16,16 +16,16 @@ tokio.workspace = true
 tracing.workspace = true
 runtime_bootstrap.workspace = true
 vertex_constants.workspace = true
-zeroize = "*"
+zeroize = "1.8"
 rand = "=0.8.5"
-sha2 = "*"
+sha2 = "0.10"
 url.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-keyring = { version = "*", default-features = false, features = ["windows-native"] }
+keyring = { version = "3.6", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-keyring = { version = "*", default-features = false, features = ["apple-native"] }
+keyring = { version = "3.6", default-features = false, features = ["apple-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-keyring = { version = "*", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }
+keyring = { version = "3.6", default-features = false, features = ["linux-native-sync-persistent", "crypto-rust", "vendored"] }

@@ -1,12 +1,29 @@
 use super::*;
 
-use crate::privacy;
+use crate::{account_text, privacy};
 
 /// Redacts (in streamer mode) and sanitizes one notification text field for logs and display.
+///
+/// Account mentions (see [`crate::account_text`]) pass through untouched: only the text around
+/// them is sanitized, so the sanitizer never sees (or masks) an account id, and whitespace
+/// next to a mention is kept.
 pub(super) fn sanitize_field(streamer_mode: bool, value: String) -> String {
-    privacy::sanitize_text_for_log(
-        &privacy::redact_sensitive_text(streamer_mode, &value).into_owned(),
-    )
+    account_text::map_text(&value, |part| {
+        let body = part.trim();
+        if body.is_empty() {
+            return part.to_owned();
+        }
+        let leading = &part[..part.len() - part.trim_start().len()];
+        let trailing = &part[part.trim_end().len()..];
+        let sanitized =
+            privacy::sanitize_text_for_log(&privacy::redact_sensitive_text(streamer_mode, body));
+        format!("{leading}{sanitized}{trailing}")
+    })
+}
+
+/// A message as plain text for the log: mentions resolved the way the user would see them.
+fn log_text(message: &str, streamer_mode: bool) -> String {
+    account_text::plain(message, streamer_mode).into_owned()
 }
 
 pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<String>) {
@@ -15,16 +32,16 @@ pub fn emit(severity: Severity, source: impl Into<String>, message: impl Into<St
     let message = sanitize_field(streamer_mode, message.into());
     match severity {
         Severity::Log => {
-            tracing::debug!(target: "notification", source = %source, message = %message)
+            tracing::debug!(target: "notification", source = %source, message = %log_text(&message, streamer_mode))
         }
         Severity::Info => {
-            tracing::info!(target: "notification", source = %source, message = %message)
+            tracing::info!(target: "notification", source = %source, message = %log_text(&message, streamer_mode))
         }
         Severity::Warn => {
-            tracing::warn!(target: "notification", source = %source, message = %message)
+            tracing::warn!(target: "notification", source = %source, message = %log_text(&message, streamer_mode))
         }
         Severity::Error => {
-            tracing::error!(target: "notification", source = %source, message = %message)
+            tracing::error!(target: "notification", source = %source, message = %log_text(&message, streamer_mode))
         }
     }
     if let Err(err) = center().tx.send(Notification {
@@ -140,7 +157,7 @@ impl NotificationBuilder {
         let streamer_mode = streamer_mode_enabled();
         let source = sanitize_field(streamer_mode, self.source);
         let message = sanitize_field(streamer_mode, self.message);
-        tracing::info!(target: "notification", source = %source, message = %message);
+        tracing::info!(target: "notification", source = %source, message = %log_text(&message, streamer_mode));
         if let Err(err) = center().tx.send(Notification {
             severity: self.severity,
             source,
@@ -205,7 +222,7 @@ pub fn emit_progress(
     tracing::info!(
         target: "notification",
         source = %source,
-        message = %message,
+        message = %log_text(&message, streamer_mode),
         progress,
         "notification progress update"
     );
@@ -244,7 +261,7 @@ pub fn emit_spinner(
     tracing::info!(
         target: "notification",
         source = %source,
-        message = %message,
+        message = %log_text(&message, streamer_mode),
         replace_key = %replace_key,
         spinner = true,
         "notification spinner update"
@@ -282,7 +299,7 @@ pub fn emit_replace(
     tracing::info!(
         target: "notification",
         source = %source,
-        message = %message,
+        message = %log_text(&message, streamer_mode),
         replace_key = %replace_key,
         "notification replacement update"
     );
@@ -302,6 +319,57 @@ pub fn emit_replace(
             target: "notification",
             error = %err,
             "Failed to enqueue replacement notification."
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::account_text::{Segment, mention, segments};
+
+    const ID: &str = "069a79f4-44e9-4726-a5be-fca90e38aaf5";
+
+    #[test]
+    fn sanitizing_keeps_mentions_and_the_spaces_around_them() {
+        for streamer_mode in [false, true] {
+            let message = format!("Renewing login token for {} now", mention(ID, "Steve"));
+            let sanitized = sanitize_field(streamer_mode, message.clone());
+            assert_eq!(sanitized, message, "streamer_mode={streamer_mode}");
+        }
+    }
+
+    #[test]
+    fn account_ids_in_mentions_are_not_masked_but_loose_ids_are() {
+        let message = format!("{} had profile {ID}", mention(ID, "Steve"));
+        let sanitized = sanitize_field(true, message);
+        let parts = segments(&sanitized);
+        assert!(
+            parts.contains(&Segment::Account {
+                id: ID,
+                name: "Steve"
+            }),
+            "the mention keeps its id: {parts:?}"
+        );
+        let shown = account_text::plain(&sanitized, true).into_owned();
+        assert!(!shown.contains(ID), "the loose id is masked: {shown}");
+    }
+
+    #[test]
+    fn logs_never_contain_a_name_in_streamer_mode() {
+        let message = format!("{} took a screenshot!", mention(ID, "Steve"));
+        assert_eq!(
+            log_text(&message, true),
+            "Hidden Account took a screenshot!"
+        );
+        assert_eq!(log_text(&message, false), "Steve took a screenshot!");
+    }
+
+    #[test]
+    fn plain_messages_sanitize_like_before() {
+        assert_eq!(
+            sanitize_field(false, "hello  world".to_owned()),
+            "hello  world"
         );
     }
 }

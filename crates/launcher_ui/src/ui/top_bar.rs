@@ -1,4 +1,6 @@
 // interaction: allow (the clickable area here is the window drag region; buttons live in top_bar/)
+#[path = "top_bar/account_color_editor.rs"]
+mod account_color_editor;
 #[path = "top_bar/avatar.rs"]
 mod avatar;
 #[path = "top_bar/device_code.rs"]
@@ -43,6 +45,7 @@ const TOP_BAR_COMPACT_THRESHOLD: f32 = 720.0;
 const ROUNDED_AVATAR_CACHE_MAX_ENTRIES: usize = 32;
 const PROFILE_POPUP_FOCUS_FIRST_KEY: &str = "top_bar_profile_popup_focus_first";
 const PROFILE_POPUP_OWNER_FOCUS_KEY: &str = "top_bar_profile_popup_owner_focus";
+const PROFILE_POPUP_COLOR_EDITOR_KEY: &str = "top_bar_profile_popup_color_editor";
 
 #[derive(Debug, Clone, Default)]
 pub struct TopBarOutput {

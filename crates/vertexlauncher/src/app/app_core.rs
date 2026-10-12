@@ -121,6 +121,7 @@ pub(super) struct VertexApp {
     pub(super) discover_install_results:
         launcher_runtime::WorkerChannel<import_instance_modal::ImportTaskResult>,
     pub(super) auth: AuthState,
+    pub(super) obs_watcher: obs_detection::ObsWatcher,
     pub(super) startup_graphics: platform::StartupGraphicsConfig,
     pub(super) text_ui: TextUi,
     pub(super) config_save_in_flight: bool,
@@ -248,7 +249,7 @@ impl VertexApp {
                 InstanceStore::default()
             }
         };
-        let streamer_mode_enabled = config.streamer_mode_enabled();
+        let obs_detection_enabled = config.obs_detection_enabled();
         if app_metadata::try_settings_info().is_none() {
             let _ = tokio_runtime::spawn_blocking_detached(app_metadata::preload_settings_info);
         }
@@ -294,7 +295,8 @@ impl VertexApp {
             pending_curseforge_manual_download: None,
             discover_install_progress: Default::default(),
             discover_install_results: Default::default(),
-            auth: AuthState::load(streamer_mode_enabled),
+            auth: AuthState::load(),
+            obs_watcher: obs_detection::ObsWatcher::spawn(&cc.egui_ctx, obs_detection_enabled),
             startup_graphics,
             text_ui,
             config_save_in_flight: false,
@@ -329,11 +331,12 @@ impl VertexApp {
 
         let previous_config = self.config.clone();
         let previous_instance_store = self.instance_store.clone();
+        self.poll_obs_detection();
         self.poll_task_results();
         self.apply_config_appearance(ctx);
         let _ = self.handle_escape(ctx);
 
-        let streamer_mode = self.config.streamer_mode_enabled();
+        let streamer_mode = self.streamer_mode_active();
         let top_bar_output = self.render_top_bar_and_notifications(ctx, streamer_mode);
         self.apply_top_bar_sign_in_actions(&top_bar_output);
         let previous_active_screen = self.active_screen;

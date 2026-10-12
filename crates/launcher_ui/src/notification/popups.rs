@@ -5,7 +5,7 @@ use textui::TextUi;
 use textui_egui::interaction;
 use textui_egui::prelude::*;
 
-use crate::ui::style;
+use crate::ui::{account_label::account_label, style};
 
 pub fn render_popups(
     ctx: &egui::Context,
@@ -14,6 +14,7 @@ pub fn render_popups(
     suppressed_progress_source: Option<&str>,
 ) {
     drain_notifications(settings.fade_out);
+    let streamer_mode = streamer_mode_enabled();
 
     let entries = {
         let Ok(store) = center().store.lock() else {
@@ -180,29 +181,38 @@ pub fn render_popups(
                         ui.add(
                             egui::ProgressBar::new(progress).desired_width(ui.available_width()),
                         );
-                        let _ = text_ui.label(
+                        let _ = account_label(
                             ui,
+                            text_ui,
                             ("notif-progress-message", index),
                             overlay.as_str(),
                             &message_style,
+                            streamer_mode,
+                            false,
                         );
                     } else if entry.spinner {
                         ui.horizontal_wrapped(|ui| {
                             ui.spinner();
                             ui.add_space(6.0);
-                            let _ = text_ui.label(
+                            let _ = account_label(
                                 ui,
+                                text_ui,
                                 ("notif-spinner-message", index),
                                 entry.message.as_str(),
                                 &message_style,
+                                streamer_mode,
+                                false,
                             );
                         });
                     } else {
-                        let _ = text_ui.label(
+                        let _ = account_label(
                             ui,
+                            text_ui,
                             ("notif-message", index),
                             entry.message.as_str(),
                             &message_style,
+                            streamer_mode,
+                            false,
                         );
                     }
 

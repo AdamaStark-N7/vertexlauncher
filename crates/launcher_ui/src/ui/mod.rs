@@ -1,3 +1,5 @@
+pub mod account_color;
+pub mod account_label;
 pub mod color;
 pub mod components;
 pub mod context_menu;

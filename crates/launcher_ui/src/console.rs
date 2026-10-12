@@ -135,7 +135,14 @@ pub fn ensure_instance_tab(
     } else {
         trimmed_user
     };
-    let label = format!("{instance} for {user}");
+    // The account is a mention, so the tab hides the name whenever streamer mode is on, however
+    // the tab was opened. A missing name is just "Player", which reveals nothing.
+    let user_text = if trimmed_user.is_empty() {
+        user.to_owned()
+    } else {
+        crate::account_text::mention(user_key.map_or("", str::trim), user)
+    };
+    let label = format!("{instance} for {user_text}");
     let normalized_instance_root = normalize_instance_root_key(instance_root);
     let normalized_user_identity =
         normalize_tab_user_identity(user_key).or_else(|| normalize_tab_user_identity(Some(user)));

@@ -256,6 +256,8 @@ finish-args:
   # D-Bus: session bus needed by WebKitGTK (wry)
   - --socket=session-bus
   - --talk-name=org.freedesktop.secrets
+  # Host commands through flatpak-spawn: opening links and folders, and finding OBS in the
+  # host's process list (the sandbox cannot see host processes).
   - --talk-name=org.freedesktop.Flatpak
   - --talk-name=org.freedesktop.NetworkManager
 
@@ -368,6 +370,8 @@ finish-args:
   # proxy, and IPC between WebKit sub-processes inside the Flatpak sandbox
   - --socket=session-bus
   - --talk-name=org.freedesktop.secrets
+  # Host commands through flatpak-spawn: opening links and folders, and finding OBS in the
+  # host's process list (the sandbox cannot see host processes).
   - --talk-name=org.freedesktop.Flatpak
   - --talk-name=org.freedesktop.NetworkManager
 

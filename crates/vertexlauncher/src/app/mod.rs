@@ -55,6 +55,7 @@ mod gamepad_calibration_modal;
 mod import_flow;
 mod import_instance_modal;
 mod native_options;
+mod obs_detection;
 mod persistence;
 mod platform;
 mod single_instance;

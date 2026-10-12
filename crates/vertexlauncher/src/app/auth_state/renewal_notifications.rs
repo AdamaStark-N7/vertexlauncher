@@ -1,5 +1,6 @@
 use super::*;
 
+use launcher_ui::account_text::mention;
 use launcher_ui::notification::natural_language::{capitalize_first, join_natural, pluralize_for};
 use launcher_ui::notification::{NotificationBuilder, Severity, retract_from_stack};
 
@@ -13,20 +14,25 @@ const NOTIFICATION_SOURCE: &str = "Login Renewal";
 /// Shows renewal progress and results. Accounts renewing or finishing around the same time share
 /// one notification each for "renewing", "renewed" and "failed", worded for however many there
 /// are, instead of one popup per account.
-pub(super) fn emit_cached_account_renewal_notification(
-    event: CachedAccountRenewalEvent,
-    streamer_mode: bool,
-) {
+pub(super) fn emit_cached_account_renewal_notification(event: CachedAccountRenewalEvent) {
+    // Accounts are written as mentions, so the notification hides (and highlights) them whenever
+    // streamer mode is on at the time it is drawn.
     match event {
-        CachedAccountRenewalEvent::Started { display_name, .. } => {
-            let name = privacy::redact_account_label(streamer_mode, &display_name).into_owned();
+        CachedAccountRenewalEvent::Started {
+            profile_id,
+            display_name,
+        } => {
+            let name = mention(&profile_id, &display_name);
             NotificationBuilder::new(Severity::Info, NOTIFICATION_SOURCE, String::new())
                 .spinner()
                 .stack(RENEWING_KEY, vec![name], renewing_message)
                 .emit();
         }
-        CachedAccountRenewalEvent::Succeeded { display_name, .. } => {
-            let name = privacy::redact_account_label(streamer_mode, &display_name).into_owned();
+        CachedAccountRenewalEvent::Succeeded {
+            profile_id,
+            display_name,
+        } => {
+            let name = mention(&profile_id, &display_name);
             retract_from_stack(RENEWING_KEY, vec![name.clone()]);
             NotificationBuilder::new(Severity::Info, NOTIFICATION_SOURCE, String::new())
                 .stack(RENEWED_KEY, vec![name], renewed_message)
@@ -37,7 +43,7 @@ pub(super) fn emit_cached_account_renewal_notification(
             display_name,
             error,
         } => {
-            let name = privacy::redact_account_label(streamer_mode, &display_name).into_owned();
+            let name = mention(&profile_id, &display_name);
             tracing::warn!(
                 target: "vertexlauncher/auth/renew",
                 profile_fingerprint = %webview_sign_in::fingerprint_for_log(&profile_id),
@@ -134,6 +140,31 @@ mod tests {
             renewed_message(&names(&["Steve", "Alex", "Zoe"])),
             "Login tokens for Steve, Alex, and Zoe renewed successfully, you are now ready to play!"
         );
+    }
+
+    #[test]
+    fn mentioned_accounts_read_as_names_or_hide_in_streamer_mode() {
+        use launcher_ui::account_text::{mention, plain};
+        let steve = mention("id-steve", "Steve");
+        let alex = mention("id-alex", "Alex");
+
+        let renewing = renewing_message(&[steve.clone(), alex.clone()]);
+        assert_eq!(
+            plain(&renewing, false),
+            "Renewing login tokens for Steve and Alex"
+        );
+        assert_eq!(
+            plain(&renewing, true),
+            "Renewing login tokens for Hidden Account and Hidden Account"
+        );
+
+        let failed = failure_message(&[failure(&steve, "offline")]);
+        assert_eq!(
+            plain(&failed, false),
+            "Error in attempting to renew login for Steve: offline"
+        );
+        let shown = plain(&failed, true);
+        assert!(!shown.contains("Steve"), "{shown}");
     }
 
     #[test]

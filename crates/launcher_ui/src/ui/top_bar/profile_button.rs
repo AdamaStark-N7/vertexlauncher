@@ -155,7 +155,10 @@ pub(super) fn render_active_user_terminal_button(
     let full_label = "player active";
     let short_label = "active";
     let label = if compact { short_label } else { full_label };
-    let label_width = text_ui.measure_text_size(ui, label, &label_style).x;
+    // Static label: measured and drawn with the same (unscrubbed) text.
+    let label_width =
+        textui_egui::without_name_scrubbing(|| text_ui.measure_text_size(ui, label, &label_style))
+            .x;
     let button_width = button_width.max((chrome_width + label_width).ceil());
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(button_width, button_height),
@@ -194,7 +197,9 @@ pub(super) fn render_active_user_terminal_button(
                 Layout::left_to_right(Align::Center),
                 |ui| {
                     ui.set_clip_rect(ui.max_rect());
-                    let _ = text_ui.label(ui, "topbar_player_active_label", label, &label_style);
+                    let _ = textui_egui::without_name_scrubbing(|| {
+                        text_ui.label(ui, "topbar_player_active_label", label, &label_style)
+                    });
                 },
             );
         });

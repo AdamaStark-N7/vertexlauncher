@@ -15,6 +15,7 @@ use egui::Context;
 use instances::{InstanceStore, instance_root_path};
 use launcher_runtime as tokio_runtime;
 
+use crate::account_text::AccountMention;
 use crate::notification::{self, NotificationAction, Severity};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(2);
@@ -52,9 +53,15 @@ fn state() -> &'static Mutex<WatchState> {
 
 /// Call once per frame. Cheap: the directory listing runs on a blocking worker every few seconds.
 ///
-/// `player_name` should be the account that is playing right now, or `None` when no game is
+/// `player` should be the account that is playing right now, or `None` when no game is
 /// running (e.g. the file was copied in by hand), in which case the notification stays generic.
-pub fn poll(ctx: &Context, instances: &InstanceStore, config: &Config, player_name: Option<&str>) {
+/// The account is mentioned in the notification, so streamer mode hides it when it is drawn.
+pub fn poll(
+    ctx: &Context,
+    instances: &InstanceStore,
+    config: &Config,
+    player: Option<AccountMention<'_>>,
+) {
     let Ok(mut state) = state().lock() else {
         return;
     };
@@ -67,13 +74,14 @@ pub fn poll(ctx: &Context, instances: &InstanceStore, config: &Config, player_na
                 if state.known_files.insert(file.clone()) && !baseline {
                     // Screenshots arriving close together merge into one notification
                     // ("Steve took three screenshots!"); its buttons act on the newest one.
-                    let player = player_name.map(str::to_owned);
-                    let stack_key = format!("screenshots:{}", player.as_deref().unwrap_or(""));
+                    let player_key = player.map(|account| account.id.to_owned());
+                    let player_token = player.map(|account| account.token());
+                    let stack_key = format!("screenshots:{}", player_key.as_deref().unwrap_or(""));
                     let item = file.to_string_lossy().into_owned();
                     notification::NotificationBuilder::new(Severity::Info, "screenshots", "")
                         .actions(screenshot_actions(file))
                         .stack(stack_key, vec![item], move |shots| {
-                            screenshot_message(player.as_deref(), shots.len())
+                            screenshot_message(player_token.as_deref(), shots.len())
                         })
                         .emit();
                 }
@@ -133,6 +141,7 @@ fn list_screenshots(dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// `player` is an account mention (see [`crate::account_text`]).
 fn screenshot_message(player: Option<&str>, count: usize) -> String {
     use notification::natural_language::a_or_count;
     match player {

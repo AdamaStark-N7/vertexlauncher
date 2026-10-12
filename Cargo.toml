@@ -35,6 +35,10 @@ default-members = [
     "crates/vertexlauncher",
 ]
 
+[workspace.package]
+# The one place the app version lives; every crate inherits it with `version.workspace = true`.
+version = "0.1.22-Alpha"
+
 [workspace.dependencies]
 eframe = { version = "0.34.1", features = ["wgpu", "serde"] }
 egui = { version = "0.34.1", features = ["serde"] }

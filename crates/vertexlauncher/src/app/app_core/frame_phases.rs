@@ -79,7 +79,8 @@ impl VertexApp {
         let playing_as = if running_instance_roots().is_empty() {
             None
         } else {
-            self.screen_launch_auth().map(|context| context.player_name)
+            self.screen_launch_auth()
+                .map(|context| (context.player_uuid, context.player_name))
         };
         if let Some(screen) = screens::take_requested_screen(ctx) {
             tracing::info!(
@@ -94,7 +95,9 @@ impl VertexApp {
             ctx,
             &self.instance_store,
             &self.config,
-            playing_as.as_deref(),
+            playing_as
+                .as_ref()
+                .map(|(id, name)| launcher_ui::account_text::AccountMention { id, name }),
         );
         console::prune_instance_tabs(&running_instance_roots());
         apply_install_activity_os_feedback(ctx, frame);
@@ -121,9 +124,11 @@ impl VertexApp {
         self.sync_theme_from_config();
         self.theme
             .apply(ctx, effective_ui_opacity_percent(&self.config));
-        self.auth
-            .set_streamer_mode(self.config.streamer_mode_enabled());
-        notification::set_streamer_mode(self.config.streamer_mode_enabled());
+        let streamer_mode = self.streamer_mode_active();
+        notification::set_streamer_mode(streamer_mode);
+        // Everything the UI draws is filtered through this, so names stay hidden in streamer mode
+        // whatever produced the text.
+        launcher_ui::privacy::update_hidden_names(streamer_mode, self.auth.account_names());
         self.fonts
             .ensure_selected_font_is_available(&mut self.config);
         self.fonts
@@ -538,12 +543,15 @@ impl VertexApp {
         if !self.show_config_format_modal {
             return;
         }
-        match config_format_modal::render(
-            ctx,
-            &mut self.text_ui,
-            &mut self.selected_config_format,
-            self.config_creation_error.as_deref(),
-        ) {
+        // Static dialog text only; nothing here can show an account name.
+        match textui_adapter::without_name_scrubbing(|| {
+            config_format_modal::render(
+                ctx,
+                &mut self.text_ui,
+                &mut self.selected_config_format,
+                self.config_creation_error.as_deref(),
+            )
+        }) {
             ModalAction::None => {}
             ModalAction::Cancel => self.create_config_with_choice(self.default_config_format),
             ModalAction::Create(choice) => self.create_config_with_choice(choice),
@@ -611,12 +619,14 @@ impl VertexApp {
                 .device_key()
                 .and_then(|device_key| gamepad.current_left_stick(device_key))
         });
-        match gamepad_calibration_modal::render(
-            ctx,
-            &mut self.text_ui,
-            &mut self.gamepad_calibration_state,
-            live_sample,
-        ) {
+        match textui_adapter::without_name_scrubbing(|| {
+            gamepad_calibration_modal::render(
+                ctx,
+                &mut self.text_ui,
+                &mut self.gamepad_calibration_state,
+                live_sample,
+            )
+        }) {
             gamepad_calibration_modal::ModalAction::None => {}
             gamepad_calibration_modal::ModalAction::Cancel => {
                 self.show_gamepad_calibration_modal = false;

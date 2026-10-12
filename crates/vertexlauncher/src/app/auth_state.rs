@@ -3,7 +3,7 @@ use auth::{
     DeviceCodePrompt, LoginEvent,
 };
 use launcher_runtime as tokio_runtime;
-use launcher_ui::{notification, privacy};
+use launcher_ui::notification;
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
@@ -64,12 +64,11 @@ pub struct AuthState {
     device_code_prompt: Option<DeviceCodePrompt>,
     device_code_expiry: Option<Instant>,
     renewal: Option<Receiver<RenewalResult>>,
-    streamer_mode: bool,
     status: AuthUiStatus,
 }
 
 impl AuthState {
-    pub fn load(streamer_mode: bool) -> Self {
+    pub fn load() -> Self {
         let (avatar_result_tx, avatar_result_rx) = mpsc::channel();
         let (accounts_state, status) = match auth::load_cached_accounts() {
             Ok(state) => (state, AuthUiStatus::Idle),
@@ -101,7 +100,6 @@ impl AuthState {
             device_code_prompt: None,
             device_code_expiry: None,
             renewal: None,
-            streamer_mode,
             status,
         };
 
@@ -290,16 +288,20 @@ impl AuthState {
         self.flow.is_some() || self.device_code_flow.is_some()
     }
 
-    pub fn set_streamer_mode(&mut self, enabled: bool) {
-        self.streamer_mode = enabled;
-    }
-
     pub fn auth_busy(&self) -> bool {
         self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some()
     }
 
     pub fn token_refresh_in_progress(&self) -> bool {
         self.renewal.is_some()
+    }
+
+    /// The Minecraft name of every saved account, for hiding them all in streamer mode.
+    pub fn account_names(&self) -> impl Iterator<Item = &str> {
+        self.accounts_state
+            .accounts
+            .iter()
+            .map(|account| account.minecraft_profile.name.as_str())
     }
 
     pub fn display_name(&self) -> Option<&str> {

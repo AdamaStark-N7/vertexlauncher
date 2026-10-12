@@ -15,6 +15,7 @@ use crate::{
 pub enum ToggleSettingId {
     LowPowerGpuPreferred,
     StreamerModeEnabled,
+    ObsDetectionEnabled,
     OpenTypeFeaturesEnabled,
     NotificationExpiryBarsEmptyLeft,
     SkinPreviewFreshFormatEnabled,
@@ -58,6 +59,13 @@ impl ToggleSettingId {
                 ),
             },
 
+            ToggleSettingId::ObsDetectionEnabled => ToggleSettingSpec {
+                id: ToggleSettingId::ObsDetectionEnabled,
+                label: "Detect OBS",
+                info_tooltip: Some(
+                    "Applies Streamer Mode while OBS is running on this computer, and shows a notification when it starts and when it stops. This is temporary and never changes the Enable Streamer Mode setting: it ends when OBS closes or when you turn this off. OBS is found by its process name. The Flatpak build asks the host for its process list, which uses the host-command permission it ships with (org.freedesktop.Flatpak); a sandbox that hides other programs and has no such permission cannot see OBS. Default: On.",
+                ),
+            },
             ToggleSettingId::OpenTypeFeaturesEnabled => ToggleSettingSpec {
                 id: ToggleSettingId::OpenTypeFeaturesEnabled,
                 label: "Enable OpenType Features",

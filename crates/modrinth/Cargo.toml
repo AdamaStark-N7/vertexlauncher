@@ -1,6 +1,6 @@
 [package]
 name = "modrinth"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -10,5 +10,5 @@ thiserror.workspace = true
 tracing.workspace = true
 ureq.workspace = true
 vertex_constants.workspace = true
-sha1 = "*"
-sha2 = "*"
+sha1 = "0.10"
+sha2 = "0.10"

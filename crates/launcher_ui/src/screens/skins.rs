@@ -18,7 +18,7 @@ use textui_egui::{gamepad_scroll, prelude::*};
 
 use super::LaunchAuthContext;
 use crate::{
-    notification, privacy,
+    notification,
     ui::{components::image_textures, style},
 };
 

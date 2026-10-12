@@ -1,6 +1,6 @@
 [package]
 name = "installation"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -14,6 +14,6 @@ ureq.workspace = true
 reqwest.workspace = true
 tokio.workspace = true
 vertex_constants.workspace = true
-flate2 = "*"
-tar = "*"
-zip = { version = "*", default-features = false, features = ["deflate"] }
+flate2 = "1.1"
+tar = "0.4"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

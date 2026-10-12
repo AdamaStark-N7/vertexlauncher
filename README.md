@@ -15,50 +15,65 @@ Vertex Launcher is a multi-crate desktop launcher with:
 
 ## Building
 
-If you build from source, install:
+A plain `git clone` builds with no extra steps. `Cargo.lock` and the precompiled shader fallbacks are tracked, so everyone resolves the same dependency versions and no shader compiler is required.
 
-- Rust toolchain
-- Cargo
+```sh
+git clone <repo-url> vertexlauncher
+cd vertexlauncher
+cargo build --release --locked
+```
+
+### Requirements on every platform
+
+- Rust 1.92 or newer (edition 2024; `rustup` is the easiest way to get it)
 - Git
-- a working C/C++ toolchain
-- Slang binaries found from `https://shader-slang.org/tools/` or `https://github.com/shader-slang/slang/releases`
+- a C compiler and linker (several crates compile bundled C code: `ring`, `onig_sys`, `lzma-sys`, vendored `libdbus`)
+- optional: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on `PATH`). When it is present the skin-preview shaders are recompiled during the build; when it is not, the tracked WGSL in `crates/launcher_ui/src/screens/shaders/precompiled/` is used. If you edit a `.slang` shader, run `bash scripts/compile-slang-shaders.sh` and commit the refreshed WGSL.
 
-Windows release artifacts must use the MSVC targets. `windows-gnu` is not part of the supported release matrix.
+TLS is done with rustls, so OpenSSL is not needed.
 
-Be sure to add the Slang binaries to your PATH variable, otherwise the app will not successfully compile and build.
+### Linux
 
-## Native Linux Prerequisites
+Native builds need `pkg-config` plus the development packages for GTK 3 and the WebKitGTK 4.1 / libsoup 3 stack used by the embedded Microsoft sign-in webview, and `libudev`. Wayland and X11 libraries are loaded at runtime and are not build dependencies.
 
-On Linux, native launcher builds require GTK, GLib, libsoup 2.4, and the WebKitGTK 4.0 stack that matches the embedded Microsoft sign-in webview.
-
-For Debian/Ubuntu:
+Debian/Ubuntu (22.04+ / Debian 12+):
 
 ```sh
 sudo apt-get update
 sudo apt-get install -y --no-install-recommends \
-  pkg-config \
-  libglib2.0-dev \
-  libgtk-3-dev \
-  libgdk-pixbuf-2.0-dev \
-  libpango1.0-dev \
-  libatk1.0-dev \
-  libcairo2-dev \
-  webkit2gtk-4.1-dev \
-  libwebkit2gtk-4.1-dev \
-  libjavascriptcoregtk-4.0-dev
+  build-essential pkg-config curl git \
+  libglib2.0-dev libgtk-3-dev libgdk-pixbuf-2.0-dev libpango1.0-dev \
+  libatk1.0-dev libcairo2-dev libsoup-3.0-dev \
+  libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libudev-dev
 ```
 
-If your distro has dropped `webkit2gtk-4.1` / `webkit2gtk-4.1`, use the containerized Linux release scripts or Flatpak instead of a host-native build.
-
-Basic native builds:
+Fedora:
 
 ```sh
-cargo build --release
+sudo dnf install gcc gcc-c++ pkgconf-pkg-config git \
+  glib2-devel gtk3-devel gdk-pixbuf2-devel pango-devel atk-devel cairo-devel \
+  libsoup3-devel webkit2gtk4.1-devel javascriptcoregtk4.1-devel systemd-devel
 ```
 
-Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that will inherit the host glibc baseline and the host GTK/WebKit stack. The x86-64 release scripts build Linux in a CentOS 7 container so the binary is linked against a `glibc 2.17` baseline instead of your rolling host.
+Arch:
 
-The current Linux UI stack still depends on distro WebKitGTK/GTK libraries, so the final glibc floor is constrained by those packages. To preserve the embedded Microsoft sign-in webview while restoring a `glibc 2.17` floor on x86-64, the launcher is pinned to the last `wry` line that still uses `webkit2gtk-4.1` with WebKitGTK 4.0, and the Linux container scripts target CentOS 7 where that WebKitGTK stack is still available. That upstream `wry` line currently needs a one-line compatibility patch against the modern `webkit2gtk` Rust bindings, so native Linux builds should run `bash scripts/patch-wry-source.sh` once before `cargo build`. The containerized Linux/AppImage helpers run that patch step automatically. The x86-64 container helper prints the highest required glibc symbol version after each build and now defaults to enforcing `VERTEX_MAX_GLIBC_VERSION=2.17`.
+```sh
+sudo pacman -S --needed base-devel pkgconf git gtk3 webkit2gtk-4.1 libsoup3 systemd-libs
+```
+
+The binary also needs a working GPU driver at runtime (Vulkan or OpenGL). If your distribution does not ship `webkit2gtk-4.1`, build with the containerized scripts below or use the Flatpak.
+
+### Windows
+
+Install the Visual Studio Build Tools (the "Desktop development with C++" workload, which includes the Windows SDK) and Rust's `x86_64-pc-windows-msvc` / `aarch64-pc-windows-msvc` target. `windows-gnu` is not part of the supported release matrix.
+
+### macOS
+
+Install the Xcode Command Line Tools (`xcode-select --install`). Only Apple Silicon (`aarch64-apple-darwin`) is part of the release matrix.
+
+### Portable Linux builds
+
+Linux release binaries should not be built on a rolling distro with plain `cargo build`, because that inherits the host glibc baseline and the host GTK/WebKit stack. The x86-64 release scripts build in a CentOS 7 container so the binary links against a `glibc 2.17` baseline, and print the highest required glibc symbol version after each build (enforcing `VERTEX_MAX_GLIBC_VERSION=2.17` by default). Dependency versions are fixed by `Cargo.lock`; native builds need no source patching (the container scripts still run `scripts/patch-wry-source.sh`, which is a no-op when the locked `wry` does not need it).
 
 If you want the portable Linux deliverables instead of a host-linked binary, use the dedicated helper:
 

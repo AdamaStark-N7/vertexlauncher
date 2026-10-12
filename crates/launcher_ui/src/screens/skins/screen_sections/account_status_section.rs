@@ -14,14 +14,20 @@ pub(super) fn render_account_status_section(
     let muted = style::muted(ui);
 
     if let Some(name) = state.active_player_name.as_deref() {
-        let _ = text_ui.label(
+        let _ = crate::ui::account_label::account_label(
             ui,
+            text_ui,
             "skins_active_user",
             &format!(
                 "Active account: {}",
-                privacy::redact_account_label(streamer_mode, name)
+                crate::account_text::mention(
+                    state.active_profile_id.as_deref().unwrap_or(""),
+                    name
+                )
             ),
             &body,
+            streamer_mode,
+            false,
         );
         true
     } else {

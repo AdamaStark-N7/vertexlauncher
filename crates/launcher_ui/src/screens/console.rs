@@ -108,7 +108,7 @@ fn edge_autoscroll_speed(pointer_pos: f32, min: f32, max: f32, margin: f32) -> f
     normalized.signum() * eased * LOG_SELECTION_AUTOSCROLL_MAX_SPEED
 }
 
-pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
+pub fn render(ui: &mut Ui, text_ui: &mut TextUi, streamer_mode: bool) {
     let snapshot = console::snapshot();
     let lines = &snapshot.active_lines;
     let viewport_size = vec2(
@@ -125,7 +125,7 @@ pub fn render(ui: &mut Ui, text_ui: &mut TextUi) {
                 vec2(inner_width, ui.available_height().max(1.0)),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    render_tabs_row(ui, text_ui, &snapshot);
+                    render_tabs_row(ui, text_ui, &snapshot, streamer_mode);
                     ui.add_space(style::SPACE_MD);
                     egui::Frame::new()
                         .fill(ui.visuals().widgets.noninteractive.bg_fill)
@@ -1029,7 +1029,12 @@ fn render_virtualized_log_lines(
     });
 }
 
-fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::ConsoleSnapshot) {
+fn render_tabs_row(
+    ui: &mut Ui,
+    text_ui: &mut TextUi,
+    snapshot: &console::ConsoleSnapshot,
+    streamer_mode: bool,
+) {
     let want_tab_focus = take_console_tab_focus_request(ui.ctx());
     egui::ScrollArea::horizontal()
         .scroll_source(modal_host::drag_scroll_source())
@@ -1061,11 +1066,14 @@ fn render_tabs_row(ui: &mut Ui, text_ui: &mut TextUi, snapshot: &console::Consol
                                 let mut label_style = style::body(ui);
                                 label_style.wrap = false;
                                 label_style.weight = if selected { 700 } else { 500 };
-                                let label_response = text_ui.clickable_label(
+                                let label_response = crate::ui::account_label::account_label(
                                     ui,
+                                    text_ui,
                                     ("console_tab_label", tab.id.as_str()),
                                     tab.label.as_str(),
                                     &label_style,
+                                    streamer_mode,
+                                    true,
                                 );
                                 if label_response.clicked() {
                                     console::set_active_tab(tab.id.as_str());

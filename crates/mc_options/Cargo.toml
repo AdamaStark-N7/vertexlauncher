@@ -1,8 +1,8 @@
 [package]
 name = "mc_options"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
 serde_json.workspace = true
-zip = { version = "*", default-features = false, features = ["deflate"] }
+zip = { version = "8.6", default-features = false, features = ["deflate"] }

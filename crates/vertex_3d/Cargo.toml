@@ -1,6 +1,6 @@
 [package]
 name = "vertex_3d"
-version = "0.1.0"
+version.workspace = true
 edition = "2024"
 description = "A reusable 3D rendering framework with shaders, meshes, and configurable post-processing pipeline"
 license = "MIT"

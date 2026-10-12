@@ -284,16 +284,10 @@ pub(in super::super) fn render_runtime_row(
                         saved.is_some_and(|instance| instance.java_override_enabled);
                     let java_override_runtime_major =
                         saved.and_then(|instance| instance.java_override_runtime_major);
+                    // The real name: it is hidden when drawn (see `account_text`), not here.
                     state.launch_username = launch_display_name
-                        .as_deref()
-                        .map(|value| {
-                            privacy::redact_account_label(streamer_mode, value).into_owned()
-                        })
-                        .or_else(|| {
-                            launch_account.as_deref().map(|value| {
-                                privacy::redact_account_label(streamer_mode, value).into_owned()
-                            })
-                        });
+                        .clone()
+                        .or_else(|| launch_account.clone());
                     state.launch_user_key = launch_player_uuid
                         .clone()
                         .or_else(|| launch_account.clone())
@@ -382,13 +376,18 @@ pub(in super::super) fn render_runtime_row(
     if launch_disabled_for_account {
         let blocked_account = launch_display_name
             .as_deref()
-            .map(|value| privacy::redact_account_label(streamer_mode, value))
-            .unwrap_or_else(|| "this account".into());
-        let _ = text_ui.label(
+            .map(|name| {
+                crate::account_text::mention(launch_player_uuid.as_deref().unwrap_or(""), name)
+            })
+            .unwrap_or_else(|| "this account".to_owned());
+        let _ = crate::ui::account_label::account_label(
             ui,
+            text_ui,
             ("instance_runtime_account_locked", id),
             &format!("{blocked_account} is already running another instance."),
             &muted_style,
+            streamer_mode,
+            false,
         );
     }
     if launch_disabled_for_missing_ownership {

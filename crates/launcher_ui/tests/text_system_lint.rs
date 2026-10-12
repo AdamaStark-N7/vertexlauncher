@@ -28,6 +28,79 @@ const FORBIDDEN: &[(&str, &str)] = &[
     ),
     ("layout_job(", "egui text layout; use textui"),
     ("layout_no_wrap(", "egui text layout; measure with textui"),
+    // egui widgets and helpers that draw text with egui's own fonts and renderer.
+    ("ui.label(", "egui text; use text_ui.label"),
+    (
+        "ui.heading(",
+        "egui text; use text_ui.label with a text role",
+    ),
+    ("ui.small(", "egui text; use text_ui.label with a text role"),
+    (
+        "ui.monospace(",
+        "egui text; use text_ui.label with monospace",
+    ),
+    (
+        "ui.strong(",
+        "egui text; use text_ui.label with a text role",
+    ),
+    ("ui.weak(", "egui text; use text_ui.label with a text role"),
+    ("ui.colored_label(", "egui text; use text_ui.label"),
+    ("ui.hyperlink(", "egui text; use text_ui.clickable_label"),
+    ("ui.link(", "egui text; use text_ui.clickable_label"),
+    ("ui.button(", "egui text; use text_ui.button"),
+    ("ui.small_button(", "egui text; use text_ui.button"),
+    (
+        "ui.checkbox(",
+        "egui text; use settings_widgets::toggle_row",
+    ),
+    ("ui.radio(", "egui text; use a textui choice control"),
+    ("ui.radio_value(", "egui text; use a textui choice control"),
+    (
+        "ui.selectable_label(",
+        "egui text; use text_ui.selectable_button",
+    ),
+    (
+        "ui.selectable_value(",
+        "egui text; use text_ui.selectable_button",
+    ),
+    (
+        "ui.text_edit_singleline(",
+        "egui text input; use text_ui.singleline_input",
+    ),
+    (
+        "ui.text_edit_multiline(",
+        "egui text input; use text_ui.multiline_input",
+    ),
+    ("egui::TextEdit", "egui text input; use a textui input"),
+    (
+        "egui::ComboBox",
+        "egui text; use the settings_widgets dropdowns",
+    ),
+    ("egui::Hyperlink", "egui text; use text_ui.clickable_label"),
+    (
+        "egui::Checkbox",
+        "egui text; use settings_widgets::toggle_row",
+    ),
+    (
+        "egui::RadioButton",
+        "egui text; use a textui choice control",
+    ),
+    (
+        "egui::Window::new",
+        "egui window titles are egui text; use crate::ui::modal",
+    ),
+    (
+        "egui::CollapsingHeader",
+        "egui text; build the header with textui",
+    ),
+    (
+        "painter.text(",
+        "egui text; paint with text_ui (paint_rich_line or a label)",
+    ),
+    (
+        "painter().text(",
+        "egui text; paint with text_ui (paint_rich_line or a label)",
+    ),
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -49,10 +122,14 @@ fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn contains_token(line: &str, needle: &str) -> bool {
     let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     line.match_indices(needle).any(|(at, _)| {
+        // A needle that starts with an identifier character must start a token, so
+        // `ui.label(` does not match `text_ui.label(`.
+        let starts_token = needle.chars().next().is_some_and(is_ident);
+        let before_ok =
+            !starts_token || line[..at].chars().next_back().is_none_or(|c| !is_ident(c));
         if needle.ends_with('(') {
-            return true;
+            return before_ok;
         }
-        let before_ok = line[..at].chars().next_back().is_none_or(|c| !is_ident(c));
         let after_ok = line[at + needle.len()..]
             .chars()
             .next()
@@ -78,6 +155,9 @@ fn ui_text_goes_through_textui_and_text_roles() {
     let mut files = Vec::new();
     rust_files(&manifest.join("src"), &mut files);
     rust_files(&manifest.join("../vertexlauncher/src"), &mut files);
+    // Other crates that build UI. (`textui_egui` is the text backend itself, so it is not scanned.)
+    rust_files(&manifest.join("../ui_foundation/src"), &mut files);
+    rust_files(&manifest.join("../modal_host/src"), &mut files);
 
     let mut violations = Vec::new();
     for file in files {

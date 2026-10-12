@@ -1,6 +1,6 @@
 [package]
 name = "vtmpack"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -9,9 +9,9 @@ managed_content.workspace = true
 modrinth.workspace = true
 ureq.workspace = true
 serde.workspace = true
-sha2 = "*"
+sha2 = "0.10"
 toml.workspace = true
 tracing.workspace = true
 vertex_constants.workspace = true
-tar = "*"
-xz2 = "*"
+tar = "0.4"
+xz2 = "0.1"

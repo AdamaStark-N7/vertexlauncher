@@ -150,7 +150,10 @@ fn render_settings_contents(
                 ui,
                 text_ui,
                 config,
-                &[config::ToggleSettingId::StreamerModeEnabled],
+                &[
+                    config::ToggleSettingId::StreamerModeEnabled,
+                    config::ToggleSettingId::ObsDetectionEnabled,
+                ],
             );
             render_insecure_storage_setting(ui, text_ui, config);
         },

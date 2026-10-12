@@ -17,6 +17,8 @@ add-extensions:
     autoprune-unless: active-gl-driver
 finish-args:
   - --share=network
+  - --share=ipc
+  - --socket=pulseaudio
   - --socket=x11
   - --socket=wayland
   - --device=all

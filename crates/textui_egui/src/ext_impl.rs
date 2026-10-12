@@ -1,4 +1,5 @@
 use super::*;
+use crate::text_scrubber::{scrub, scrub_spans};
 
 impl TextUiEguiExt for TextUi {
     fn paint_rich_line<H: Hash>(
@@ -10,6 +11,8 @@ impl TextUiEguiExt for TextUi {
         spans: &[RichTextSpan],
         options: &LabelOptions,
     ) -> Vec2 {
+        let spans = scrub_spans(spans);
+        let spans = spans.as_ref();
         let scale = ui.ctx().pixels_per_point();
         let cache_id = ui.make_persistent_id((&id_source, "textui_rich_line_scene"));
         let mut hasher = DefaultHasher::new();
@@ -54,6 +57,8 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &TooltipOptions,
     ) {
+        let text = scrub(text);
+        let text = text.as_ref();
         tooltip_at_impl(
             self,
             ctx,
@@ -72,6 +77,8 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &LabelOptions,
     ) -> Response {
+        let text = scrub(text);
+        let text = text.as_ref();
         label_impl(self, ui, id_source, text, options, Sense::hover(), true)
     }
 
@@ -82,6 +89,8 @@ impl TextUiEguiExt for TextUi {
         code: &str,
         options: &CodeBlockOptions,
     ) -> Response {
+        let code = scrub(code);
+        let code = code.as_ref();
         code_block_impl(self, ui, id_source, code, options, true)
     }
 
@@ -92,6 +101,8 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &LabelOptions,
     ) -> Response {
+        let text = scrub(text);
+        let text = text.as_ref();
         label_impl(self, ui, id_source, text, options, Sense::hover(), false)
     }
 
@@ -102,10 +113,14 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &LabelOptions,
     ) -> Response {
+        let text = scrub(text);
+        let text = text.as_ref();
         label_impl(self, ui, id_source, text, options, Sense::click(), false)
     }
 
     fn measure_text_size_ctx(&mut self, ctx: &Context, text: &str, options: &LabelOptions) -> Vec2 {
+        let text = scrub(text);
+        let text = text.as_ref();
         self.measure_text_size_at_scale(
             ctx.pixels_per_point(),
             text,
@@ -115,6 +130,8 @@ impl TextUiEguiExt for TextUi {
     }
 
     fn measure_text_size(&mut self, ui: &Ui, text: &str, options: &LabelOptions) -> Vec2 {
+        let text = scrub(text);
+        let text = text.as_ref();
         self.measure_text_size_at_scale(
             ui.ctx().pixels_per_point(),
             text,
@@ -131,6 +148,8 @@ impl TextUiEguiExt for TextUi {
         options: &LabelOptions,
         width_points_opt: Option<f32>,
     ) -> TextTextureHandle {
+        let text = scrub(text);
+        let text = text.as_ref();
         let scale = ctx.pixels_per_point();
         let width_points_opt = normalize_wrapped_width(width_points_opt, scale);
         let fingerprint = hash_label_scene_request(text, options, width_points_opt, scale);
@@ -163,6 +182,8 @@ impl TextUiEguiExt for TextUi {
         options: &LabelOptions,
         width_points_opt: Option<f32>,
     ) -> TextTextureHandle {
+        let spans = scrub_spans(spans);
+        let spans = spans.as_ref();
         let scale = ctx.pixels_per_point();
         let width_points_opt = normalize_wrapped_width(width_points_opt, scale);
         let fingerprint = hash_rich_text_scene_request(spans, options, width_points_opt, scale);
@@ -197,6 +218,8 @@ impl TextUiEguiExt for TextUi {
         path: &TextPath,
         path_options: &TextPathOptions,
     ) -> Result<TextPathLayout, TextPathError> {
+        let text = scrub(text);
+        let text = text.as_ref();
         let scene = self.prepare_label_path_gpu_scene_at_scale(
             &id_source,
             text,
@@ -227,6 +250,8 @@ impl TextUiEguiExt for TextUi {
         path: &TextPath,
         path_options: &TextPathOptions,
     ) -> Result<TextPathLayout, TextPathError> {
+        let spans = scrub_spans(spans);
+        let spans = spans.as_ref();
         let scene = self.prepare_rich_text_path_gpu_scene_at_scale(
             &id_source,
             spans,
@@ -270,6 +295,8 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &ButtonOptions,
     ) -> Response {
+        let text = scrub(text);
+        let text = text.as_ref();
         selectable_button_impl(self, ui, id_source, text, false, options)
     }
 
@@ -281,6 +308,8 @@ impl TextUiEguiExt for TextUi {
         selected: bool,
         options: &ButtonOptions,
     ) -> Response {
+        let text = scrub(text);
+        let text = text.as_ref();
         selectable_button_impl(self, ui, id_source, text, selected, options)
     }
 
@@ -292,6 +321,8 @@ impl TextUiEguiExt for TextUi {
         text: &str,
         options: &TooltipOptions,
     ) {
+        let text = scrub(text);
+        let text = text.as_ref();
         tooltip_impl(self, ui, id_source, response, text, options)
     }
 
@@ -302,6 +333,8 @@ impl TextUiEguiExt for TextUi {
         code: &str,
         options: &CodeBlockOptions,
     ) -> Response {
+        let code = scrub(code);
+        let code = code.as_ref();
         code_block_impl(self, ui, id_source, code, options, false)
     }
 
@@ -312,6 +345,8 @@ impl TextUiEguiExt for TextUi {
         markdown: &str,
         options: &MarkdownOptions,
     ) {
+        let markdown = scrub(markdown);
+        let markdown = markdown.as_ref();
         markdown_impl(self, ui, id_source, markdown, options)
     }
 
@@ -344,6 +379,8 @@ impl TextUiEguiExt for TextUi {
         stick_to_bottom: bool,
         wrap: bool,
     ) -> Response {
+        let spans = scrub_spans(spans);
+        let spans = spans.as_ref();
         TextUi::egui_multiline_rich_viewer(
             self,
             ui,

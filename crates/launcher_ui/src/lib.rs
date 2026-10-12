@@ -6,6 +6,8 @@ pub mod app {
     }
 }
 
+pub mod account_colors;
+pub mod account_text;
 pub mod assets;
 pub mod console;
 pub mod desktop;

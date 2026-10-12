@@ -201,6 +201,12 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         .stdin(Stdio::null())
         .stdout(Stdio::from(launch_log_file))
         .stderr(Stdio::from(stderr_log));
+    for (key, value) in packaged_environment_restorations(|key| std::env::var(key).ok()) {
+        match value {
+            Some(value) => command.env(key, value),
+            None => command.env_remove(key),
+        };
+    }
     apply_linux_opengl_driver_env(
         &mut command,
         request.game_version.as_str(),
@@ -291,6 +297,36 @@ pub fn launch_instance(request: &LaunchRequest) -> Result<LaunchResult, Installa
         profile_id,
         launch_log_path,
     })
+}
+
+/// Variables the AppImage's `AppRun` points at its own bundled GTK/WebKit libraries. The game is
+/// not part of the AppImage: it must load the host's GL/Vulkan/OpenCL drivers and the
+/// system's libraries, not the bundled ones. `AppRun` records the host values in
+/// `VERTEX_HOST_*` (an empty value meaning "was unset"), and this puts them back.
+const PACKAGED_ONLY_ENV: &[&str] = &[
+    "APPDIR",
+    "GIO_MODULE_DIR",
+    "GTK_PATH",
+    "GDK_PIXBUF_MODULEDIR",
+    "GDK_PIXBUF_MODULE_FILE",
+    "GSETTINGS_SCHEMA_DIR",
+    "WEBKIT_EXEC_PATH",
+    "WEBKIT_INJECTED_BUNDLE_PATH",
+];
+const PACKAGED_RESTORED_ENV: &[&str] = &["LD_LIBRARY_PATH", "XDG_DATA_DIRS"];
+
+fn packaged_environment_restorations(
+    get: impl Fn(&str) -> Option<String>,
+) -> Vec<(&'static str, Option<String>)> {
+    if get("VERTEX_HOST_ENV_SAVED").as_deref() != Some("1") {
+        return Vec::new();
+    }
+    let mut changes: Vec<_> = PACKAGED_ONLY_ENV.iter().map(|key| (*key, None)).collect();
+    for key in PACKAGED_RESTORED_ENV {
+        let saved = get(&format!("VERTEX_HOST_{key}")).filter(|value| !value.is_empty());
+        changes.push((*key, saved));
+    }
+    changes
 }
 
 #[cfg(target_os = "linux")]
@@ -444,6 +480,31 @@ fn apply_extra_environment_vars(
 
 fn is_valid_environment_key(key: &str) -> bool {
     !key.is_empty() && !key.contains('=') && !key.contains('\0')
+}
+
+#[cfg(test)]
+mod packaged_environment_tests {
+    use super::*;
+
+    #[test]
+    fn outside_an_appimage_nothing_changes() {
+        assert!(packaged_environment_restorations(|_| None).is_empty());
+    }
+
+    #[test]
+    fn appimage_library_paths_are_replaced_by_the_host_values() {
+        let env = |key: &str| match key {
+            "VERTEX_HOST_ENV_SAVED" => Some("1".to_owned()),
+            "VERTEX_HOST_LD_LIBRARY_PATH" => Some("/opt/rocm/lib".to_owned()),
+            "VERTEX_HOST_XDG_DATA_DIRS" => Some(String::new()),
+            _ => None,
+        };
+        let changes = packaged_environment_restorations(env);
+        assert!(changes.contains(&("LD_LIBRARY_PATH", Some("/opt/rocm/lib".to_owned()))));
+        assert!(changes.contains(&("XDG_DATA_DIRS", None)));
+        assert!(changes.contains(&("GTK_PATH", None)));
+        assert!(changes.contains(&("WEBKIT_EXEC_PATH", None)));
+    }
 }
 
 #[cfg(all(test, target_os = "linux"))]

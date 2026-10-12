@@ -16,8 +16,8 @@ fn main() {
 }
 
 fn emit_version_metadata() {
-    let package_version =
-        env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.1.21-Alpha".to_owned());
+    // Cargo always provides the workspace version to build scripts.
+    let package_version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let display_version = format_display_version(&package_version);
     println!("cargo:rustc-env=VERTEX_APP_VERSION={display_version}");
 

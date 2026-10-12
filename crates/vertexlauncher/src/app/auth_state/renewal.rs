@@ -166,7 +166,6 @@ impl AuthState {
         }
 
         let (tx, rx) = mpsc::channel::<RenewalResult>();
-        let streamer_mode = self.streamer_mode;
         let _ = tokio_runtime::spawn_blocking_detached(move || {
             let mut failed_account_errors = HashMap::new();
             let mut succeeded_profile_ids = HashSet::new();
@@ -183,7 +182,7 @@ impl AuthState {
                     }
                     CachedAccountRenewalEvent::Started { .. } => {}
                 }
-                emit_cached_account_renewal_notification(event, streamer_mode);
+                emit_cached_account_renewal_notification(event);
             })
             .map_err(|err| err.to_string());
             if let Err(err) = tx.send(RenewalResult::Bulk {

@@ -58,7 +58,7 @@ use crate::ui::{
     },
     modal, style,
 };
-use crate::{assets, console, install_activity, notification, privacy};
+use crate::{assets, console, install_activity, notification};
 
 mod content;
 mod content_lookup_result;

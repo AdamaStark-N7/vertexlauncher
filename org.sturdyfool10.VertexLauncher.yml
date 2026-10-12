@@ -29,7 +29,7 @@ finish-args:
   - --share=ipc
   - --share=network
   - --socket=pulseaudio
-  - --filesystem=home
+  - --filesystem=host
   - --filesystem=xdg-config/vertexlauncher
   - --filesystem=xdg-data/vertexlauncher
   - --filesystem=xdg-cache/vertexlauncher

@@ -2,7 +2,13 @@ use super::*;
 use textui_egui::prelude::*;
 use ui_foundation::popup_width;
 
-use crate::{privacy, ui::components::settings_widgets};
+use crate::{
+    privacy,
+    ui::{account_color, components::settings_widgets},
+};
+
+use super::account_color_editor::render_account_color_editor;
+use crate::{account_text::mention, ui::account_label::account_label};
 
 /// Tracks which popup control should take gamepad focus when the popup opens, plus the
 /// hand-off that returns focus to the profile button once the popup closes.
@@ -82,25 +88,29 @@ pub(super) fn render_profile_popup(
     render_profile_header(ui, text_ui, profile_ui);
 
     if let Some(prompt) = profile_ui.device_code_prompt {
-        render_device_code_section(
-            ui,
-            text_ui,
-            prompt,
-            output,
-            full_action_width,
-            &button_style,
-        );
+        textui_egui::without_name_scrubbing(|| {
+            render_device_code_section(
+                ui,
+                text_ui,
+                prompt,
+                output,
+                full_action_width,
+                &button_style,
+            )
+        });
         return;
     }
 
     if !profile_ui.accounts.is_empty() {
         ui.add_space(style::SPACE_XS / 2.0);
-        let _ = text_ui.label(
-            ui,
-            "profile_popup_accounts_title",
-            "Saved accounts",
-            &muted_style,
-        );
+        let _ = textui_egui::without_name_scrubbing(|| {
+            text_ui.label(
+                ui,
+                "profile_popup_accounts_title",
+                "Saved accounts (right-click to set a color)",
+                &muted_style,
+            )
+        });
         render_saved_accounts(ui, text_ui, profile_ui, output, &mut focus, &button_style);
     }
 
@@ -108,15 +118,17 @@ pub(super) fn render_profile_popup(
     ui.separator();
     ui.add_space(style::SPACE_XS / 2.0);
 
-    render_sign_in_actions(
-        ui,
-        text_ui,
-        profile_ui,
-        output,
-        &mut focus,
-        &button_style,
-        full_action_width,
-    );
+    textui_egui::without_name_scrubbing(|| {
+        render_sign_in_actions(
+            ui,
+            text_ui,
+            profile_ui,
+            output,
+            &mut focus,
+            &button_style,
+            full_action_width,
+        )
+    });
 }
 
 /// Frame at the top of the popup: signed-in account name and, outside device-code mode, the
@@ -131,20 +143,29 @@ fn render_profile_header(ui: &mut egui::Ui, text_ui: &mut TextUi, profile_ui: Pr
         .inner_margin(egui::Margin::same(style::SPACE_LG as i8))
         .show(ui, |ui| {
             if let Some(name) = profile_ui.display_name {
-                let redacted_name = privacy::redact_account_label(profile_ui.streamer_mode, name);
-                let _ = text_ui.label(
+                let active_id = profile_ui
+                    .accounts
+                    .iter()
+                    .find(|account| account.is_active)
+                    .map_or("", |account| account.profile_id.as_str());
+                let _ = account_label(
                     ui,
+                    text_ui,
                     "profile_popup_signed_in",
-                    &format!("Signed in as {redacted_name}"),
+                    &format!("Signed in as {}", mention(active_id, name)),
                     &heading_style,
+                    profile_ui.streamer_mode,
+                    false,
                 );
             } else {
-                let _ = text_ui.label(
-                    ui,
-                    "profile_popup_signed_out",
-                    "No Microsoft account signed in",
-                    &heading_style,
-                );
+                let _ = textui_egui::without_name_scrubbing(|| {
+                    text_ui.label(
+                        ui,
+                        "profile_popup_signed_out",
+                        "No Microsoft account signed in",
+                        &heading_style,
+                    )
+                });
             }
 
             if profile_ui.device_code_prompt.is_none() {
@@ -157,6 +178,7 @@ fn render_profile_header(ui: &mut egui::Ui, text_ui: &mut TextUi, profile_ui: Pr
 
 /// Label for a saved account row, with the active/failed suffix.
 fn saved_account_label(profile_ui: ProfileUiModel<'_>, account: &ProfileAccountOption) -> String {
+    // account-text: allow (button text cannot draw a mention; the row is tinted instead)
     let redacted =
         privacy::redact_account_label(profile_ui.streamer_mode, account.display_name.as_str());
     if account.is_active && account.is_failed {
@@ -192,8 +214,14 @@ fn render_saved_accounts(
             let mut refresh_button_style = button_style.clone();
             refresh_button_style.min_size = egui::vec2(78.0, style::CONTROL_HEIGHT);
 
+            let editor_key = egui::Id::new((PROFILE_POPUP_COLOR_EDITOR_KEY, focus.popup_id));
+            let mut editing_account = ui
+                .data_mut(|data| data.get_temp::<String>(editor_key))
+                .unwrap_or_default();
+
             for account in profile_ui.accounts {
                 let label = saved_account_label(profile_ui, account);
+                let mut toggle_color_editor = false;
 
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), style::CONTROL_HEIGHT),
@@ -202,12 +230,14 @@ fn render_saved_accounts(
                         if account.is_failed {
                             let refresh_response = ui
                                 .add_enabled_ui(!profile_ui.auth_busy, |ui| {
-                                    text_ui.button(
-                                        ui,
-                                        ("profile_popup_account_refresh", &account.profile_id),
-                                        "Refresh",
-                                        &refresh_button_style,
-                                    )
+                                    textui_egui::without_name_scrubbing(|| {
+                                        text_ui.button(
+                                            ui,
+                                            ("profile_popup_account_refresh", &account.profile_id),
+                                            "Refresh",
+                                            &refresh_button_style,
+                                        )
+                                    })
                                 })
                                 .inner;
                             focus.offer(&refresh_response);
@@ -217,12 +247,14 @@ fn render_saved_accounts(
                             }
                         }
 
-                        let remove_response = text_ui.button(
-                            ui,
-                            ("profile_popup_account_remove", &account.profile_id),
-                            "Remove",
-                            &remove_button_style,
-                        );
+                        let remove_response = textui_egui::without_name_scrubbing(|| {
+                            text_ui.button(
+                                ui,
+                                ("profile_popup_account_remove", &account.profile_id),
+                                "Remove",
+                                &remove_button_style,
+                            )
+                        });
                         focus.offer(&remove_response);
                         if remove_response.clicked() {
                             output.remove_account_id = Some(account.profile_id.clone());
@@ -232,6 +264,16 @@ fn render_saved_accounts(
                         ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                             let mut fill_style = list_button_style.clone();
                             fill_style.min_size.x = ui.available_width().max(1.0);
+                            if let Some(color) = account_color::name_highlight(
+                                profile_ui.streamer_mode,
+                                &account.profile_id,
+                            ) {
+                                account_color::highlight_button_style(
+                                    &mut fill_style,
+                                    color,
+                                    account.is_active,
+                                );
+                            }
                             let select_response = text_ui.selectable_button(
                                 ui,
                                 ("profile_popup_account_select", &account.profile_id),
@@ -244,10 +286,34 @@ fn render_saved_accounts(
                                 output.select_account_id = Some(account.profile_id.clone());
                                 focus.request_owner_focus(ui);
                             }
+                            toggle_color_editor |= select_response.secondary_clicked();
                         });
                     },
                 );
+
+                if toggle_color_editor {
+                    editing_account = if editing_account == account.profile_id {
+                        String::new()
+                    } else {
+                        account.profile_id.clone()
+                    };
+                }
+                if editing_account == account.profile_id {
+                    if render_account_color_editor(
+                        ui,
+                        text_ui,
+                        editor_key,
+                        &account.profile_id,
+                        &account.display_name,
+                        profile_ui.streamer_mode,
+                        button_style,
+                    ) {
+                        editing_account = String::new();
+                    }
+                }
             }
+
+            ui.data_mut(|data| data.insert_temp(editor_key, editing_account));
         });
 }
 

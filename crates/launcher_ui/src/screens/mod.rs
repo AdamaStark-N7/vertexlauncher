@@ -377,7 +377,10 @@ pub fn render(
                     }
                 }
                 AppScreen::Settings => {
-                    settings::render($ui, text_ui, config, options);
+                    // Static launcher text only; nothing here can show an account name.
+                    textui_egui::without_name_scrubbing(|| {
+                        settings::render($ui, text_ui, config, options)
+                    });
                     ScreenOutput {
                         menu_presence_context: Some(MenuPresenceContext::Screen(
                             AppScreen::Settings,
@@ -386,14 +389,14 @@ pub fn render(
                     }
                 }
                 AppScreen::Legal => {
-                    legal::render($ui, text_ui);
+                    textui_egui::without_name_scrubbing(|| legal::render($ui, text_ui));
                     ScreenOutput {
                         menu_presence_context: Some(MenuPresenceContext::Screen(AppScreen::Legal)),
                         ..ScreenOutput::default()
                     }
                 }
                 AppScreen::Console => {
-                    console::render($ui, text_ui);
+                    console::render($ui, text_ui, streamer_mode);
                     ScreenOutput {
                         menu_presence_context: Some(MenuPresenceContext::Screen(
                             AppScreen::Console,

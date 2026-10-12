@@ -36,14 +36,11 @@ jobs:
             libpango1.0-dev
             libatk1.0-dev
             libcairo2-dev
-            libsoup2.4-dev
+            libsoup-3.0-dev
+            libudev-dev
           )
 
-          if apt-cache show libwebkit2gtk-4.1-dev >/dev/null 2>&1; then
-            webkit_pkgs=(libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev)
-          else
-            webkit_pkgs=(libwebkit2gtk-4.0-dev libjavascriptcoregtk-4.0-dev)
-          fi
+          webkit_pkgs=(libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev)
 
           sudo apt-get install -y --no-install-recommends "${base_pkgs[@]}" "${webkit_pkgs[@]}"
 
@@ -53,7 +50,7 @@ jobs:
           cache-on-failure: true
 
       - name: Build (release)
-        run: cargo build --release --verbose
+        run: cargo build --release --locked --verbose
 
       - name: Test (release)
         run: cargo test --release --verbose

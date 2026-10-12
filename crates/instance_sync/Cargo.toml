@@ -1,11 +1,11 @@
 [package]
 name = "instance_sync"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
-flate2 = "*"
-zip = { version = "*", default-features = false, features = ["deflate"] }
+flate2 = "1.1"
+zip = { version = "8.6", default-features = false, features = ["deflate"] }
 instances.workspace = true
 mc_options.workspace = true
 serde_json.workspace = true

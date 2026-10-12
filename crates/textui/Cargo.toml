@@ -1,6 +1,6 @@
 [package]
 name = "textui"
-version = "0.1.21-Alpha"
+version.workspace = true
 edition = "2024"
 
 [dependencies]
@@ -9,16 +9,16 @@ egui-wgpu.workspace = true
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
 cosmic-text.workspace = true
 swash.workspace = true
-glyphon = "*"
-pulldown-cmark = "*"
-syntect = "*"
+glyphon = "0.11"
+pulldown-cmark = "0.13"
+syntect = "5.3"
 unicode-segmentation = "1"
-skrifa = "*"
+skrifa = "0.40"
 tracing.workspace = true
 launcher_runtime.workspace = true
 shared_lru.workspace = true
 etagere.workspace = true
 rustc-hash.workspace = true
 wgpu.workspace = true
-bytemuck = { version = "*", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"] }
 half = "2"

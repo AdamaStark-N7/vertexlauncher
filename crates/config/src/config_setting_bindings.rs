@@ -8,6 +8,7 @@ use super::*;
 pub(super) struct SettingBindingsMut<'a> {
     pub(super) low_power_gpu_preferred: &'a mut bool,
     pub(super) streamer_mode_enabled: &'a mut bool,
+    pub(super) obs_detection_enabled: &'a mut bool,
     pub(super) open_type_features_enabled: &'a mut bool,
     pub(super) notification_expiry_bars_empty_left: &'a mut bool,
     pub(super) skin_preview_fresh_format_enabled: &'a mut bool,
@@ -44,6 +45,7 @@ impl Config {
             graphics_adapter_explicit_hash: _,
             graphics_api_preference: _,
             streamer_mode_enabled,
+            obs_detection_enabled,
             insecure_file_account_storage: _,
             window_transparency: _,
             legacy_window_blur_enabled: _,
@@ -111,6 +113,7 @@ impl Config {
         SettingBindingsMut {
             low_power_gpu_preferred,
             streamer_mode_enabled,
+            obs_detection_enabled,
             open_type_features_enabled,
             notification_expiry_bars_empty_left,
             skin_preview_fresh_format_enabled,

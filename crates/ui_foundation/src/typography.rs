@@ -71,7 +71,7 @@ pub fn role_color_ctx(
             emoji_font_family: resolved.emoji_font_family,
             ..TextFundamentals::default()
         },
-        ..LabelOptions::default()
+        ..LabelOptions::default() // text-system: allow (this is where text roles are built)
     }
 }
 

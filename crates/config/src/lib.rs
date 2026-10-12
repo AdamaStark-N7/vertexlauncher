@@ -125,6 +125,10 @@ const fn default_drag_scroll_enabled() -> bool {
     true
 }
 
+const fn default_obs_detection_enabled() -> bool {
+    true
+}
+
 const fn default_ui_opacity_percent() -> u8 {
     100
 }
@@ -220,6 +224,9 @@ pub struct Config {
     graphics_adapter_explicit_hash: Option<u64>,
     graphics_api_preference: GraphicsApiPreference,
     streamer_mode_enabled: bool,
+    /// Apply streamer mode automatically while OBS is running (not saved). On by default.
+    #[serde(default = "default_obs_detection_enabled")]
+    obs_detection_enabled: bool,
     /// Keep sign-in tokens in a plain-text file instead of the OS keyring. Off by default.
     insecure_file_account_storage: bool,
     #[serde(default = "default_window_transparency")]
@@ -348,6 +355,11 @@ impl Config {
 
     pub fn streamer_mode_enabled(&self) -> bool {
         self.streamer_mode_enabled
+    }
+
+    /// Whether streamer mode is applied automatically while OBS is running.
+    pub fn obs_detection_enabled(&self) -> bool {
+        self.obs_detection_enabled
     }
 
     /// Whether sign-in tokens are kept in a plain-text file instead of the OS keyring.
@@ -1056,6 +1068,10 @@ impl Config {
             b.streamer_mode_enabled,
         );
         visit(
+            ToggleSettingId::ObsDetectionEnabled.spec(),
+            b.obs_detection_enabled,
+        );
+        visit(
             ToggleSettingId::OpenTypeFeaturesEnabled.spec(),
             b.open_type_features_enabled,
         );
@@ -1195,6 +1211,7 @@ impl Default for Config {
             graphics_adapter_explicit_hash: None,
             graphics_api_preference: GraphicsApiPreference::Auto,
             streamer_mode_enabled: false,
+            obs_detection_enabled: default_obs_detection_enabled(),
             insecure_file_account_storage: false,
             window_transparency: default_window_transparency(),
             legacy_window_blur_enabled: None,

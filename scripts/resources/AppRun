@@ -3,6 +3,13 @@ set -euo pipefail
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
+# Remember the host's values before they are pointed at the bundled libraries. Games started
+# from the launcher are not part of this AppImage and must see the host environment (GPU
+# drivers, system libraries); the launcher restores these for them.
+export VERTEX_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+export VERTEX_HOST_XDG_DATA_DIRS="${XDG_DATA_DIRS:-}"
+export VERTEX_HOST_ENV_SAVED=1
+
 export APPDIR="${HERE}"
 APPIMAGE_LIBRARY_PATH="${HERE}/usr/lib:${HERE}/usr/lib64:${HERE}/usr/lib/x86_64-linux-gnu:${HERE}/usr/lib/aarch64-linux-gnu"
 export XDG_DATA_DIRS="${HERE}/usr/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"

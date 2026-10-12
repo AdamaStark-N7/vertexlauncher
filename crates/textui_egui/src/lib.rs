@@ -17,6 +17,7 @@ mod pixel_snap;
 mod scene_cache;
 mod scene_hash;
 mod text_helpers;
+mod text_scrubber;
 mod tooltip_options;
 
 use egui::{
@@ -57,6 +58,9 @@ pub use text_helpers::{
     truncate_single_line_text_with_ellipsis_detailed,
     truncate_single_line_text_with_ellipsis_preserving_whitespace,
     truncate_single_line_text_with_ellipsis_preserving_whitespace_detailed,
+};
+pub use text_scrubber::{
+    TextScrubber, name_scrubbing_exempt, scrubbed, set_text_scrubber, without_name_scrubbing,
 };
 pub use textui::{RichTextSpan, RichTextStyle, TextColor};
 pub use tooltip_options::TooltipOptions;
