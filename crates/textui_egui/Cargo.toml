@@ -1,9 +1,0 @@
-[package]
-name = "textui_egui"
-version.workspace = true
-edition = "2024"
-
-[dependencies]
-egui.workspace = true
-egui-wgpu.workspace = true
-textui.workspace = true

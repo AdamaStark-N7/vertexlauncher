@@ -230,7 +230,7 @@ mod tests {
         assert_eq!(store.entries.len(), 2);
 
         let mut with_button = capes(&["B"]);
-        with_button.actions = vec![NotificationAction::new("Open", |_| {})];
+        with_button.actions = vec![NotificationAction::new("Open", || {})];
         absorb(&mut store, with_button);
         let merged = store
             .entries

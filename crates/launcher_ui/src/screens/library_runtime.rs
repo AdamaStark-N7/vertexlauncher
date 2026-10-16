@@ -31,29 +31,21 @@ use self::runtime_launch_outcome::RuntimeLaunchOutcome;
 use self::runtime_launch_result::RuntimeLaunchResult;
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct LibraryRuntimeState {
+pub struct LibraryRuntimeState {
     results: launcher_runtime::WorkerChannel<RuntimeLaunchResult>,
-    pub(super) pending_launches: HashSet<String>,
+    pub pending_launches: HashSet<String>,
     pending_launch_contexts: HashMap<String, PendingLaunchContext>,
-    pub(super) status_by_instance: HashMap<String, String>,
+    pub status_by_instance: HashMap<String, String>,
     pub(super) last_handled_launch_intent_nonce: Option<u64>,
-    pub(super) delete_target_instance_id: Option<String>,
-    pub(super) delete_error: Option<String>,
-    pub(super) delete_in_flight: bool,
+    pub delete_target_instance_id: Option<String>,
+    pub delete_error: Option<String>,
+    pub delete_in_flight: bool,
     pub(super) delete_results: launcher_runtime::WorkerChannel<Result<InstanceRecord, String>>,
 }
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct LibraryLaunchIdentity {
-    pub(super) account: Option<String>,
-    pub(super) display_name: Option<String>,
-    pub(super) player_uuid: Option<String>,
-    pub(super) access_token: Option<String>,
-    pub(super) xuid: Option<String>,
-    pub(super) user_type: Option<String>,
-}
 
-pub(super) fn request_runtime_launch(
+
+pub fn request_runtime_launch(
     state: &mut LibraryRuntimeState,
     instance: &InstanceRecord,
     instance_root: PathBuf,
@@ -359,7 +351,7 @@ pub(super) fn request_runtime_launch(
     true
 }
 
-pub(super) fn poll_runtime_actions(
+pub fn poll_runtime_actions(
     state: &mut LibraryRuntimeState,
     config: &mut Config,
     instances: &mut InstanceStore,
@@ -461,7 +453,7 @@ pub(super) fn poll_runtime_actions(
     }
 }
 
-pub(super) fn request_instance_delete(
+pub fn request_instance_delete(
     state: &mut LibraryRuntimeState,
     instance: InstanceRecord,
     installations_root: PathBuf,
@@ -490,7 +482,7 @@ pub(super) fn request_instance_delete(
     });
 }
 
-pub(super) fn poll_delete_instance_results(
+pub fn poll_delete_instance_results(
     state: &mut LibraryRuntimeState,
     instances: &mut InstanceStore,
 ) {

@@ -1,27 +1,48 @@
-use super::*;
+use std::any::Any;
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, mpsc};
 
-impl eframe::App for VertexApp {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if let Err(payload) = catch_unwind(AssertUnwindSafe(|| self.update_inner(ui.ctx(), frame)))
-        {
-            log_unexpected_panic("ui update", payload.as_ref());
-            resume_unwind(payload);
-        }
-    }
+use config::{Config, JavaRuntimeVersion, load_config};
+use installation::{
+    DownloadPolicy, InstallProgress, InstallProgressCallback, InstallStage, display_user_path,
+    ensure_game_files_async, ensure_openjdk_runtime_async,
+};
+use instances::{InstanceRecord, instance_root_path};
+use launcher_runtime as tokio_runtime;
+use launcher_ui::{install_activity, notification};
 
-    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
-        #[cfg(target_os = "windows")]
-        {
-            if transparent_viewport_enabled(&self.config) {
-                return egui::Rgba::TRANSPARENT.to_array();
-            }
-        }
+use super::{cli, se5, tracing_setup, webview_sign_in};
 
-        egui::Rgba::from(visuals.panel_fill).to_array()
-    }
+#[derive(Debug)]
+pub enum RunError {
+    RuntimeBootstrap(launcher_runtime::RuntimeBootstrapError),
 }
 
-pub(super) fn panic_payload_text(payload: &(dyn Any + Send)) -> String {
+#[derive(Debug)]
+pub(super) enum InitialInstanceInstallResult {
+    Failed {
+        instance_id: String,
+        instance_name: String,
+        error: String,
+    },
+}
+
+pub fn init_tracing() -> Option<PathBuf> {
+    launcher_runtime::set_detached_task_reporter(report_detached_task_failure);
+    tracing_setup::init_tracing()
+}
+
+fn report_detached_task_failure(task_kind: &str, error: &launcher_runtime::TaskError) {
+    notification::emit_replace(
+        notification::Severity::Error,
+        "background-task",
+        format!("A background task failed ({task_kind}): {error}"),
+        format!("background-task/{task_kind}"),
+    );
+}
+
+fn panic_payload_text(payload: &(dyn Any + Send)) -> String {
     if let Some(text) = payload.downcast_ref::<&'static str>() {
         return (*text).to_owned();
     }
@@ -31,7 +52,7 @@ pub(super) fn panic_payload_text(payload: &(dyn Any + Send)) -> String {
     "non-string panic payload".to_owned()
 }
 
-pub(super) fn log_unexpected_panic(context: &'static str, payload: &(dyn Any + Send)) {
+fn log_unexpected_panic(context: &'static str, payload: &(dyn Any + Send)) {
     tracing::error!(
         target: "vertexlauncher/app/stability",
         context,
@@ -40,45 +61,13 @@ pub(super) fn log_unexpected_panic(context: &'static str, payload: &(dyn Any + S
     );
 }
 
-pub(super) fn apply_install_activity_os_feedback(ctx: &egui::Context, frame: &eframe::Frame) {
-    if let Some(activity) = install_activity::snapshot() {
-        let fraction = if activity.total_files > 0 {
-            (activity.downloaded_files as f32 / activity.total_files as f32).clamp(0.0, 1.0)
-        } else if let Some(total) = activity.total_bytes {
-            if total > 0 {
-                (activity.downloaded_bytes as f32 / total as f32).clamp(0.0, 1.0)
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-        let percent = (fraction * 100.0).round() as u32;
-        let speed_mib = activity.bytes_per_second / (1024.0 * 1024.0);
-        let eta_suffix = activity
-            .eta_seconds
-            .map(|eta| format!(" ETA {}s", eta))
-            .unwrap_or_default();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(format!(
-            "Vertex Launcher · Installing {}% · {:.1} MiB/s{}",
-            percent, speed_mib, eta_suffix
-        )));
-        ctx.output_mut(|o| o.cursor_icon = egui::CursorIcon::Progress);
-        taskbar_progress::set_install_progress(frame, Some(fraction));
-        return;
-    }
-
-    ctx.send_viewport_cmd(egui::ViewportCommand::Title("Vertex Launcher".to_owned()));
-    taskbar_progress::set_install_progress(frame, None);
-}
-
-pub(super) fn start_initial_instance_install(
-    app: &mut VertexApp,
+/// Downloads the game files for a newly created instance. Failures are sent to `initial_install_results_tx`.
+pub(super) fn start_initial_instance_install_with(
+    initial_install_results_tx: Option<mpsc::Sender<InitialInstanceInstallResult>>,
     instance: &InstanceRecord,
     installations_root: &Path,
     config: &Config,
 ) {
-    let initial_install_results_tx = Some(app.initial_install_results.sender());
     let instance_id = instance.id.clone();
     let instance_name = instance.name.clone();
     let activity_instance = instance_name.clone();
@@ -303,8 +292,20 @@ pub(super) fn start_initial_instance_install(
     });
 }
 
-pub fn run() -> Result<(), RunError> {
-    match catch_unwind(AssertUnwindSafe(run_inner)) {
+/// Runs the SturdyEngine5 front end (the default UI).
+pub fn run_se5() -> Result<std::process::ExitCode, RunError> {
+    // The engine keeps compiled shaders and compressed textures in the working directory unless told otherwise, which
+    // loses them whenever the launcher starts from somewhere else and makes the first frames slow again. Pin them
+    // to the launcher's cache folder (set before the engine starts, while only this thread runs).
+    let engine_cache = app_paths::cache_root().join("engine");
+    let _ = std::fs::create_dir_all(&engine_cache);
+    // SAFETY: called at the top of startup, before any other thread reads the environment.
+    unsafe { std::env::set_var("STURDY_CACHE_DIR", &engine_cache) };
+    match catch_unwind(AssertUnwindSafe(|| {
+        log_startup();
+        launcher_runtime::init().map_err(RunError::RuntimeBootstrap)?;
+        Ok(se5::run(load_config()))
+    })) {
         Ok(result) => result,
         Err(payload) => {
             log_unexpected_panic("launcher runtime", payload.as_ref());
@@ -313,57 +314,19 @@ pub fn run() -> Result<(), RunError> {
     }
 }
 
-pub(super) fn run_inner() -> Result<(), RunError> {
+fn log_startup() {
     let log_path = init_tracing();
-    if let Some(log_path) = log_path.as_deref() {
-        tracing::info!(
+    match log_path.as_deref() {
+        Some(log_path) => tracing::info!(
             target: "vertexlauncher/app/startup",
             "Launcher started. Log file: {}",
             log_path.display()
-        );
-    } else {
-        tracing::info!(
+        ),
+        None => tracing::info!(
             target: "vertexlauncher/app/startup",
             "Launcher started. File logging unavailable; using stderr/console only."
-        );
+        ),
     }
-    launcher_runtime::init().map_err(RunError::RuntimeBootstrap)?;
-    let config_state = load_config();
-    let startup_config = match &config_state {
-        LoadConfigResult::Loaded(config) => config.clone(),
-        LoadConfigResult::Missing { .. } => Config::default(),
-    };
-
-    tracing::info!(
-        target: "vertexlauncher/app/startup",
-        "Building native window and renderer options."
-    );
-    let options = native_options::build(&startup_config);
-    tracing::info!(
-        target: "vertexlauncher/app/startup",
-        "Starting eframe runtime."
-    );
-
-    eframe::run_native(
-        "Vertex Launcher",
-        options,
-        Box::new(move |cc| {
-            tracing::info!(
-                target: "vertexlauncher/app/startup",
-                "Renderer initialized; constructing application state."
-            );
-            match catch_unwind(AssertUnwindSafe(|| {
-                VertexApp::new(cc, config_state.clone())
-            })) {
-                Ok(app) => Ok(Box::new(app) as Box<dyn eframe::App>),
-                Err(payload) => {
-                    log_unexpected_panic("ui startup", payload.as_ref());
-                    resume_unwind(payload)
-                }
-            }
-        }),
-    )
-    .map_err(RunError::Ui)
 }
 
 pub fn maybe_run_webview_helper() -> Result<bool, String> {

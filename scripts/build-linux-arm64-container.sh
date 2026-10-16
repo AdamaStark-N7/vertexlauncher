@@ -25,7 +25,6 @@ PACKAGE_ROOTS=(
   "libudev-dev:arm64"
 )
 
-bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 
 # Remove host-compiled build-script executables and the aarch64 binary before
 # entering the container so that the container recompiles them against its glibc.

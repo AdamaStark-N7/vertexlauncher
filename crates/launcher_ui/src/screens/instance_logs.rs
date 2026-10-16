@@ -1,158 +1,10 @@
 use super::*;
 
-pub(super) fn render_instance_logs_tab(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-) {
-    let title_style = style::body_strong(ui);
-    let body_style = style::muted(ui);
-    let _ = text_ui.label(ui, "instance_logs_title", "Logs", &title_style);
-    let _ = text_ui.label(
-        ui,
-        "instance_logs_summary",
-        "Select a log file to view it with the same highlighting rules as the live console.",
-        &body_style,
-    );
-    ui.add_space(8.0);
 
-    if state.logs.is_empty() {
-        let _ = text_ui.label(
-            ui,
-            "instance_logs_empty",
-            "No log files found under this instance's logs folder.",
-            &body_style,
-        );
-        return;
-    }
 
-    let full_size = ui.available_size().max(egui::vec2(1.0, 1.0));
-    let compact = is_compact_width(full_size.x, 760.0);
-    let sidebar_width = (full_size.x * 0.28).clamp(220.0, 320.0);
-    let logs_snapshot = state.logs.clone();
-    if compact {
-        let list_height = (full_size.y * 0.32).clamp(140.0, 240.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(full_size.x, list_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| render_instance_log_list(ui, text_ui, state, &logs_snapshot),
-        );
-        ui.add_space(12.0);
-        ui.allocate_ui_with_layout(
-            egui::vec2(full_size.x, (full_size.y - list_height - 12.0).max(1.0)),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| render_instance_log_viewer(ui, text_ui, state, &title_style, &body_style),
-        );
-    } else {
-        ui.horizontal(|ui| {
-            ui.allocate_ui_with_layout(
-                egui::vec2(sidebar_width, full_size.y),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| render_instance_log_list(ui, text_ui, state, &logs_snapshot),
-            );
-            ui.add_space(12.0);
-            ui.allocate_ui_with_layout(
-                egui::vec2((full_size.x - sidebar_width - 12.0).max(1.0), full_size.y),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| render_instance_log_viewer(ui, text_ui, state, &title_style, &body_style),
-            );
-        });
-    }
-}
 
-fn render_instance_log_list(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-    logs_snapshot: &[InstanceLogEntry],
-) {
-    egui::ScrollArea::vertical()
-        .scroll_source(modal_host::drag_scroll_source())
-        .id_salt("instance_logs_file_list")
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for log in logs_snapshot {
-                let selected = state.selected_log_path.as_ref() == Some(&log.path);
-                let mut label = log.file_name.clone();
-                if log.size_bytes > 0 {
-                    label.push_str(&format!(
-                        "\n{} | {}",
-                        format_log_file_size(log.size_bytes),
-                        format_time_ago(log.modified_at_ms, current_time_millis())
-                    ));
-                }
-                let response = selectable_row_button(
-                    ui,
-                    text_ui,
-                    ("instance_log_row", log.path.as_path()),
-                    label.as_str(),
-                    selected,
-                    egui::vec2(ui.available_width(), 44.0),
-                );
-                if response.clicked() {
-                    state.selected_log_path = Some(log.path.clone());
-                    load_selected_instance_log(state);
-                }
-                ui.add_space(6.0);
-            }
-        });
-}
 
-fn render_instance_log_viewer(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-    title_style: &LabelOptions,
-    body_style: &LabelOptions,
-) {
-    if let Some(selected_log_path) = state.selected_log_path.as_ref() {
-        let log_name = selected_log_path
-            .file_name()
-            .and_then(OsStr::to_str)
-            .unwrap_or("Log");
-        let _ = text_ui.label(ui, "instance_logs_selected_name", log_name, title_style);
-        let mut details = selected_log_path.display().to_string();
-        if state.loaded_log_truncated {
-            details.push_str(&format!(" | showing last {} lines", MAX_INSTANCE_LOG_LINES));
-        }
-        let _ = text_ui.label(
-            ui,
-            "instance_logs_selected_path",
-            details.as_str(),
-            body_style,
-        );
-        ui.add_space(8.0);
-        if state.log_load_in_flight {
-            let _ = text_ui.label(
-                ui,
-                "instance_logs_loading",
-                "Loading log contents...",
-                body_style,
-            );
-            ui.add_space(8.0);
-        }
-        if let Some(error) = state.loaded_log_error.as_deref() {
-            let _ = text_ui.label(ui, "instance_logs_error", error, &style::error_text(ui));
-            return;
-        }
-        console_screen::render_log_buffer(
-            ui,
-            text_ui,
-            ("instance_log_viewer", selected_log_path),
-            &state.loaded_log_lines,
-            "Log is empty.",
-            false,
-            crate::console::text_redraw_generation(),
-        );
-    } else {
-        let _ = text_ui.label(
-            ui,
-            "instance_logs_no_selection",
-            "Select a log file from the left to view it.",
-            body_style,
-        );
-    }
-}
+
 
 pub(super) fn poll_instance_log_scan_results(state: &mut InstanceScreenState) {
     let drained = state.log_scan_results.drain();
@@ -307,7 +159,7 @@ pub(super) fn poll_instance_log_load_results(state: &mut InstanceScreenState) {
     }
 }
 
-fn load_selected_instance_log(state: &mut InstanceScreenState) {
+pub(super) fn load_selected_instance_log(state: &mut InstanceScreenState) {
     let Some(selected_log_path) = state.selected_log_path.clone() else {
         state.loaded_log_path = None;
         state.loaded_log_lines.clear();
@@ -375,7 +227,7 @@ fn read_instance_log_lines(path: &Path) -> Result<(Vec<String>, bool), String> {
     Ok((lines, truncated))
 }
 
-fn format_log_file_size(size_bytes: u64) -> String {
+pub(super) fn format_log_file_size(size_bytes: u64) -> String {
     const KIB: f64 = 1024.0;
     const MIB: f64 = 1024.0 * 1024.0;
     let size = size_bytes as f64;

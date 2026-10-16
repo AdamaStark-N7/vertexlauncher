@@ -33,7 +33,7 @@ use self::scene_camera::build_character_scene_camera;
 /// provided pose as-is.
 ///
 /// This function does not panic.
-pub(in super::super) fn build_character_scene(
+pub(in crate::screens) fn build_character_scene(
     rect: Rect,
     cape_uv: FaceUvs,
     yaw: f32,

@@ -1,0 +1,2246 @@
+//! The Vertex widget layer over SturdyEngine5: themed labels, buttons, toggles, sliders, dropdowns, text fields and
+//! the settings-row layout every screen uses. Screens call only this, never raw engine styles, so the look stays in
+//! one place (the SE5 counterpart of `ui_foundation` + `launcher_ui::ui::style`).
+//!
+//! Engine widgets keep per-widget animation state; [`Kit`] owns it, keyed by element id, so screens stay plain
+//! functions over app state.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use super::icons::{self, Icon};
+use super::images::{ImageCache, ImageSource, Picture};
+use vertex_shell::palette::Palette;
+use vertex_shell::sturdy::glam::{Vec2, Vec4};
+use vertex_shell::sturdy::ui::{
+    AlignX, AlignY, AttachPoint, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction,
+    ElementDesc, ElementScope, FloatTarget, Floating, Padding, Sizing, TextStyle, TextWrap, Ui,
+};
+use vertex_shell::sturdy::ui_kit::{
+    self, AnimationKeepAlive, FocusNavigator, NavInput, PopupStyle,
+};
+use vertex_shell::sturdy::widgets::{
+    ButtonState, DropdownState, ScrollAreaState, ScrollbarStyle, SliderConfig, SliderInput,
+    SliderKey, SliderState, TextEditState, ToggleState,
+};
+
+pub const SPACE_XS: u16 = 4;
+pub const SPACE_SM: u16 = 8;
+pub const SPACE_MD: u16 = 12;
+pub const SPACE_LG: u16 = 16;
+pub const SPACE_XL: u16 = 24;
+pub const CORNER: f32 = 14.0;
+pub const CONTROL_HEIGHT: f32 = 34.0;
+/// Dropdowns with more options than this get a search box.
+const SEARCHABLE_DROPDOWN_THRESHOLD: usize = 12;
+
+/// Seconds since the UI started: the clock for indeterminate progress bars.
+pub fn uptime() -> f64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_secs_f64()
+}
+
+/// Draws one text leaf after the streamer-mode name filter, so an account name can never reach the screen. Every
+/// piece of text the SE5 UI draws goes through here.
+pub fn label(ui: &mut Ui<'_>, text: &str, style: &TextStyle) {
+    label_text(ui, text, style);
+}
+
+/// Word-wrapped text that can never be wider than `max_width`: wrapping only breaks between words, so a single word
+/// (a long URL, a name with no spaces) wider than the box is shortened with an ellipsis instead of overflowing it.
+pub fn wrapped_label(ui: &mut Ui<'_>, text: &str, style: &TextStyle, max_width: f32) {
+    let style = TextStyle {
+        wrap: TextWrap::Words,
+        ..style.clone()
+    };
+    let text = launcher_ui::privacy::scrub(text);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_ref();
+    // Words and the whitespace (spaces, newlines, tabs) between them, the whitespace kept as it was.
+    while !rest.is_empty() {
+        let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(split);
+        // Only words long enough to possibly overflow are worth measuring.
+        if word.chars().count() > 8 {
+            out.push_str(&ui.ellipsize(&style, word, max_width));
+        } else {
+            out.push_str(word);
+        }
+        let gap = tail
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(tail.len());
+        out.push_str(&tail[..gap]);
+        rest = &tail[gap..];
+    }
+    ui.text(&out, &style);
+}
+
+fn label_text(ui: &mut Ui<'_>, text: &str, style: &TextStyle) {
+    ui.text(&launcher_ui::privacy::scrub(text), style);
+}
+
+/// Text roles, sized relative to the user's UI font size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRole {
+    Title,
+    Heading,
+    Body,
+    Muted,
+    Small,
+    OnAccent,
+    Danger,
+    Warning,
+    /// Body text in the strong weight (names, values).
+    Strong,
+    /// Monospace text (values, paths, code).
+    Code,
+}
+
+/// A line-range selection in a log viewer, with its right-click menu.
+#[derive(Default)]
+pub struct LogSelection {
+    /// The line the drag started on and the line it is on now.
+    pub anchor: Option<usize>,
+    pub head: Option<usize>,
+    pub dragging: bool,
+    /// The selection moved while the button was down (a plain click clears it instead).
+    pub moved: bool,
+    pub menu: ui_kit::PopupState,
+    /// The line the menu was opened on.
+    pub menu_line: usize,
+    /// Frames the view has stayed off the bottom while following.
+    pub away_frames: u32,
+}
+
+impl LogSelection {
+    /// The selected lines as an inclusive, ordered range.
+    pub fn range(&self) -> Option<(usize, usize)> {
+        let (anchor, head) = (self.anchor?, self.head?);
+        Some((anchor.min(head), anchor.max(head)))
+    }
+
+    /// A selection exists, or one is being made.
+    pub fn active(&self) -> bool {
+        self.dragging || self.range().is_some()
+    }
+
+    pub fn clear(&mut self) {
+        self.anchor = None;
+        self.head = None;
+        self.dragging = false;
+        self.moved = false;
+    }
+}
+
+/// Width a full-screen scroll page has for its content, from the window rather than from the scroll area (which
+/// grows to hold its widest row, so it would keep a layout sized for a bigger window after the window shrinks).
+pub fn content_width(ui: &Ui<'_>) -> f32 {
+    ui.viewport_size().x - super::chrome::SIDEBAR_WIDTH - 2.0 * f32::from(SPACE_XL) - 12.0
+}
+
+/// [`content_width`], but never wider than what the scroll area `scroll_id` actually measured last frame (minus its
+/// padding), so chrome the window estimate does not know about (borders, a scrollbar) cannot push a row past the edge.
+pub fn content_width_in(ui: &Ui<'_>, scroll_id: &str) -> f32 {
+    let estimate = content_width(ui);
+    match ui.element_bounds(scroll_id) {
+        Some((_, size)) => estimate.min(size.x - 2.0 * f32::from(SPACE_XL) - 12.0),
+        None => estimate,
+    }
+}
+
+/// How many columns a masonry gallery of `width` pixels gets: three across wherever there is room, fewer on narrow
+/// windows.
+pub fn masonry_columns(width: f32) -> usize {
+    if width < 520.0 {
+        1
+    } else if width < 760.0 {
+        2
+    } else {
+        3
+    }
+}
+
+/// Which look a button has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonKind {
+    Neutral,
+    Primary,
+    Danger,
+}
+
+/// Reveal progress of one context menu.
+#[derive(Clone, Copy, Debug, Default)]
+struct MenuAnim {
+    /// 0 = folded away, 1 = fully open.
+    progress: f32,
+    /// Where the panel was last drawn, so it can fold away in place after the menu closed.
+    origin: Vec2,
+    last_call: f64,
+    was_open: bool,
+}
+
+/// One row of a [`Kit::context_menu`]: a label, an optional icon at the right, and optional danger styling.
+#[derive(Clone, Debug)]
+pub struct MenuEntry {
+    pub label: String,
+    pub icon: Option<Icon>,
+    pub danger: bool,
+    pub separator_before: bool,
+}
+
+impl MenuEntry {
+    pub fn new(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            icon: None,
+            danger: false,
+            separator_before: false,
+        }
+    }
+
+    #[must_use]
+    pub fn icon(mut self, icon: Icon) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    #[must_use]
+    pub fn danger(mut self) -> Self {
+        self.danger = true;
+        self
+    }
+
+    #[must_use]
+    pub fn separated(mut self) -> Self {
+        self.separator_before = true;
+        self
+    }
+}
+
+pub struct Kit {
+    pub palette: Palette,
+    /// Base UI font size in pixels (`Config::ui_font_size`).
+    pub font_size: f32,
+    pub typography: config::TypographySettings,
+    pub keep_alive: AnimationKeepAlive,
+    pub delta_seconds: f32,
+    pub images: ImageCache,
+    /// Icon render scale from the anti-aliasing setting.
+    pub svg_supersample: u32,
+    buttons: HashMap<String, ButtonState>,
+    toggles: HashMap<String, ToggleState>,
+    sliders: HashMap<String, SliderState>,
+    dropdowns: HashMap<String, DropdownState>,
+    texts: HashMap<String, TextEditState>,
+    areas: HashMap<String, ScrollAreaState>,
+    /// The scrollbar being dragged: the scroll element's id and where on the thumb it was grabbed.
+    scroll_drag: Option<(String, f32)>,
+    /// Set while `button_icon_right` draws, so `button_full` puts the icon after the label.
+    icon_after: bool,
+    levels: HashMap<String, (usize, usize, Vec<Option<launcher_ui::log_format::LogLevel>>)>,
+    /// The selected lines of each log viewer, by viewer id.
+    pub log_selections: HashMap<String, LogSelection>,
+    tooltips: HashMap<String, f32>,
+    /// Open/closed state and search text of each searchable dropdown.
+    searches: HashMap<String, (ui_kit::PopupState, String)>,
+    /// Open/close progress (0..1) and the last open state of every context menu, for its reveal and fold animation.
+    menu_anim: HashMap<String, MenuAnim>,
+    /// Keyboard and gamepad focus: widgets declare themselves focusable as they are drawn.
+    pub focus: FocusNavigator,
+    /// Gamepad steps for the focused slider this frame.
+    slider_steps: i32,
+    /// The clipped container being filled, so focus moves can scroll their target into view.
+    scroll_container: Option<String>,
+    /// A text field had focus last frame / has focus this frame (arrow keys then belong to its caret).
+    text_focused_last: bool,
+    text_focused_now: bool,
+    /// Whether the UI is being driven by a controller, so focus rings show without the keyboard.
+    pub controller_active: bool,
+    /// The controller's context-menu button (X) was pressed this frame.
+    context_pressed: bool,
+    /// A popup took this frame's back request, so dialogs must not also treat it as theirs.
+    back_consumed: bool,
+}
+
+impl Kit {
+    pub fn new(palette: Palette, font_size: f32) -> Self {
+        Self {
+            palette,
+            font_size,
+            typography: config::TypographySettings::default(),
+            keep_alive: AnimationKeepAlive::default(),
+            delta_seconds: 0.016,
+            images: ImageCache::default(),
+            svg_supersample: 2,
+            buttons: HashMap::new(),
+            toggles: HashMap::new(),
+            sliders: HashMap::new(),
+            dropdowns: HashMap::new(),
+            texts: HashMap::new(),
+            areas: HashMap::new(),
+            scroll_drag: None,
+            menu_anim: HashMap::new(),
+            icon_after: false,
+            levels: HashMap::new(),
+            log_selections: HashMap::new(),
+            tooltips: HashMap::new(),
+            searches: HashMap::new(),
+            focus: FocusNavigator::default(),
+            slider_steps: 0,
+            scroll_container: None,
+            text_focused_last: false,
+            text_focused_now: false,
+            controller_active: false,
+            context_pressed: false,
+            back_consumed: false,
+        }
+    }
+
+    /// Starts the frame's input: resolves keyboard and gamepad navigation against last frame's focusables.
+    /// `gamepad` is the controller's request (direction, activate, back, scroll) and `slider_step` its left/right
+    /// presses for a focused slider.
+    pub fn begin_input_frame(&mut self, ui: &mut Ui<'_>, gamepad: NavInput, slider_step: i32) {
+        self.back_consumed = false;
+        self.text_focused_last = self.text_focused_now;
+        self.text_focused_now = false;
+        self.scroll_container = None;
+        self.slider_steps = slider_step;
+        // Arrow keys move a text field's caret, so the keyboard only navigates when none is being edited.
+        let keyboard = if self.text_focused_last {
+            NavInput::default()
+        } else {
+            NavInput::from_keyboard(&ui.engine())
+        };
+        let input = NavInput {
+            direction: gamepad.direction.or(keyboard.direction),
+            activate: gamepad.activate || keyboard.activate,
+            back: gamepad.back || keyboard.back,
+            scroll: gamepad.scroll + keyboard.scroll,
+        };
+        if input.direction.is_some() || input.activate {
+            self.keep_alive.keep_awake_for(Duration::from_millis(50));
+        }
+        self.focus.begin_frame(ui, input);
+        if self.focus.moved() {
+            self.keep_alive.keep_awake_for(Duration::from_millis(50));
+        }
+    }
+
+    /// Tells the kit the controller asked for the focused element's context menu this frame.
+    pub fn set_context_pressed(&mut self, pressed: bool) {
+        self.context_pressed = pressed;
+    }
+
+    /// Where the context menu of element `id` should open, if it was asked for this frame: at the pointer on a
+    /// right-click, or under the element when the controller's context button (or Shift+F10) is pressed while it has
+    /// focus.
+    pub fn secondary(&mut self, ui: &mut Ui<'_>, id: &str) -> Option<Vec2> {
+        if ui_kit::pressed(ui, id, vertex_shell::sturdy::MouseButton::Right) {
+            return Some(ui.pointer_position());
+        }
+        if self.context_pressed && self.focus.is_focused(id) {
+            let (origin, size) = ui.element_bounds(id)?;
+            return Some(Vec2::new(origin.x + size.x * 0.5, origin.y + size.y));
+        }
+        None
+    }
+
+    /// Whether a back request (Escape, controller B) came in this frame; dialogs treat it as a dismissal.
+    pub fn back_pressed(&self) -> bool {
+        self.focus.back_pressed() && !self.back_consumed
+    }
+
+    /// Marks this frame's back request as used, so an open dialog stays open.
+    pub fn consume_back(&mut self) {
+        self.back_consumed = true;
+    }
+
+    /// Closes every searchable dropdown's popup; true if one was open.
+    pub fn close_search_popups(&mut self) -> bool {
+        let mut closed = false;
+        for (menu, _) in self.searches.values_mut() {
+            if menu.is_open() {
+                menu.close();
+                closed = true;
+            }
+        }
+        closed
+    }
+
+    /// Whether the focused element is a slider (left/right then change its value instead of moving focus).
+    pub fn focused_is_slider(&self) -> bool {
+        self.focus
+            .focused()
+            .is_some_and(|id| self.sliders.contains_key(id))
+    }
+
+    /// Declares `id` focusable and returns whether it has focus now.
+    pub fn focusable(&mut self, id: &str) -> bool {
+        let container = self.scroll_container.clone();
+        self.focus.focusable(id, container.as_deref())
+    }
+
+    /// A click on `id` or its activation from the keyboard or controller. Also declares it focusable.
+    pub fn clicked(&mut self, ui: &mut Ui<'_>, id: &str) -> bool {
+        if self.focusable(id) {
+            self.focus_ring(ui, id);
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    /// Outlines the element `id` (drawn on top of it, from its last known size) while it has keyboard or controller
+    /// focus. For elements that are not widgets of their own.
+    pub fn focus_ring(&mut self, ui: &mut Ui<'_>, id: &str) {
+        let Some((_, size)) = ui.element_bounds(id) else {
+            return;
+        };
+        let _ring = ui.element(
+            &ElementDesc::new()
+                .id(format!("{id}::focus-ring"))
+                .width(Sizing::Fixed(size.x))
+                .height(Sizing::Fixed(size.y))
+                .corner_radius(CornerRadius::all(10.0))
+                .border(Border::all(self.palette.highlight, 2))
+                .floating(Some(Floating {
+                    element_attach_point: AttachPoint::LeftTop,
+                    parent_attach_point: AttachPoint::LeftTop,
+                    z_index: 20,
+                    capture_pointer: false,
+                    ..Floating::new(FloatTarget::Element(id.to_owned()))
+                })),
+        );
+    }
+
+    /// The ring drawn around the focused element, or no border when it is not focused.
+    pub fn focus_border(&self, focused: bool) -> Border {
+        if focused {
+            Border::all(self.palette.highlight, 2)
+        } else {
+            Border::default()
+        }
+    }
+
+    /// Keeps frames coming for `duration` (animations, polling a background task).
+    pub fn keep_awake_for(&mut self, duration: Duration) {
+        self.keep_alive.keep_awake_for(duration);
+    }
+
+    /// The size of body text in pixels, with the launcher-wide UI font size applied (18 is neutral).
+    fn px(&self, scale: f32) -> u16 {
+        let body = self.typography.resolve(config::TextRole::Body).size * self.font_size / 18.0;
+        (body * scale).round().clamp(8.0, 96.0) as u16
+    }
+
+    /// The config text role a kit role is drawn with.
+    fn config_role(role: TextRole) -> config::TextRole {
+        match role {
+            TextRole::Title => config::TextRole::PageHeading,
+            TextRole::Heading => config::TextRole::SectionHeading,
+            TextRole::Body | TextRole::Muted | TextRole::Danger | TextRole::Warning => {
+                config::TextRole::Body
+            }
+            TextRole::Strong => config::TextRole::BodyStrong,
+            TextRole::Code => config::TextRole::Code,
+            TextRole::Small => config::TextRole::Caption,
+            TextRole::OnAccent => config::TextRole::Button,
+        }
+    }
+
+    pub fn style(&self, role: TextRole) -> TextStyle {
+        let p = &self.palette;
+        let color = match role {
+            TextRole::Title
+            | TextRole::Heading
+            | TextRole::Body
+            | TextRole::Strong
+            | TextRole::Code => p.text,
+            TextRole::Muted | TextRole::Small => p.text_muted,
+            TextRole::OnAccent => p.on_primary,
+            TextRole::Danger => p.danger,
+            TextRole::Warning => p.warning,
+        };
+        let config_role = Self::config_role(role);
+        let resolved = self.typography.resolve(config_role);
+        let scale = self.font_size / 18.0;
+        TextStyle {
+            color,
+            font_id: super::fonts::role_font_id(config_role),
+            font_size: (resolved.size * scale).round().clamp(8.0, 96.0) as u16,
+            line_height: (resolved.line_height * scale).round().clamp(0.0, 200.0) as u16,
+            letter_spacing: resolved.letter_spacing.max(0.0).round() as u16,
+            ..TextStyle::default()
+        }
+    }
+
+    /// The engine font id text inputs and dropdown options use.
+    fn input_font(&self) -> u16 {
+        super::fonts::role_font_id(config::TextRole::Input)
+    }
+
+    pub fn text(&self, ui: &mut Ui<'_>, role: TextRole, text: &str) {
+        label(ui, text, &self.style(role));
+    }
+
+    /// Text that wraps at word boundaries to the width its container gives it.
+    pub fn text_wrapped(&self, ui: &mut Ui<'_>, role: TextRole, text: &str) {
+        label(
+            ui,
+            text,
+            &TextStyle {
+                wrap: TextWrap::Words,
+                ..self.style(role)
+            },
+        );
+    }
+
+    /// Text on a single line, cut with an ellipsis at `max_width`.
+    pub fn text_clipped(&self, ui: &mut Ui<'_>, role: TextRole, text: &str, max_width: f32) {
+        let style = TextStyle {
+            wrap: TextWrap::None,
+            ..self.style(role)
+        };
+        let text = launcher_ui::privacy::scrub(text);
+        let shown = ui.ellipsize(&style, &text, max_width);
+        ui.text(&shown, &style);
+    }
+
+    /// Text that may mention accounts (see `launcher_ui::account_text`): names read as plain text, and in streamer mode
+    /// as "Hidden Account" highlighted in the account's chosen colour. Text without a mention is an ordinary label.
+    pub fn account_label(&self, ui: &mut Ui<'_>, role: TextRole, text: &str, streamer_mode: bool) {
+        use launcher_ui::account_text::{self, Segment};
+        if !account_text::has_mentions(text) {
+            return self.text(ui, role, text);
+        }
+        let style = self.style(role);
+        let _row = ui.element(
+            &ElementDesc::new()
+                .width(Sizing::Fit)
+                .height(Sizing::Fit)
+                .direction(Direction::LeftToRight)
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+        );
+        for segment in account_text::segments(text) {
+            match segment {
+                Segment::Text(text) => label_text(ui, text, &style),
+                Segment::Account { id, name } => {
+                    let shown = account_text::display_name(name, streamer_mode);
+                    let highlight = streamer_mode
+                        .then(|| launcher_ui::account_colors::color_for(id))
+                        .flatten();
+                    match highlight {
+                        Some(color) => {
+                            let background = Vec4::new(
+                                f32::from(color.r()) / 255.0,
+                                f32::from(color.g()) / 255.0,
+                                f32::from(color.b()) / 255.0,
+                                1.0,
+                            );
+                            let ink = launcher_ui::account_colors::contrasting_color(color);
+                            let ink = Vec4::new(
+                                f32::from(ink.r()) / 255.0,
+                                f32::from(ink.g()) / 255.0,
+                                f32::from(ink.b()) / 255.0,
+                                1.0,
+                            );
+                            let _chip = ui.element(
+                                &ElementDesc::new()
+                                    .width(Sizing::Fit)
+                                    .height(Sizing::Fit)
+                                    .padding(Padding::symmetric(3, 1))
+                                    .background(background)
+                                    .corner_radius(CornerRadius::all(4.0)),
+                            );
+                            label_text(
+                                ui,
+                                shown,
+                                &TextStyle {
+                                    color: ink,
+                                    ..style
+                                },
+                            );
+                        }
+                        None => label_text(ui, shown, &style),
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn text_colored(&self, ui: &mut Ui<'_>, text: &str, color: Vec4, scale: f32) {
+        label(
+            ui,
+            text,
+            &TextStyle {
+                color,
+                font_size: self.px(scale),
+                font_id: super::fonts::role_font_id(config::TextRole::Body),
+                ..TextStyle::default()
+            },
+        );
+    }
+
+    /// A themed icon `size` pixels square.
+    pub fn icon(&self, ui: &mut Ui<'_>, icon: Icon, size: f32, color: Vec4) {
+        icons::draw(ui, icon, size, color, self.svg_supersample);
+    }
+
+    /// Severity of each line of a log, recomputed only when the lines change (same buffer, same length = same levels).
+    pub fn log_levels(
+        &mut self,
+        id: &str,
+        lines: &[String],
+    ) -> Vec<Option<launcher_ui::log_format::LogLevel>> {
+        let key = (lines.as_ptr() as usize, lines.len());
+        if let Some((ptr, len, levels)) = self.levels.get(id)
+            && (*ptr, *len) == key
+        {
+            return levels.clone();
+        }
+        let levels = launcher_ui::log_format::resolve_log_levels(lines);
+        self.levels
+            .insert(id.to_owned(), (key.0, key.1, levels.clone()));
+        levels
+    }
+
+    /// Draws a loaded picture (or a placeholder while it loads or if it failed) in a `width` x `height` box, cropped
+    /// to fill with rounded corners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn image(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        key: &str,
+        source: impl FnOnce() -> ImageSource,
+        width: f32,
+        height: f32,
+        radius: f32,
+    ) {
+        let picture: Option<Picture> =
+            self.images
+                .get(key, source, (width.max(height) * 2.0) as u32);
+        let desc = ElementDesc::new()
+            .id(id.into())
+            .width(Sizing::Fixed(width))
+            .height(Sizing::Fixed(height))
+            .corner_radius(CornerRadius::all(radius));
+        match picture {
+            Some(picture) => ui.image(&desc, picture.texture),
+            None => {
+                if self.images.loading() {
+                    self.keep_alive.keep_awake_for(Duration::from_millis(100));
+                }
+                drop(ui.element(&desc.background(self.palette.bg_light)));
+            }
+        }
+    }
+
+    // -- Layout ---------------------------------------------------------------------------------------------------
+
+    pub fn row(&self, ui: &mut Ui<'_>, gap: u16) -> ElementScope {
+        ui.element(
+            &ElementDesc::new()
+                .width(Sizing::Grow)
+                .height(Sizing::Fit)
+                .direction(Direction::LeftToRight)
+                .child_gap(gap)
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+        )
+    }
+
+    pub fn column(&self, ui: &mut Ui<'_>, gap: u16) -> ElementScope {
+        ui.element(
+            &ElementDesc::new()
+                .width(Sizing::Grow)
+                .height(Sizing::Fit)
+                .direction(Direction::TopToBottom)
+                .child_gap(gap),
+        )
+    }
+
+    /// Flexible empty space that pushes the following siblings to the far end of a row.
+    pub fn fill(&self, ui: &mut Ui<'_>) {
+        drop(
+            ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(1.0)),
+            ),
+        );
+    }
+
+    pub fn gap(&self, ui: &mut Ui<'_>, size: f32) {
+        drop(
+            ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Fixed(size))
+                    .height(Sizing::Fixed(size)),
+            ),
+        );
+    }
+
+    /// A vertical scroll container that fills its parent, with a draggable scrollbar on its right edge.
+    pub fn scroll(&mut self, ui: &mut Ui<'_>, id: &str, gap: u16, padding: u16) -> ElementScope {
+        self.scroll_container = Some(id.to_owned());
+        let scope = ui.element(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Grow)
+                .height(Sizing::Grow)
+                .direction(Direction::TopToBottom)
+                .child_gap(gap)
+                .padding(Padding::all(padding))
+                .clip(Clip::vertical()),
+        );
+        self.scrollbar(ui, id);
+        scope
+    }
+
+    /// The scrollbar for the clipped element `id`, drawn from last frame's scroll metrics and dragged by grabbing its
+    /// thumb. Call it from inside the element.
+    pub fn scrollbar(&mut self, ui: &mut Ui<'_>, id: &str) {
+        const MARGIN: f32 = 4.0;
+        let Some(metrics) = ui.scroll_metrics(id) else {
+            return;
+        };
+        let Some((origin, size)) = ui.element_bounds(id) else {
+            return;
+        };
+        if !metrics.vertical || metrics.content_size.y <= metrics.container_size.y + 1.0 {
+            self.scroll_drag = None;
+            return;
+        }
+        let track = (size.y - MARGIN * 2.0).max(1.0);
+        let max_offset = metrics.content_size.y - metrics.container_size.y;
+        let thumb_height =
+            (track * metrics.container_size.y / metrics.content_size.y).clamp(28.0, track);
+        let travel = (track - thumb_height).max(1.0);
+        let thumb_id = format!("{id}::thumb");
+        let pointer = ui.pointer_position();
+        if !ui.pointer_down() {
+            self.scroll_drag = None;
+        } else if self.scroll_drag.is_none() && ui.hovered(&thumb_id) {
+            let current = (-metrics.offset.y).clamp(0.0, max_offset) / max_offset * travel;
+            self.scroll_drag = Some((id.to_owned(), pointer.y - (origin.y + MARGIN + current)));
+        }
+        let mut offset = (-metrics.offset.y).clamp(0.0, max_offset);
+        if let Some((dragging, grab)) = &self.scroll_drag
+            && dragging == id
+        {
+            let thumb_top = (pointer.y - origin.y - MARGIN - grab).clamp(0.0, travel);
+            offset = thumb_top / travel * max_offset;
+            ui.set_scroll_offset(id, Vec2::new(0.0, -offset));
+            self.keep_alive.keep_awake_for(Duration::from_millis(50));
+        }
+        let thumb_top = offset / max_offset * travel;
+        let active = self
+            .scroll_drag
+            .as_ref()
+            .is_some_and(|(dragging, _)| dragging == id);
+        let alpha = if active || ui.hovered(&thumb_id) {
+            0.7
+        } else {
+            0.35
+        };
+        let _thumb = ui.element(
+            &ElementDesc::new()
+                .id(thumb_id)
+                .width(Sizing::Fixed(6.0))
+                .height(Sizing::Fixed(thumb_height))
+                .background(self.palette.text_muted.with_w(alpha))
+                .corner_radius(CornerRadius::all(3.0))
+                .cursor(Cursor::Pointer)
+                .floating(Some(Floating {
+                    element_attach_point: AttachPoint::RightTop,
+                    parent_attach_point: AttachPoint::RightTop,
+                    offset: Vec2::new(-3.0, MARGIN + thumb_top),
+                    z_index: 100,
+                    capture_pointer: true,
+                    ..Floating::new(FloatTarget::Element(id.to_owned()))
+                })),
+        );
+    }
+
+    /// A raised panel (settings section, instance card, dialog body).
+    pub fn card(&self, ui: &mut Ui<'_>, id: &str, gap: u16) -> ElementScope {
+        let p = &self.palette;
+        ui.element(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Grow)
+                .height(Sizing::Fit)
+                .direction(Direction::TopToBottom)
+                .child_gap(gap)
+                .padding(Padding::all(SPACE_LG))
+                .background(p.bg)
+                .corner_radius(CornerRadius::all(CORNER))
+                .border(Border::all(p.border_muted, 1)),
+        )
+    }
+
+    /// A section heading with its description underneath.
+    pub fn section_header(&self, ui: &mut Ui<'_>, heading: &str, description: &str) {
+        let _col = self.column(ui, SPACE_XS);
+        self.text(ui, TextRole::Heading, heading);
+        if !description.is_empty() {
+            self.text(ui, TextRole::Muted, description);
+        }
+    }
+
+    // -- Buttons --------------------------------------------------------------------------------------------------
+
+    fn button_style(&self, kind: ButtonKind) -> vertex_shell::sturdy::widgets::ButtonStyle {
+        match kind {
+            ButtonKind::Neutral => self.palette.button(),
+            ButtonKind::Primary => self.palette.primary_button(),
+            ButtonKind::Danger => self.palette.danger_button(),
+        }
+    }
+
+    /// A text button sized to its label. Returns true when clicked.
+    pub fn button(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        kind: ButtonKind,
+        enabled: bool,
+    ) -> bool {
+        self.button_sized(ui, id, label, kind, enabled, Sizing::Fit)
+    }
+
+    pub fn button_sized(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        kind: ButtonKind,
+        enabled: bool,
+        width: Sizing,
+    ) -> bool {
+        self.button_full(ui, id, None, label, kind, enabled, width)
+    }
+
+    /// A button with an icon to the left of its centred label.
+    #[allow(clippy::too_many_arguments)]
+    pub fn button_icon(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        icon: Icon,
+        label: &str,
+        kind: ButtonKind,
+        enabled: bool,
+        width: Sizing,
+    ) -> bool {
+        self.button_full(ui, id, Some(icon), label, kind, enabled, width)
+    }
+
+    /// `button_icon` with the icon after the label.
+    #[allow(clippy::too_many_arguments)]
+    pub fn button_icon_right(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        icon: Icon,
+        label: &str,
+        kind: ButtonKind,
+        enabled: bool,
+        width: Sizing,
+    ) -> bool {
+        self.icon_after = true;
+        let clicked = self.button_full(ui, id, Some(icon), label, kind, enabled, width);
+        self.icon_after = false;
+        clicked
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn button_full(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        icon: Option<Icon>,
+        label: &str,
+        kind: ButtonKind,
+        enabled: bool,
+        width: Sizing,
+    ) -> bool {
+        let style = self.button_style(kind);
+        let text = match kind {
+            ButtonKind::Neutral => self.style(TextRole::Body),
+            ButtonKind::Primary | ButtonKind::Danger => self.style(TextRole::OnAccent),
+        };
+        let text = if enabled {
+            text
+        } else {
+            TextStyle {
+                color: text.color.with_w(0.5),
+                ..text
+            }
+        };
+        let focused = enabled && self.focusable(id);
+        let activated = enabled && self.focus.activated(id);
+        let ring = self.focus_border(focused);
+        let state = self
+            .buttons
+            .entry(id.to_owned())
+            .or_insert_with(ButtonState::new);
+        let (result, scope) = ui.button(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(width)
+                .height(Sizing::Fixed(CONTROL_HEIGHT))
+                .padding(Padding::symmetric(SPACE_LG, 0))
+                .direction(Direction::LeftToRight)
+                .child_gap(SPACE_SM)
+                .align(ChildAlignment::center())
+                .cursor(if enabled {
+                    Cursor::Pointer
+                } else {
+                    Cursor::NotAllowed
+                })
+                .border(ring),
+            state,
+            &style,
+            enabled,
+        );
+        if let Some(scope) = scope {
+            let after = self.icon_after;
+            if let (Some(icon), false) = (icon, after) {
+                self.icon(ui, icon, 16.0, text.color);
+            }
+            self::label(ui, label, &text);
+            if let (Some(icon), true) = (icon, after) {
+                self.icon(ui, icon, 16.0, text.color);
+            }
+            drop(scope);
+        }
+        enabled && (result.clicked || activated)
+    }
+
+    /// A square icon-only button. Returns true when clicked.
+    pub fn icon_button(&mut self, ui: &mut Ui<'_>, id: &str, icon: Icon, size: f32) -> bool {
+        let focused = self.focusable(id);
+        let ring = self.focus_border(focused);
+        let hovered = ui.hovered(id);
+        {
+            let _button = ui.element(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Fixed(size))
+                    .height(Sizing::Fixed(size))
+                    .align(ChildAlignment::center())
+                    .background(if hovered {
+                        self.palette.hovered_fill()
+                    } else {
+                        Vec4::ZERO
+                    })
+                    .corner_radius(CornerRadius::all(8.0))
+                    .border(ring)
+                    .cursor(Cursor::Pointer),
+            );
+            self.icon(ui, icon, size * 0.55, self.palette.text);
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    /// Two buttons that look like one: a wide main action and a narrow `+ ▾` menu opener on its right. Returns
+    /// (main clicked, menu clicked).
+    pub fn split_button(
+        &mut self,
+        ui: &mut Ui<'_>,
+        main_id: &str,
+        label: &str,
+        menu_id: &str,
+        main_enabled: bool,
+    ) -> (bool, bool) {
+        let fill = self.palette.primary;
+        let ink = self.palette.on_primary;
+        let main_focused = self.focusable(main_id);
+        let menu_focused = self.focusable(menu_id);
+        let main_hover = main_enabled && ui.hovered(main_id);
+        let menu_hover = ui.hovered(menu_id);
+        let shade = |hovered: bool, enabled: bool| {
+            let base = if hovered {
+                fill.lerp(Vec4::new(1.0, 1.0, 1.0, fill.w), 0.18)
+            } else {
+                fill
+            };
+            if enabled {
+                base
+            } else {
+                base.with_w(base.w * 0.5)
+            }
+        };
+        let radius = 10.0;
+        {
+            let _row = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(CONTROL_HEIGHT))
+                    .direction(Direction::LeftToRight)
+                    .child_gap(1),
+            );
+            {
+                let _main = ui.element(
+                    &ElementDesc::new()
+                        .id(main_id.into())
+                        .width(Sizing::Grow)
+                        .height(Sizing::Grow)
+                        .padding(Padding::symmetric(SPACE_LG, 0))
+                        .align(ChildAlignment::center())
+                        .background(shade(main_hover, main_enabled))
+                        .corner_radius(CornerRadius {
+                            top_left: radius,
+                            bottom_left: radius,
+                            top_right: 0.0,
+                            bottom_right: 0.0,
+                        })
+                        .border(self.focus_border(main_focused))
+                        .cursor(if main_enabled {
+                            Cursor::Pointer
+                        } else {
+                            Cursor::NotAllowed
+                        }),
+                );
+                label_text(
+                    ui,
+                    label,
+                    &TextStyle {
+                        color: ink,
+                        ..self.style(TextRole::OnAccent)
+                    },
+                );
+            }
+            {
+                let _menu = ui.element(
+                    &ElementDesc::new()
+                        .id(menu_id.into())
+                        .width(Sizing::Fixed(CONTROL_HEIGHT + 18.0))
+                        .height(Sizing::Grow)
+                        .direction(Direction::LeftToRight)
+                        .child_gap(2)
+                        .align(ChildAlignment::center())
+                        .background(shade(menu_hover, true))
+                        .corner_radius(CornerRadius {
+                            top_left: 0.0,
+                            bottom_left: 0.0,
+                            top_right: radius,
+                            bottom_right: radius,
+                        })
+                        .border(self.focus_border(menu_focused))
+                        .cursor(Cursor::Pointer),
+                );
+                self.icon(ui, Icon::Plus, 16.0, ink);
+                self.icon(ui, Icon::ChevronDown, 12.0, ink);
+            }
+        }
+        let main = main_enabled && (ui.clicked(main_id) || self.focus.activated(main_id));
+        let menu = ui.clicked(menu_id) || self.focus.activated(menu_id);
+        (main, menu)
+    }
+
+    /// A square icon-only sidebar entry; hover shows the name through a tooltip the caller attaches.
+    pub fn nav_icon(&mut self, ui: &mut Ui<'_>, id: &str, icon: Icon, selected: bool) -> bool {
+        self.nav_thumbnail(ui, id, selected, |ui, kit| {
+            kit.icon(
+                ui,
+                icon,
+                22.0,
+                if selected {
+                    kit.palette.text
+                } else {
+                    kit.palette.text_muted
+                },
+            )
+        })
+    }
+
+    /// A square sidebar entry holding whatever `content` draws (an icon, an instance thumbnail).
+    pub fn nav_thumbnail(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        selected: bool,
+        content: impl FnOnce(&mut Ui<'_>, &mut Self),
+    ) -> bool {
+        let focused = self.focusable(id);
+        let ring = self.focus_border(focused);
+        let hovered = ui.hovered(id);
+        let background = if selected {
+            self.palette.primary.with_w(0.28)
+        } else if hovered {
+            self.palette.hovered_fill()
+        } else {
+            Vec4::ZERO
+        };
+        {
+            let _item = ui.element(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(44.0))
+                    .align(ChildAlignment::center())
+                    .background(background)
+                    .corner_radius(CornerRadius::all(12.0))
+                    .border(ring)
+                    .cursor(Cursor::Pointer),
+            );
+            content(ui, self);
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    /// A flat, borderless clickable row (sidebar entries, menu items). `selected` draws the accent tint.
+    pub fn nav_item(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        icon: Option<Icon>,
+        label: &str,
+        selected: bool,
+    ) -> bool {
+        self.nav_item_ex(ui, id, icon, label, selected, true)
+    }
+
+    /// `nav_item`; with `truncate` false the label is never shortened, so the menu around it must be as wide as it.
+    pub fn nav_item_ex(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        icon: Option<Icon>,
+        label: &str,
+        selected: bool,
+        truncate: bool,
+    ) -> bool {
+        let focused = self.focusable(id);
+        let ring = self.focus_border(focused);
+        let p = &self.palette;
+        let background = if selected {
+            p.primary.with_w(0.28)
+        } else if ui.hovered(id) {
+            p.hovered_fill()
+        } else {
+            Vec4::ZERO
+        };
+        {
+            let _item = ui.element(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(CONTROL_HEIGHT))
+                    .padding(Padding::symmetric(SPACE_MD, 0))
+                    .child_gap(SPACE_SM)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
+                    .background(background)
+                    .corner_radius(CornerRadius::all(10.0))
+                    .border(ring)
+                    .cursor(Cursor::Pointer),
+            );
+            if let Some(icon) = icon {
+                self.icon(
+                    ui,
+                    icon,
+                    18.0,
+                    if selected {
+                        self.palette.text
+                    } else {
+                        self.palette.text_muted
+                    },
+                );
+            }
+            let style = TextStyle {
+                wrap: TextWrap::None,
+                ..self.style(TextRole::Body)
+            };
+            let label = launcher_ui::privacy::scrub(label);
+            if truncate {
+                let shown =
+                    ui.ellipsize(&style, &label, if icon.is_some() { 160.0 } else { 190.0 });
+                ui.text(&shown, &style);
+            } else {
+                ui.text(&label, &style);
+            }
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    /// Whether context menu `id` is still on screen, including while it folds away after closing.
+    pub fn menu_visible(&self, id: &str) -> bool {
+        self.menu_anim
+            .get(id)
+            .is_some_and(|anim| anim.progress > 0.0)
+    }
+
+    /// The right-click menu: rows with their icon at the right, danger rows in red, opening at the pointer with the
+    /// panel unfolding and the rows sliding in, and folding away again on close. Returns the chosen row.
+    pub fn context_menu(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        state: &mut ui_kit::PopupState,
+        items: &[MenuEntry],
+    ) -> Option<usize> {
+        const ROW_HEIGHT: f32 = 30.0;
+        const SEPARATOR_HEIGHT: f32 = 9.0;
+        const SLIDE: f32 = 14.0;
+        const COLLAPSED: f32 = 2.0;
+        const OPEN_SECONDS: f32 = 0.16;
+        const CLOSE_SECONDS: f32 = 0.12;
+        let delta = self.delta_seconds.clamp(0.0, 0.1);
+        let now = uptime();
+        let open = state.is_open();
+        let bounds = ui.element_bounds(id);
+        let entry = self.menu_anim.entry(id.to_owned()).or_default();
+        if open && !entry.was_open && now - entry.last_call > 0.1 {
+            // Opened after the menu had stopped being drawn: unfold from the start.
+            entry.progress = 0.0;
+        }
+        entry.was_open = open;
+        entry.last_call = now;
+        if open {
+            if let Some((origin, _)) = bounds {
+                entry.origin = origin;
+            }
+            entry.progress = (entry.progress + delta / OPEN_SECONDS).min(1.0);
+        } else {
+            entry.progress = (entry.progress - delta / CLOSE_SECONDS).max(0.0);
+        }
+        let (progress, origin) = (entry.progress, entry.origin);
+        if !open && progress <= 0.0 {
+            return None;
+        }
+        if (open && progress < 1.0) || (!open && progress > 0.0) {
+            self.keep_alive.keep_awake_for(Duration::from_millis(32));
+        }
+        let eased = if progress < 0.5 {
+            2.0 * progress * progress
+        } else {
+            1.0 - (-2.0 * progress + 2.0).powi(2) / 2.0
+        };
+        let full: f32 = items
+            .iter()
+            .map(|item| {
+                ROW_HEIGHT
+                    + if item.separator_before {
+                        SEPARATOR_HEIGHT
+                    } else {
+                        0.0
+                    }
+            })
+            .sum();
+        let height = COLLAPSED + (full - COLLAPSED) * eased;
+        let slide = ((1.0 - eased) * SLIDE) as u16;
+
+        let style = PopupStyle {
+            background: self.palette.bg_dark,
+            border: self.palette.border_muted,
+            corner_radius: 10.0,
+            padding: Padding::all(8),
+            ..PopupStyle::default()
+        };
+        // Closing: a fresh popup pinned where the panel was, so it folds away without reacting to clicks.
+        let mut shown = if open {
+            state.clone()
+        } else {
+            let mut ghost = ui_kit::PopupState::default();
+            ghost.open_at(origin);
+            ghost
+        };
+        let mut chosen = None;
+        ui_kit::popup(ui, id, id, &mut shown, &style, |ui, popup| {
+            let _clip = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Fit)
+                    .height(Sizing::Fixed(height))
+                    .direction(Direction::TopToBottom)
+                    .padding(Padding {
+                        left: 0,
+                        right: 0,
+                        top: slide,
+                        bottom: 0,
+                    })
+                    .clip(Clip::vertical()),
+            );
+            drop(
+                ui.element(
+                    &ElementDesc::new()
+                        .width(Sizing::Fixed(124.0))
+                        .height(Sizing::Fixed(0.0)),
+                ),
+            );
+            for (index, item) in items.iter().enumerate() {
+                if item.separator_before {
+                    let _gap = ui.element(
+                        &ElementDesc::new()
+                            .width(Sizing::Grow)
+                            .height(Sizing::Fixed(SEPARATOR_HEIGHT))
+                            .align(ChildAlignment::center()),
+                    );
+                    drop(
+                        ui.element(
+                            &ElementDesc::new()
+                                .width(Sizing::Grow)
+                                .height(Sizing::Fixed(1.0))
+                                .background(self.palette.border_muted),
+                        ),
+                    );
+                }
+                let row_id = format!("{id}::{index}");
+                let hovered = open && ui.hovered(&row_id);
+                let ink = if item.danger {
+                    self.palette.danger
+                } else {
+                    self.palette.text
+                };
+                let fill = if !hovered {
+                    Vec4::ZERO
+                } else if item.danger {
+                    self.palette.danger.with_w(0.16)
+                } else {
+                    self.palette.hovered_fill()
+                };
+                {
+                    let _row = ui.element(
+                        &ElementDesc::new()
+                            .id(row_id.clone())
+                            .width(Sizing::Grow)
+                            .height(Sizing::Fixed(ROW_HEIGHT))
+                            .padding(Padding::symmetric(10, 0))
+                            .child_gap(SPACE_MD)
+                            .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
+                            .background(fill)
+                            .corner_radius(CornerRadius::all(6.0))
+                            .cursor(Cursor::Pointer),
+                    );
+                    self::label(
+                        ui,
+                        &item.label,
+                        &TextStyle {
+                            color: ink,
+                            wrap: TextWrap::None,
+                            ..self.style(TextRole::Body)
+                        },
+                    );
+                    self.fill(ui);
+                    if let Some(icon) = item.icon {
+                        self.icon(ui, icon, 16.0, ink);
+                    }
+                }
+                if open && ui.clicked(&row_id) {
+                    chosen = Some(index);
+                    popup.close();
+                }
+            }
+        });
+        if open {
+            // The popup counts frames since opening (a click is only "outside" after the first), so it must keep its
+            // own state from frame to frame.
+            *state = shown;
+            if chosen.is_some() {
+                state.close();
+            }
+        }
+        chosen
+    }
+
+    /// A tab button: as wide as its label (never truncated), the label centred, the selected one tinted.
+    pub fn tab(&mut self, ui: &mut Ui<'_>, id: &str, label: &str, selected: bool) -> bool {
+        self.tab_sized(ui, id, label, selected, Sizing::Fit)
+    }
+
+    /// A tab that takes an equal share of its row: the tabs of a row all use `Sizing::Grow`.
+    pub fn tab_sized(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        selected: bool,
+        width: Sizing,
+    ) -> bool {
+        let focused = self.focusable(id);
+        let ring = self.focus_border(focused);
+        let hovered = ui.hovered(id);
+        let background = if selected {
+            self.palette.primary.with_w(0.28)
+        } else if hovered {
+            self.palette.hovered_fill()
+        } else {
+            self.palette.bg_light
+        };
+        {
+            let _tab = ui.element(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(width)
+                    .height(Sizing::Fixed(CONTROL_HEIGHT))
+                    .padding(Padding::symmetric(SPACE_LG, 0))
+                    .align(ChildAlignment::center())
+                    .background(background)
+                    .corner_radius(CornerRadius::all(10.0))
+                    .border(ring)
+                    .cursor(Cursor::Pointer),
+            );
+            self.text(ui, TextRole::Body, label);
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    // -- Inputs ---------------------------------------------------------------------------------------------------
+
+    /// A switch; returns the new value when the user flipped it.
+    pub fn switch(&mut self, ui: &mut Ui<'_>, id: &str, on: bool, enabled: bool) -> Option<bool> {
+        let style = self.palette.toggle();
+        let focused = enabled && self.focusable(id);
+        let activated = enabled && self.focus.activated(id);
+        let ring = self.focus_border(focused);
+        let state = self
+            .toggles
+            .entry(id.to_owned())
+            .or_insert_with(ToggleState::new);
+        let result = ui.switch(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Fixed(46.0))
+                .height(Sizing::Fixed(24.0))
+                .corner_radius(CornerRadius::all(12.0))
+                .border(ring),
+            state,
+            &style,
+            on,
+            enabled,
+        );
+        (enabled && (result.clicked || activated)).then_some(!on)
+    }
+
+    /// A slider over `min..=max`; returns the new value while it changes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: Option<f64>,
+        enabled: bool,
+    ) -> Option<f64> {
+        let style = self.palette.slider();
+        let focused = enabled && self.focusable(id);
+        // Controller left/right adjust the focused slider; the engine handles the keyboard itself.
+        let mut input = SliderInput::default();
+        if focused && self.slider_steps != 0 {
+            let key = if self.slider_steps > 0 {
+                SliderKey::Increment
+            } else {
+                SliderKey::Decrement
+            };
+            input.keys = vec![key; self.slider_steps.unsigned_abs() as usize];
+        }
+        let state = self
+            .sliders
+            .entry(id.to_owned())
+            .or_insert_with(SliderState::new);
+        let result = ui.slider(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Fixed(260.0))
+                .height(Sizing::Fixed(22.0)),
+            &SliderConfig {
+                min,
+                max,
+                step,
+                ..SliderConfig::range(min, max)
+            },
+            &style,
+            state,
+            value,
+            &input,
+            enabled,
+        );
+        (result.changed && (result.value - value).abs() > f64::EPSILON).then_some(result.value)
+    }
+
+    /// A dropdown of `options`; returns the newly chosen index.
+    pub fn dropdown(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        selected: usize,
+        options: &[String],
+        width: f32,
+    ) -> Option<usize> {
+        if options.is_empty() {
+            return None;
+        }
+        // One look for every dropdown; long lists (fonts, Minecraft versions) also get a search box.
+        self.search_dropdown(ui, id, selected, options, width)
+    }
+
+    /// The dropdown every list uses: a virtualised list under the trigger, with a search box once the list is long
+    /// enough to need one. Returns the chosen index.
+    pub fn search_dropdown(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        selected: usize,
+        options: &[String],
+        width: f32,
+    ) -> Option<usize> {
+        const ROW_HEIGHT: f32 = 30.0;
+        const LIST_HEIGHT: f32 = 300.0;
+        let trigger = format!("{id}::trigger");
+        let focused = self.focusable(&trigger);
+        let activated = self.focus.activated(&trigger);
+        let ring = self.focus_border(focused);
+        let current = options
+            .get(selected)
+            .map_or("Select...", String::as_str)
+            .to_owned();
+        let hovered = ui.hovered(&trigger);
+        {
+            let _button = ui.element(
+                &ElementDesc::new()
+                    .id(trigger.clone())
+                    .width(Sizing::Fixed(width))
+                    .height(Sizing::Fixed(CONTROL_HEIGHT))
+                    .padding(Padding::symmetric(SPACE_MD, 0))
+                    .child_gap(SPACE_SM)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
+                    .background(if hovered {
+                        self.palette.hovered_fill()
+                    } else {
+                        self.palette.bg_light
+                    })
+                    .corner_radius(CornerRadius::all(8.0))
+                    .border(if focused {
+                        ring
+                    } else {
+                        Border::all(self.palette.border_muted, 1)
+                    })
+                    .cursor(Cursor::Pointer),
+            );
+            let text = TextStyle {
+                wrap: TextWrap::None,
+                ..self.style(TextRole::Body)
+            };
+            let shown = ui.ellipsize(
+                &text,
+                &launcher_ui::privacy::scrub(&current),
+                (width - 52.0).max(20.0),
+            );
+            ui.text(&shown, &text);
+            self.icon(ui, Icon::ChevronDown, 14.0, self.palette.text_muted);
+        }
+        let (mut menu, mut query) = self.searches.remove(id).unwrap_or_default();
+        if ui.clicked(&trigger) || activated {
+            if menu.is_open() {
+                menu.close();
+            } else {
+                menu.open();
+                query.clear();
+            }
+        }
+        let was_open = menu.is_open();
+        let searchable = options.len() > SEARCHABLE_DROPDOWN_THRESHOLD;
+        let style = PopupStyle {
+            background: self.palette.bg_dark,
+            border: self.palette.border_muted,
+            corner_radius: 10.0,
+            padding: Padding::all(SPACE_SM),
+            ..PopupStyle::default()
+        };
+        let mut chosen = None;
+        let popup_id = format!("{id}::popup");
+        ui_kit::popup(ui, &popup_id, &trigger, &mut menu, &style, |ui, popup| {
+            let _column = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Fixed(width.max(260.0)))
+                    .height(Sizing::Fit)
+                    .direction(Direction::TopToBottom)
+                    .child_gap(SPACE_XS),
+            );
+            let field = format!("{id}::search");
+            if searchable {
+                self.text_field(
+                    ui,
+                    &field,
+                    &mut query,
+                    "Type to search",
+                    false,
+                    Sizing::Grow,
+                );
+                if !was_open || query.is_empty() && !ui.has_focus(&field) && !ui.focused() {
+                    ui.focus(&field);
+                }
+            }
+            let needles: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+            let matches: Vec<usize> = options
+                .iter()
+                .enumerate()
+                .filter(|(_, option)| {
+                    let lower = option.to_lowercase();
+                    needles.iter().all(|needle| lower.contains(needle.as_str()))
+                })
+                .map(|(index, _)| index)
+                .collect();
+            let list_id = format!("{id}::list");
+            {
+                let _list = ui.element(
+                    &ElementDesc::new()
+                        .id(list_id.clone())
+                        .width(Sizing::Grow)
+                        .height(Sizing::Fixed(
+                            LIST_HEIGHT.min(matches.len().max(1) as f32 * ROW_HEIGHT),
+                        ))
+                        .direction(Direction::TopToBottom)
+                        .clip(Clip::both()),
+                );
+                self.scrollbar(ui, &list_id);
+                if matches.is_empty() {
+                    self.text(ui, TextRole::Muted, "No matches found.");
+                }
+                let visible = ui_kit::visible_rows(ui, &list_id, ROW_HEIGHT, matches.len(), 4);
+                ui_kit::spacer(ui, visible.before);
+                for row in visible.rows.clone() {
+                    let index = matches[row];
+                    let item = format!("{id}::option::{index}");
+                    let _row = ui.element(
+                        &ElementDesc::new()
+                            .width(Sizing::Grow)
+                            .height(Sizing::Fixed(ROW_HEIGHT)),
+                    );
+                    if self.nav_item_ex(ui, &item, None, &options[index], index == selected, false)
+                    {
+                        chosen = Some(index);
+                        popup.close();
+                    }
+                }
+                ui_kit::spacer(ui, visible.after);
+            }
+        });
+        self.searches.insert(id.to_owned(), (menu, query));
+        chosen.filter(|index| *index != selected)
+    }
+
+    /// A dropdown over an enum's values.
+    pub fn choice<T: Copy + PartialEq>(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        current: T,
+        all: &[T],
+        label: impl Fn(T) -> String,
+        width: f32,
+    ) -> Option<T> {
+        let options: Vec<String> = all.iter().map(|value| label(*value)).collect();
+        let selected = all.iter().position(|value| *value == current).unwrap_or(0);
+        self.dropdown(ui, id, selected, &options, width)
+            .map(|index| all[index])
+    }
+
+    /// A single-line text field bound to `value`. Returns true when the text changed (and `value` was updated).
+    /// The field keeps its own edit state; it re-reads `value` whenever it is not focused, so outside changes show.
+    pub fn text_field(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: &mut String,
+        placeholder: &str,
+        masked: bool,
+        width: Sizing,
+    ) -> bool {
+        self.text_field_ex(ui, id, value, placeholder, masked, width)
+            .changed
+    }
+
+    /// [`Kit::text_field`] that also reports Enter and focus.
+    pub fn text_field_ex(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: &mut String,
+        placeholder: &str,
+        masked: bool,
+        width: Sizing,
+    ) -> vertex_shell::sturdy::widgets::TextInputResult {
+        let mut style = self.palette.text_input(
+            self.input_font(),
+            self.typography
+                .resolve(config::TextRole::Input)
+                .size
+                .mul_add(self.font_size / 18.0, 0.0)
+                .round() as u16,
+        );
+        style.mask_characters = masked;
+        let nav_focused = self.focusable(id);
+        let activated = self.focus.activated(id);
+        let state = self
+            .texts
+            .entry(id.to_owned())
+            .or_insert_with(|| TextEditState::with_text(value));
+        if !state.focused() && state.text() != *value {
+            state.set_text(value);
+        }
+        if activated {
+            ui.focus(id);
+        }
+        let result = ui.text_field(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(width)
+                .height(Sizing::Fixed(CONTROL_HEIGHT))
+                // The field's text is its child: centre it vertically in the box, with a little room at the sides.
+                .padding(Padding::symmetric(SPACE_SM, 0))
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+            &style,
+            state,
+            placeholder,
+            true,
+        );
+        if result.changed {
+            *value = state.text();
+        }
+        let _ = nav_focused;
+        // The field is being edited when the widget says so (a click focuses it inside the engine without touching
+        // the UI's keyboard focus, which only `ui.focus` sets): arrows must then move its caret, not the page's focus.
+        if result.focused || ui.has_focus(id) {
+            self.text_focused_now = true;
+        }
+        result
+    }
+
+    /// Whether the element `id` was on screen (inside `scroll_id`'s viewport, with `margin` to spare) as of the last
+    /// frame. Unknown elements count as visible so first frames load their images.
+    pub fn near_viewport(&self, ui: &Ui<'_>, scroll_id: &str, id: &str, margin: f32) -> bool {
+        let (Some(metrics), Some((position, size))) =
+            (ui.scroll_metrics(scroll_id), ui.element_bounds(id))
+        else {
+            return true;
+        };
+        let Some((origin, _)) = ui.element_bounds(scroll_id) else {
+            return true;
+        };
+        let top = position.y - origin.y;
+        top + size.y >= -margin && top <= metrics.container_size.y + margin
+    }
+
+    /// A removable chip (a search tag). Returns true when its close button was clicked.
+    pub fn chip(&mut self, ui: &mut Ui<'_>, id: &str, label: &str) -> bool {
+        let close = format!("{id}::close");
+        {
+            let _chip = ui.element(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Fit)
+                    .height(Sizing::Fixed(28.0))
+                    .padding(Padding::symmetric(SPACE_MD, 0))
+                    .child_gap(SPACE_SM)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
+                    .background(self.palette.primary.with_w(0.22))
+                    .corner_radius(CornerRadius::all(14.0)),
+            );
+            label_text(ui, label, &self.style(TextRole::Body));
+            {
+                let _close = ui.element(
+                    &ElementDesc::new()
+                        .id(close.clone())
+                        .width(Sizing::Fixed(16.0))
+                        .height(Sizing::Fixed(16.0))
+                        .align(ChildAlignment::center())
+                        .cursor(Cursor::Pointer),
+                );
+                self.icon(ui, Icon::Close, 12.0, self.palette.text_muted);
+            }
+        }
+        ui.clicked(&close)
+    }
+
+    /// A multi-line text box bound to `value`; `lines` sets its height. Returns true when the text changed.
+    pub fn text_area(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: &mut String,
+        placeholder: &str,
+        lines: u16,
+    ) -> bool {
+        let mut style = self.palette.text_input(
+            self.input_font(),
+            self.typography
+                .resolve(config::TextRole::Input)
+                .size
+                .mul_add(self.font_size / 18.0, 0.0)
+                .round() as u16,
+        );
+        style.wrap_lines = true;
+        let height = f32::from(lines) * f32::from(self.px(1.0)) * 1.5 + 16.0;
+        let scrollbar = ScrollbarStyle {
+            thumb_color: self.palette.text_muted.with_w(0.35),
+            ..ScrollbarStyle::default()
+        };
+        let state = self
+            .texts
+            .entry(id.to_owned())
+            .or_insert_with(|| TextEditState::with_text(value));
+        if !state.focused() && state.text() != *value {
+            state.set_text(value);
+        }
+        let area = self
+            .areas
+            .entry(id.to_owned())
+            .or_insert_with(ScrollAreaState::new);
+        let result = ui.text_area(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Grow)
+                .height(Sizing::Fixed(height)),
+            &style,
+            &scrollbar,
+            state,
+            area,
+            placeholder,
+            true,
+        );
+        if result.changed {
+            *value = state.text();
+        }
+        result.changed
+    }
+
+    /// A checkbox with a label to its right. Returns the new value when flipped.
+    pub fn checkbox(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        checked: bool,
+    ) -> Option<bool> {
+        let style = self.palette.toggle();
+        let focused = self.focusable(id);
+        let activated = self.focus.activated(id);
+        let ring = self.focus_border(focused);
+        let state = self
+            .toggles
+            .entry(id.to_owned())
+            .or_insert_with(ToggleState::new);
+        let mut flipped = false;
+        {
+            let _row = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(28.0))
+                    .direction(Direction::LeftToRight)
+                    .child_gap(SPACE_SM)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+            );
+            let result = ui.checkbox(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Fixed(22.0))
+                    .height(Sizing::Fixed(22.0))
+                    .border(ring),
+                state,
+                &style,
+                checked,
+                0,
+                true,
+            );
+            flipped = result.clicked || activated;
+            label_text(ui, label, &self.style(TextRole::Body));
+        }
+        flipped.then_some(!checked)
+    }
+
+    /// A radio option with a label to its right. Returns true when it was clicked.
+    pub fn radio(&mut self, ui: &mut Ui<'_>, id: &str, label: &str, selected: bool) -> bool {
+        let style = self.palette.toggle();
+        let focused = self.focusable(id);
+        let activated = self.focus.activated(id);
+        let ring = self.focus_border(focused);
+        let state = self
+            .toggles
+            .entry(id.to_owned())
+            .or_insert_with(ToggleState::new);
+        let mut clicked = false;
+        {
+            let _row = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(28.0))
+                    .direction(Direction::LeftToRight)
+                    .child_gap(SPACE_SM)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+            );
+            let result = ui.radio_button(
+                &ElementDesc::new()
+                    .id(id.into())
+                    .width(Sizing::Fixed(22.0))
+                    .height(Sizing::Fixed(22.0))
+                    .border(ring),
+                state,
+                &style,
+                selected,
+                true,
+            );
+            clicked = result.clicked || activated;
+            label_text(ui, label, &self.style(TextRole::Body));
+        }
+        clicked
+    }
+
+    /// Text the user can select and copy but not edit (paths, codes, log lines).
+    pub fn selectable_text(&mut self, ui: &mut Ui<'_>, id: &str, value: &str, width: Sizing) {
+        let mut style = self.palette.text_input(
+            self.input_font(),
+            self.typography
+                .resolve(config::TextRole::Input)
+                .size
+                .mul_add(self.font_size / 18.0, 0.0)
+                .round() as u16,
+        );
+        style.read_only = true;
+        let state = self
+            .texts
+            .entry(id.to_owned())
+            .or_insert_with(|| TextEditState::with_text(value));
+        if state.text() != value {
+            state.set_text(value);
+        }
+        let _ = ui.text_field(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(width)
+                .height(Sizing::Fixed(CONTROL_HEIGHT))
+                .padding(Padding::symmetric(SPACE_SM, 0))
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+            &style,
+            state,
+            "",
+            true,
+        );
+    }
+
+    /// Shows `text` as a tooltip while the element `anchor_id` is hovered. It sits to the right of the pointer when the
+    /// whole text fits there without wrapping, else on whichever side has more room (the right on a tie); it wraps to
+    /// fit that room so nothing leaves the window, and is kept vertically inside the window too.
+    pub fn tooltip(&mut self, ui: &mut Ui<'_>, anchor_id: &str, text: &str) {
+        const DELAY_SECONDS: f32 = 0.5;
+        const GAP: f32 = 16.0; // clears the cursor itself
+        const MARGIN: f32 = 8.0; // from the window's edge
+        const MAX_WIDTH: f32 = 360.0;
+        const PAD_X: u16 = 9;
+        const PAD_Y: u16 = 6;
+
+        if !ui.hovered(anchor_id) {
+            self.tooltips.remove(anchor_id);
+            return;
+        }
+        let waited = self.tooltips.entry(anchor_id.to_owned()).or_insert(0.0);
+        *waited += self.delta_seconds;
+        if *waited < DELAY_SECONDS {
+            self.keep_alive.keep_awake_for(Duration::from_secs_f32(
+                (DELAY_SECONDS - *waited).max(0.016),
+            ));
+            return;
+        }
+
+        let pointer = ui.pointer_position();
+        let viewport = ui.viewport_size();
+        let room_right = viewport.x - pointer.x - GAP - MARGIN;
+        let room_left = pointer.x - GAP - MARGIN;
+
+        let style = TextStyle {
+            wrap: TextWrap::Words,
+            ..self.style(TextRole::Small)
+        };
+        let shown = launcher_ui::privacy::scrub(text);
+        // The widest line as it would be drawn unwrapped, and the box that takes.
+        let natural = shown
+            .lines()
+            .map(|line| ui.measure_text(&style, line).x)
+            .fold(0.0_f32, f32::max);
+        let pad = f32::from(PAD_X) * 2.0;
+        let wanted = (natural + pad + 2.0).min(MAX_WIDTH);
+        // Right if the whole text fits there without wrapping; otherwise whichever side has more room (right on a tie).
+        let on_right = room_right >= wanted || room_right >= room_left;
+        let room = if on_right { room_right } else { room_left };
+        let width = wanted.min(room.max(80.0)).max(40.0);
+
+        // Height from last frame's layout of this very tooltip (it wraps, so it is not known before), to keep it inside
+        // the window vertically.
+        let tip_id = format!("{anchor_id}::tooltip");
+        let height = ui.element_bounds(&tip_id).map_or(28.0, |(_, size)| size.y);
+        let x = if on_right {
+            pointer.x + GAP
+        } else {
+            pointer.x - GAP - width
+        };
+        let y =
+            (pointer.y - height * 0.5).clamp(MARGIN, (viewport.y - height - MARGIN).max(MARGIN));
+
+        let mut floating = Floating::new(FloatTarget::Root);
+        floating.element_attach_point = AttachPoint::LeftTop;
+        floating.parent_attach_point = AttachPoint::LeftTop;
+        floating.offset = Vec2::new(x.max(0.0), y);
+        floating.z_index = 1000;
+        floating.capture_pointer = false;
+        {
+            let _tip = ui.element(
+                &ElementDesc::new()
+                    .id(tip_id)
+                    .width(Sizing::Fixed(width))
+                    .height(Sizing::Fit)
+                    .padding(Padding::symmetric(PAD_X, PAD_Y))
+                    .background(self.palette.bg_dark)
+                    .corner_radius(CornerRadius::all(6.0))
+                    .border(Border::all(self.palette.border_muted, 1))
+                    .direction(Direction::TopToBottom)
+                    .floating(Some(floating)),
+            );
+            self::label(ui, text, &style);
+        }
+        // Follows the pointer while it moves over the anchor.
+        self.keep_alive.keep_awake_for(Duration::from_millis(16));
+    }
+
+    // -- Settings rows --------------------------------------------------------------------------------------------
+
+    /// Label (+ info tooltip) on the left, control on the right: the shape of every settings row.
+    pub fn setting_row(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        control: impl FnOnce(&mut Self, &mut Ui<'_>),
+    ) {
+        let label_id = format!("{id}::label");
+        let info_id = format!("{id}::info");
+        {
+            let _row = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fit)
+                    .direction(Direction::LeftToRight)
+                    .child_gap(SPACE_MD)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+            );
+            {
+                let _label = ui.element(
+                    &ElementDesc::new()
+                        .id(label_id.clone())
+                        .width(Sizing::Grow)
+                        .height(Sizing::Fit)
+                        .direction(Direction::TopToBottom)
+                        .cursor(Cursor::Default),
+                );
+                self.text(ui, TextRole::Body, label);
+            }
+            if info.is_some() {
+                let _badge = ui.element(
+                    &ElementDesc::new()
+                        .id(info_id.clone())
+                        .width(Sizing::Fixed(16.0))
+                        .height(Sizing::Fixed(16.0))
+                        .align(ChildAlignment::new(AlignX::Center, AlignY::Center))
+                        .cursor(Cursor::Default),
+                );
+                self.icon(ui, Icon::Info, 14.0, self.palette.text_muted);
+            }
+            control(self, ui);
+        }
+        if let Some(info) = info {
+            self.tooltip(ui, &info_id, info);
+            self.tooltip(ui, &label_id, info);
+        }
+    }
+
+    pub fn toggle_setting(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        value: &mut bool,
+    ) -> bool {
+        self.toggle_setting_ex(ui, id, label, info, value, true)
+    }
+
+    /// [`Kit::toggle_setting`] that can be greyed out.
+    pub fn toggle_setting_ex(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        value: &mut bool,
+        enabled: bool,
+    ) -> bool {
+        let mut changed = false;
+        self.setting_row(ui, id, label, info, |kit, ui| {
+            if let Some(next) = kit.switch(ui, id, *value, enabled) {
+                *value = next;
+                changed = true;
+            }
+        });
+        changed
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_setting(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        format: impl Fn(f64) -> String,
+    ) -> Option<f64> {
+        self.slider_setting_ex(ui, id, label, info, value, min, max, step, true, format)
+    }
+
+    /// [`Kit::slider_setting`] that can be greyed out.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_setting_ex(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: f64,
+        enabled: bool,
+        format: impl Fn(f64) -> String,
+    ) -> Option<f64> {
+        let mut out = None;
+        self.setting_row(ui, id, label, info, |kit, ui| {
+            let shown = format(value);
+            kit.text(ui, TextRole::Muted, &shown);
+            out = kit.slider(
+                ui,
+                id,
+                value,
+                min,
+                max,
+                (step > 0.0).then_some(step),
+                enabled,
+            );
+        });
+        out
+    }
+
+    pub fn choice_setting<T: Copy + PartialEq>(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        current: T,
+        all: &[T],
+        label_of: impl Fn(T) -> String,
+    ) -> Option<T> {
+        let mut out = None;
+        self.setting_row(ui, id, label, info, |kit, ui| {
+            out = kit.choice(ui, id, current, all, label_of, 280.0);
+        });
+        out
+    }
+
+    pub fn text_setting(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        info: Option<&str>,
+        value: &mut String,
+        placeholder: &str,
+        masked: bool,
+    ) -> bool {
+        let mut changed = false;
+        self.setting_row(ui, id, label, info, |kit, ui| {
+            changed = kit.text_field(ui, id, value, placeholder, masked, Sizing::Fixed(320.0));
+        });
+        changed
+    }
+
+    /// A thin horizontal divider.
+    pub fn separator(&self, ui: &mut Ui<'_>) {
+        drop(
+            ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(1.0))
+                    .background(self.palette.border_muted),
+            ),
+        );
+    }
+
+    /// A determinate (`Some`) or indeterminate (`None`) progress bar.
+    pub fn progress(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        progress: Option<f32>,
+        time_seconds: f64,
+    ) {
+        let style = ui_kit::ProgressStyle {
+            track: self.palette.bg_light,
+            fill: self.palette.primary,
+            ..ui_kit::ProgressStyle::default()
+        };
+        let desc = ElementDesc::new()
+            .id(id.into())
+            .width(Sizing::Grow)
+            .height(Sizing::Fixed(6.0));
+        if let Some(next) = ui_kit::progress_bar(ui, &desc, progress, &style, time_seconds) {
+            self.keep_alive.keep_awake_for(next * 4);
+        }
+    }
+
+    /// Drops widget state for ids that start with `prefix` (a screen or dialog that closed).
+    pub fn forget(&mut self, prefix: &str) {
+        self.buttons.retain(|id, _| !id.starts_with(prefix));
+        self.toggles.retain(|id, _| !id.starts_with(prefix));
+        self.sliders.retain(|id, _| !id.starts_with(prefix));
+        self.dropdowns.retain(|id, _| !id.starts_with(prefix));
+        self.texts.retain(|id, _| !id.starts_with(prefix));
+        self.areas.retain(|id, _| !id.starts_with(prefix));
+        self.tooltips.retain(|id, _| !id.starts_with(prefix));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_selection_ranges_are_ordered_whichever_way_they_were_dragged() {
+        let mut selection = LogSelection::default();
+        assert_eq!(selection.range(), None);
+        assert!(!selection.active());
+        selection.anchor = Some(9);
+        selection.head = Some(4);
+        assert_eq!(selection.range(), Some((4, 9)));
+        assert!(selection.active());
+        selection.clear();
+        assert_eq!(selection.range(), None);
+        assert!(!selection.active());
+    }
+
+    #[test]
+    fn a_selection_being_dragged_counts_as_active_before_it_has_a_range() {
+        let selection = LogSelection {
+            dragging: true,
+            ..LogSelection::default()
+        };
+        assert!(selection.active());
+        assert_eq!(selection.range(), None);
+    }
+}

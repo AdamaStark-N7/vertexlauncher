@@ -1,7 +1,0 @@
-[package]
-name = "modal_host"
-version.workspace = true
-edition = "2024"
-
-[dependencies]
-egui.workspace = true

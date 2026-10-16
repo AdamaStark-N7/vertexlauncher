@@ -1,8 +1,5 @@
 use super::*;
 
-/// File-dialog slot for the skin picker.
-const SKIN_FILE_DIALOG: &str = "skins_pick_skin_file";
-
 #[derive(Clone)]
 pub(super) struct SkinManagerState {
     pub(super) active_profile_id: Option<String>,
@@ -24,7 +21,6 @@ pub(super) struct SkinManagerState {
     pub(super) pick_skin_in_progress: bool,
     pub(super) pick_skin_results_rx:
         Option<Arc<Mutex<Receiver<Result<(PathBuf, Vec<u8>), String>>>>>,
-    pub(super) wgpu_target_format: Option<wgpu::TextureFormat>,
     pub(super) preview_msaa_samples: u32,
     pub(super) preview_aa_mode: SkinPreviewAaMode,
     pub(super) last_preview_aa_mode: SkinPreviewAaMode,
@@ -48,12 +44,9 @@ pub(super) struct SkinManagerState {
     pub(super) preview_motion_blend: f32,
     pub(super) preview_limb_swing: f32,
     pub(super) skin_texture_hash: Option<u64>,
-    pub(super) skin_texture: Option<TextureHandle>,
     pub(super) skin_sample: Option<Arc<RgbaImage>>,
     pub(super) cape_texture_hash: Option<u64>,
-    pub(super) cape_texture: Option<TextureHandle>,
     pub(super) cape_sample: Option<Arc<RgbaImage>>,
-    pub(super) default_elytra_texture: Option<TextureHandle>,
     pub(super) default_elytra_sample: Option<Arc<RgbaImage>>,
     pub(super) cape_uv: FaceUvs,
     pub(super) camera_yaw_offset: f32,
@@ -87,7 +80,6 @@ impl Default for SkinManagerState {
             worker_rx: None,
             pick_skin_in_progress: false,
             pick_skin_results_rx: None,
-            wgpu_target_format: None,
             preview_msaa_samples: 1,
             preview_aa_mode: SkinPreviewAaMode::Msaa,
             last_preview_aa_mode: SkinPreviewAaMode::Msaa,
@@ -111,12 +103,9 @@ impl Default for SkinManagerState {
             preview_motion_blend: 0.0,
             preview_limb_swing: 0.0,
             skin_texture_hash: None,
-            skin_texture: None,
             skin_sample: None,
             cape_texture_hash: None,
-            cape_texture: None,
             cape_sample: None,
-            default_elytra_texture: None,
             default_elytra_sample: None,
             cape_uv: default_cape_uv_layout(),
             camera_yaw_offset: 0.0,
@@ -182,10 +171,8 @@ impl SkinManagerState {
         self.initial_cape_id = None;
         self.pending_cape_id = None;
         self.skin_texture_hash = None;
-        self.skin_texture = None;
         self.skin_sample = None;
         self.cape_texture_hash = None;
-        self.cape_texture = None;
         self.cape_sample = None;
         self.cached_expression_layout_hash = None;
         self.cached_expression_layout = None;
@@ -232,10 +219,8 @@ impl SkinManagerState {
         self.pending_skin_png = None;
         self.pending_skin_path = None;
         self.skin_texture_hash = None;
-        self.skin_texture = None;
         self.skin_sample = None;
         self.cape_texture_hash = None;
-        self.cape_texture = None;
         self.cape_sample = None;
         self.cached_expression_layout_hash = None;
         self.cached_expression_layout = None;
@@ -264,7 +249,7 @@ impl SkinManagerState {
         self.pending_cape_id = None;
     }
 
-    pub(super) fn poll_worker(&mut self, ctx: &egui::Context) {
+    pub(super) fn poll_worker(&mut self, repaint: impl Fn()) {
         let Some(rx) = self.worker_rx.take() else {
             return;
         };
@@ -366,11 +351,11 @@ impl SkinManagerState {
         if keep_rx {
             self.worker_rx = Some(rx);
         } else {
-            ctx.request_repaint();
+            repaint();
         }
     }
 
-    pub(super) fn poll_pick_skin_result(&mut self, ctx: &egui::Context) {
+    pub(super) fn poll_pick_skin_result(&mut self, repaint: impl Fn()) {
         let Some(rx) = self.pick_skin_results_rx.as_ref().cloned() else {
             return;
         };
@@ -404,13 +389,13 @@ impl SkinManagerState {
                 notification::error!("skin_manager", "{err}");
             }
         }
-        ctx.request_repaint();
+        repaint();
     }
 
-    pub(super) fn ensure_skin_texture(&mut self, ctx: &egui::Context) {
+    /// Decodes the skin to preview.
+    pub(super) fn ensure_skin_texture(&mut self) {
         let Some(bytes) = self.preview_skin_png() else {
-            self.skin_texture = None;
-            self.skin_texture_hash = None;
+                self.skin_texture_hash = None;
             self.skin_sample = None;
             return;
         };
@@ -427,36 +412,21 @@ impl SkinManagerState {
             return;
         };
         let image = Arc::new(image);
-        let size = [image.width() as usize, image.height() as usize];
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        let texture = ctx.load_texture(
-            format!("skins/preview/{hash:016x}"),
-            color_image,
-            TextureOptions::NEAREST,
-        );
-
-        self.skin_texture = Some(texture);
         self.skin_sample = Some(image);
         self.skin_texture_hash = Some(hash);
     }
 
-    pub(super) fn ensure_default_elytra_texture(&mut self, ctx: &egui::Context) {
-        if self.default_elytra_texture.is_some() && self.default_elytra_sample.is_some() {
+    pub(super) fn ensure_default_elytra_texture(&mut self) {
+        if self.default_elytra_sample.is_some() {
             return;
         }
         let image = Arc::new(default_elytra_texture_image());
-        let size = [image.width() as usize, image.height() as usize];
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        let texture =
-            ctx.load_texture("skins/default-elytra", color_image, TextureOptions::NEAREST);
-        self.default_elytra_texture = Some(texture);
         self.default_elytra_sample = Some(image);
     }
 
-    pub(super) fn ensure_cape_texture(&mut self, ctx: &egui::Context) {
+    pub(super) fn ensure_cape_texture(&mut self) {
         let Some(bytes) = self.selected_cape_png() else {
-            self.cape_texture = None;
-            self.cape_texture_hash = None;
+                self.cape_texture_hash = None;
             self.cape_sample = None;
             self.cape_uv = default_cape_uv_layout();
             return;
@@ -470,8 +440,7 @@ impl SkinManagerState {
         }
 
         let Some(image) = decode_generic_rgba(bytes) else {
-            self.cape_texture = None;
-            self.cape_texture_hash = None;
+                self.cape_texture_hash = None;
             self.cape_sample = None;
             self.cape_uv = default_cape_uv_layout();
             return;
@@ -480,15 +449,6 @@ impl SkinManagerState {
         self.cape_uv =
             cape_uv_layout([image.width(), image.height()]).unwrap_or_else(default_cape_uv_layout);
 
-        let size = [image.width() as usize, image.height() as usize];
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-        let texture = ctx.load_texture(
-            format!("skins/cape-preview/{hash:016x}"),
-            color_image,
-            TextureOptions::NEAREST,
-        );
-
-        self.cape_texture = Some(texture);
         self.cape_sample = Some(image);
         self.cape_texture_hash = Some(hash);
     }
@@ -505,30 +465,6 @@ impl SkinManagerState {
             .iter()
             .find(|cape| cape.id == selected)
             .and_then(|cape| cape.texture_bytes.as_deref())
-    }
-
-    /// Opens the skin picker without blocking; [`Self::poll_skin_file_dialog`] handles the pick.
-    pub(super) fn pick_skin_file(&mut self, ctx: &egui::Context) {
-        if self.pick_skin_in_progress {
-            return;
-        }
-        crate::ui::file_dialog::open(
-            ctx,
-            SKIN_FILE_DIALOG,
-            crate::ui::file_dialog::Pick::File,
-            crate::ui::file_dialog::Dialog::new()
-                .title("Select Minecraft Skin")
-                .filter("PNG", &["png"]),
-        );
-    }
-
-    /// Starts loading the skin the user picked, once the dialog closes.
-    pub(super) fn poll_skin_file_dialog(&mut self, ctx: &egui::Context) {
-        if let Some(path) = crate::ui::file_dialog::take(ctx, SKIN_FILE_DIALOG)
-            .and_then(|paths| paths.into_iter().next())
-        {
-            self.begin_loading_skin_from_path(path);
-        }
     }
 
     pub(super) fn begin_loading_skin_from_path(&mut self, path: PathBuf) {

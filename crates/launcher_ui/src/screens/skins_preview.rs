@@ -8,8 +8,6 @@ mod cuboid_triangles;
 mod face_uvs;
 #[path = "skins_preview/model_transform.rs"]
 mod model_transform;
-#[path = "skins_preview/preview_character_renderer.rs"]
-mod preview_character_renderer;
 #[path = "skins_preview/projection.rs"]
 mod projection;
 #[path = "skins_preview/render_triangle.rs"]
@@ -34,11 +32,10 @@ pub(super) use self::cuboid_triangles::{
 };
 pub(crate) use self::face_uvs::FaceUvs;
 pub(crate) use self::model_transform::ModelTransform;
-pub(super) use self::preview_character_renderer::render_preview_character;
 pub(crate) use self::projection::Projection;
 pub(crate) use self::render_triangle::RenderTriangle;
 pub(super) use self::skins_preview_expressions::{compatibility_score, eye_lid_rects};
-use self::skins_preview_scene::{build_character_scene, build_motion_blur_scene_samples};
+pub(in crate::screens) use self::skins_preview_scene::{build_character_scene, build_motion_blur_scene_samples};
 pub(crate) use self::triangle_texture::TriangleTexture;
 pub(super) use self::uv_rects::{uv_rect, uv_rect_overlay, uv_rect_with_inset};
 pub(crate) use self::vec3::Vec3;

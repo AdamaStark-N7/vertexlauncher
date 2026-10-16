@@ -11,7 +11,6 @@ use std::sync::{Mutex, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
 use config::Config;
-use egui::Context;
 use instances::{InstanceStore, instance_root_path};
 use launcher_runtime as tokio_runtime;
 
@@ -56,14 +55,15 @@ fn state() -> &'static Mutex<WatchState> {
 /// `player` should be the account that is playing right now, or `None` when no game is
 /// running (e.g. the file was copied in by hand), in which case the notification stays generic.
 /// The account is mentioned in the notification, so streamer mode hides it when it is drawn.
+///
+/// Returns how long until the next poll is due, so an on-demand UI can schedule a wake-up.
 pub fn poll(
-    ctx: &Context,
     instances: &InstanceStore,
     config: &Config,
     player: Option<AccountMention<'_>>,
-) {
+) -> Duration {
     let Ok(mut state) = state().lock() else {
-        return;
+        return POLL_INTERVAL;
     };
 
     while let Ok(listings) = state.rx.try_recv() {
@@ -119,7 +119,7 @@ pub fn poll(
             let _ = tx.send(listings);
         });
     }
-    ctx.request_repaint_after(POLL_INTERVAL);
+    POLL_INTERVAL
 }
 
 fn list_screenshots(dir: &Path) -> Vec<PathBuf> {
@@ -155,18 +155,13 @@ fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
     let copy_path = path.clone();
     let remove_path = path;
     vec![
-        NotificationAction::new("View", move |ctx| {
-            crate::screens::open_screenshot_in_viewer(ctx, view_path.clone());
+        NotificationAction::new("View", move || {
+            crate::app_commands::push(crate::app_commands::AppCommand::ViewScreenshot(view_path.clone()));
         }),
-        NotificationAction::new("Copy", move |ctx| {
-            match copy_to_clipboard(ctx, &copy_path) {
-                Ok(()) => notification::info!("screenshots", "Copied screenshot to clipboard."),
-                Err(err) => {
-                    notification::error!("screenshots", "Failed to copy screenshot: {}", err)
-                }
-            }
+        NotificationAction::new("Copy", move || {
+            crate::app_commands::push(crate::app_commands::AppCommand::CopyImage(copy_path.clone()));
         }),
-        NotificationAction::new("Remove", move |_ctx| {
+        NotificationAction::new("Remove", move || {
             let path = remove_path.clone();
             tokio_runtime::spawn_detached(async move {
                 match tokio::fs::remove_file(path.as_path()).await {
@@ -186,19 +181,6 @@ fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
         })
         .danger(),
     ]
-}
-
-fn copy_to_clipboard(ctx: &Context, path: &Path) -> Result<(), String> {
-    let bytes = fs::read(path).map_err(|err| err.to_string())?;
-    let rgba = image::load_from_memory(&bytes)
-        .map_err(|err| err.to_string())?
-        .to_rgba8();
-    let size = [rgba.width() as usize, rgba.height() as usize];
-    ctx.copy_image(egui::ColorImage::from_rgba_unmultiplied(
-        size,
-        rgba.as_raw(),
-    ));
-    Ok(())
 }
 
 #[cfg(test)]

@@ -200,22 +200,20 @@ pub(super) struct ObsWatcher {
 }
 
 impl ObsWatcher {
-    /// Starts the polling thread, scanning from the start if `enabled`. `ctx` is asked to
-    /// repaint when OBS starts or stops, so the change is acted on even while the launcher is
-    /// idle.
-    pub(super) fn spawn(ctx: &egui::Context, enabled: bool) -> Self {
+    /// Starts the polling thread, scanning from the start if `enabled`. `wake` is called when OBS
+    /// starts or stops, so the change is acted on even while the launcher is idle.
+    pub(super) fn spawn(wake: impl Fn() + Send + 'static, enabled: bool) -> Self {
         let enabled = Arc::new(AtomicBool::new(enabled));
         let running = Arc::new(AtomicBool::new(false));
         let thread_enabled = Arc::clone(&enabled);
         let thread_running = Arc::clone(&running);
-        let ctx = ctx.clone();
         let spawned = std::thread::Builder::new()
             .name("obs-detection".to_owned())
             .spawn(move || {
                 loop {
                     let found = thread_enabled.load(Ordering::Relaxed) && obs_is_running();
                     if thread_running.swap(found, Ordering::Relaxed) != found {
-                        ctx.request_repaint();
+                        wake();
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
@@ -257,38 +255,6 @@ impl ObsWatcher {
         };
         self.seen_running = running;
         change
-    }
-}
-
-impl VertexApp {
-    /// Whether streamer mode is in effect: switched on in the settings, or OBS is running.
-    ///
-    /// The OBS part is never written to the config, so it ends by itself when OBS closes.
-    pub(super) fn streamer_mode_active(&self) -> bool {
-        self.config.streamer_mode_enabled() || self.obs_watcher.is_active()
-    }
-
-    /// Follows OBS starting and stopping, with a notification each way unless streamer mode
-    /// is switched on in the settings anyway.
-    pub(super) fn poll_obs_detection(&mut self) {
-        let detection_enabled = self.config.obs_detection_enabled();
-        self.obs_watcher.set_enabled(detection_enabled);
-        let change = self.obs_watcher.poll_change();
-        if self.config.streamer_mode_enabled() {
-            return;
-        }
-        match change {
-            Some(ObsChange::Started) => notification::info!(
-                "Streamer Mode",
-                "Streamer mode was turned on because OBS was detected."
-            ),
-            // Turning detection off also ends it, but that is the user's own doing.
-            Some(ObsChange::Stopped) if detection_enabled => notification::info!(
-                "Streamer Mode",
-                "Streamer mode was turned off because OBS is no longer running."
-            ),
-            _ => {}
-        }
     }
 }
 

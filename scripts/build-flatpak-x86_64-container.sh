@@ -6,7 +6,6 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/rust:1-bookworm}"
 WORK_ROOT="${REPO_ROOT}/.cache/flatpak-x86_64-container"
 
-bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 
 mkdir -p "${WORK_ROOT}"
 

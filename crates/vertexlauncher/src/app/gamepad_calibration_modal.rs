@@ -1,8 +1,4 @@
 use config::GamepadCalibration;
-use eframe::egui;
-use textui::TextUi;
-use textui_egui::prelude::*;
-use ui_foundation::{DialogPreset, dialog_options, primary_button, secondary_button, show_dialog};
 
 use crate::app::gamepad::{GamepadDeviceIdentity, GamepadStickSample};
 
@@ -47,6 +43,57 @@ impl GamepadCalibrationState {
     pub fn device_key(&self) -> Option<&str> {
         self.device.as_ref().map(|device| device.key.as_str())
     }
+
+    /// What the user should do now, or `None` when no calibration is running.
+    pub fn instructions(&self) -> Option<&'static str> {
+        self.step.map(step_description)
+    }
+
+    /// The label of the main button for the current step.
+    pub fn primary_label(&self) -> &'static str {
+        match self.step {
+            Some(CalibrationStep::Neutral) => "Use current neutral",
+            Some(CalibrationStep::Review) => "Save calibration",
+            _ => "Capture current position",
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
+    }
+
+    /// The main button was pressed: capture the current stick position for this step, or, on the last step, finish.
+    pub fn primary(&mut self, live_sample: Option<GamepadStickSample>) -> ModalAction {
+        let (Some(device), Some(step)) = (self.device.clone(), self.step) else {
+            return ModalAction::None;
+        };
+        match step {
+            CalibrationStep::Review => match build_calibration(self) {
+                Some(calibration) => ModalAction::Save {
+                    device_key: device.key,
+                    calibration,
+                },
+                None => {
+                    self.error = Some(
+                        "Calibration is incomplete or the captured values are inconsistent."
+                            .to_owned(),
+                    );
+                    ModalAction::None
+                }
+            },
+            _ => match live_sample {
+                Some(sample) => {
+                    capture_step(self, step, sample);
+                    ModalAction::None
+                }
+                None => {
+                    self.error =
+                        Some("Move the stick so Vertex can see live input first.".to_owned());
+                    ModalAction::None
+                }
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -57,143 +104,6 @@ pub enum ModalAction {
         device_key: String,
         calibration: GamepadCalibration,
     },
-}
-
-pub fn render(
-    ctx: &egui::Context,
-    text_ui: &mut TextUi,
-    state: &mut GamepadCalibrationState,
-    live_sample: Option<GamepadStickSample>,
-) -> ModalAction {
-    let Some(device) = state.device.clone() else {
-        return ModalAction::None;
-    };
-    let Some(step) = state.step else {
-        return ModalAction::None;
-    };
-
-    let mut action = ModalAction::None;
-    let response = show_dialog(
-        ctx,
-        dialog_options("gamepad_calibration_modal_window", DialogPreset::Form),
-        |ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 8.0);
-
-            let heading = launcher_ui::ui::style::modal_title(ui);
-            let body = LabelOptions {
-                color: ui.visuals().weak_text_color(),
-                wrap: true,
-                ..launcher_ui::ui::style::body(ui)
-            };
-
-            let _ = text_ui.label(
-                ui,
-                "gamepad_calibration_heading",
-                "Calibrate Gamepad",
-                &heading,
-            );
-            let device_label = format!("Device: {}", device.name);
-            let _ = text_ui.label(
-                ui,
-                "gamepad_calibration_device",
-                device_label.as_str(),
-                &body,
-            );
-            let _ = text_ui.label(
-                ui,
-                "gamepad_calibration_step",
-                step_description(step),
-                &body,
-            );
-
-            ui.add_space(8.0);
-            ui.separator();
-            ui.add_space(8.0);
-
-            if let Some(sample) = live_sample {
-                let live_label = format!("Live left stick: x={:.3}, y={:.3}", sample.x, sample.y);
-                let _ = text_ui.label(ui, "gamepad_calibration_live", live_label.as_str(), &body);
-            } else {
-                let _ = text_ui.label(
-                    ui,
-                    "gamepad_calibration_live_missing",
-                    "No live left-stick sample is available from this device yet.",
-                    &body,
-                );
-            }
-
-            if let Some(error) = state.error.as_deref() {
-                let mut error_style = body.clone();
-                error_style.color = ui.visuals().error_fg_color;
-                let _ = text_ui.label(ui, "gamepad_calibration_error", error, &error_style);
-            }
-
-            ui.add_space(8.0);
-            let capture_enabled = live_sample.is_some();
-            let capture_label = match step {
-                CalibrationStep::Neutral => "Use current neutral",
-                CalibrationStep::Review => "Save calibration",
-                _ => "Capture current position",
-            };
-
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                let primary_clicked = text_ui
-                    .button(
-                        ui,
-                        "gamepad_calibration_primary",
-                        capture_label,
-                        &primary_button(ui, egui::vec2(170.0, 34.0)),
-                    )
-                    .clicked();
-                let cancel_clicked = text_ui
-                    .button(
-                        ui,
-                        "gamepad_calibration_cancel",
-                        "Cancel",
-                        &secondary_button(ui, egui::vec2(100.0, 34.0)),
-                    )
-                    .clicked();
-
-                if cancel_clicked {
-                    action = ModalAction::Cancel;
-                    return;
-                }
-
-                if !primary_clicked {
-                    return;
-                }
-
-                match step {
-                    CalibrationStep::Review => {
-                        if let Some(calibration) = build_calibration(state) {
-                            action = ModalAction::Save {
-                                device_key: device.key.clone(),
-                                calibration,
-                            };
-                        } else {
-                            state.error = Some(
-                                "Calibration is incomplete or the captured values are inconsistent."
-                                    .to_owned(),
-                            );
-                        }
-                    }
-                    _ if !capture_enabled => {
-                        state.error =
-                            Some("Move the stick so Vertex can see live input first.".to_owned());
-                    }
-                    _ => {
-                        capture_step(state, step, live_sample.expect("capture_enabled checked"));
-                    }
-                }
-            });
-        },
-    );
-
-    if response.close_requested && matches!(action, ModalAction::None) {
-        action = ModalAction::Cancel;
-    }
-
-    action
 }
 
 fn step_description(step: CalibrationStep) -> &'static str {

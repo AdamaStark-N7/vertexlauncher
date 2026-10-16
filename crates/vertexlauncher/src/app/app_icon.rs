@@ -1,22 +1,16 @@
 #![cfg_attr(target_os = "macos", allow(unexpected_cfgs))]
 
-use eframe::egui;
 use image::ImageFormat;
-use std::sync::Arc;
 
 const APP_ICON_WEBP: &[u8] = include_bytes!("../../../../Vertex.webp");
 
-pub(crate) fn egui_icon() -> Option<Arc<egui::IconData>> {
+/// The launcher icon as (width, height, RGBA pixels).
+pub(crate) fn rgba() -> Option<(u32, u32, Vec<u8>)> {
     let decoded = image::load_from_memory_with_format(APP_ICON_WEBP, ImageFormat::WebP)
         .ok()?
         .into_rgba8();
     let (width, height) = decoded.dimensions();
-
-    Some(Arc::new(egui::IconData {
-        rgba: decoded.into_raw(),
-        width,
-        height,
-    }))
+    Some((width, height, decoded.into_raw()))
 }
 
 #[cfg(any(target_os = "windows", target_os = "linux"))]

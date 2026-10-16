@@ -8,10 +8,13 @@ pub enum GraphicsApiPreference {
     Vulkan,
     Metal,
     Dx12,
+    /// WebGPU (Dawn): reaches GPUs and platforms where neither Vulkan nor DirectX 12 works.
+    #[serde(rename = "web_gpu")]
+    WebGpu,
 }
 
 impl GraphicsApiPreference {
-    pub const ALL: [Self; 4] = [Self::Auto, Self::Vulkan, Self::Metal, Self::Dx12];
+    pub const ALL: [Self; 5] = [Self::Auto, Self::Vulkan, Self::Metal, Self::Dx12, Self::WebGpu];
 
     pub const fn settings_label(self) -> &'static str {
         match self {
@@ -19,6 +22,7 @@ impl GraphicsApiPreference {
             Self::Vulkan => "Vulkan",
             Self::Metal => "Metal",
             Self::Dx12 => "DirectX 12",
+            Self::WebGpu => "WebGPU",
         }
     }
 }

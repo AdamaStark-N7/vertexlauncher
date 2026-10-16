@@ -1,6 +1,5 @@
-use launcher_ui::screens::{SettingsGraphicsAdapterInfo, SettingsInfo};
+use launcher_ui::screens::SettingsInfo;
 use std::sync::OnceLock;
-use vertex_3d::AvailableAdapter;
 
 use super::platform;
 
@@ -14,7 +13,6 @@ struct GraphicsInfo {
 
 static BASE_SETTINGS_INFO: OnceLock<SettingsInfo> = OnceLock::new();
 static GRAPHICS_INFO: OnceLock<GraphicsInfo> = OnceLock::new();
-static AVAILABLE_GRAPHICS_ADAPTERS: OnceLock<Vec<SettingsGraphicsAdapterInfo>> = OnceLock::new();
 
 pub fn try_settings_info() -> Option<SettingsInfo> {
     let mut info = BASE_SETTINGS_INFO.get()?.clone();
@@ -42,9 +40,6 @@ fn apply_graphics_overrides(info: &mut SettingsInfo) {
             (name, version) => format!("{name} {version}"),
         };
     }
-    if let Some(adapters) = AVAILABLE_GRAPHICS_ADAPTERS.get() {
-        info.available_graphics_adapters = adapters.clone();
-    }
 }
 
 pub fn record_graphics_adapter(
@@ -59,18 +54,6 @@ pub fn record_graphics_adapter(
         driver_name: clean_value(driver_name),
         driver_version: clean_value(driver_version),
     });
-}
-
-pub fn record_available_graphics_adapters(adapters: &[AvailableAdapter]) {
-    let _ = AVAILABLE_GRAPHICS_ADAPTERS.set(
-        adapters
-            .iter()
-            .map(|adapter| SettingsGraphicsAdapterInfo {
-                label: graphics_adapter_label(adapter),
-                hash: adapter.selection_hash,
-            })
-            .collect(),
-    );
 }
 
 fn build_base_settings_info() -> SettingsInfo {
@@ -95,34 +78,4 @@ fn clean_value(value: &str) -> String {
     } else {
         trimmed.to_owned()
     }
-}
-
-fn clean_driver_label(driver_name: &str, driver_info: &str) -> String {
-    let driver_name = clean_value(driver_name);
-    if driver_name != "Unknown" {
-        return driver_name;
-    }
-
-    let driver_info = clean_value(driver_info);
-    if driver_info != "Unknown" {
-        return driver_info;
-    }
-
-    "Unknown Driver".to_owned()
-}
-
-fn graphics_adapter_label(adapter: &AvailableAdapter) -> String {
-    let name = clean_value(&adapter.name);
-    let driver = clean_driver_label(&adapter.driver, &adapter.driver_info);
-    if driver == "Unknown Driver" || name_already_contains_driver(&name, &driver) {
-        return name;
-    }
-
-    format!("{name} ({driver})")
-}
-
-fn name_already_contains_driver(name: &str, driver: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    let driver = driver.to_ascii_lowercase();
-    name.contains(&driver)
 }

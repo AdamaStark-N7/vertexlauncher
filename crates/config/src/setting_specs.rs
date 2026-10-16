@@ -48,7 +48,7 @@ impl ToggleSettingId {
                 id: ToggleSettingId::LowPowerGpuPreferred,
                 label: "Prefer Integrated Graphics",
                 info_tooltip: Some(
-                    "On systems with both an integrated and a discrete GPU, the launcher window renders on the integrated one (lower power and heat) instead of the discrete one. This is the same as choosing the Low Power adapter profile below. It only affects the launcher, not Minecraft, and is ignored when a specific adapter is chosen. Requires a restart. Default: On.",
+                    "On systems with both an integrated and a discrete GPU, the launcher window renders on the integrated one (lower power and heat) instead of the discrete one. This is the same as choosing the Low Power adapter profile below. It only affects the launcher, not Minecraft, and is ignored when a specific adapter is chosen.. Default: On.",
                 ),
             },
             ToggleSettingId::StreamerModeEnabled => ToggleSettingSpec {
@@ -206,28 +206,28 @@ impl DropdownSettingId {
                 id: DropdownSettingId::WindowTransparency,
                 label: "Window Transparency",
                 info_tooltip: Some(
-                    "Opaque is a normal window. Transparent lets the desktop show through the launcher. Blurred also asks the operating system to blur what is behind it, where your platform supports that. Requires a restart. Default: Opaque.",
+                    "Opaque is a normal window. Transparent lets the desktop show through the launcher. Blurred also asks the operating system to blur what is behind it, where your platform supports that.. Default: Opaque.",
                 ),
             },
             DropdownSettingId::GraphicsAdapterPreferenceType => DropdownSettingSpec {
                 id: DropdownSettingId::GraphicsAdapterPreferenceType,
                 label: "Graphics Adapter Preference Type",
                 info_tooltip: Some(
-                    "Pick the launcher's GPU either by a performance profile (High Performance or Low Power) or by choosing one specific detected adapter. Requires a restart. Default: Performance Profile.",
+                    "Pick the launcher's GPU either by a performance profile (High Performance or Low Power) or by choosing one specific detected adapter.. Default: Performance Profile.",
                 ),
             },
             DropdownSettingId::GraphicsAdapterPreference => DropdownSettingSpec {
                 id: DropdownSettingId::GraphicsAdapterPreference,
                 label: "Graphics Adapter Preference",
                 info_tooltip: Some(
-                    "With Performance Profile above, the kind of GPU to prefer: Default, High Performance, Low Power, Discrete Only or Integrated Only. With Explicit Adapter, the exact GPU to use; if it is no longer available (unplugged or driver change) the launcher falls back to the High Performance profile. Requires a restart. Default: Low Power.",
+                    "With Performance Profile above, the kind of GPU to prefer: Default, High Performance, Low Power, Discrete Only or Integrated Only. With Explicit Adapter, the exact GPU to use; if it is no longer available (unplugged or driver change) the launcher falls back to the High Performance profile.. Default: Low Power.",
                 ),
             },
             DropdownSettingId::GraphicsApiPreference => DropdownSettingSpec {
                 id: DropdownSettingId::GraphicsApiPreference,
                 label: "Graphics API Preference",
                 info_tooltip: Some(
-                    "Which graphics API the launcher renders with. Auto lets the launcher choose; Vulkan, Metal (macOS) and DirectX 12 (Windows) force one. Only APIs your system supports are listed. Try another if the launcher shows graphical glitches. Requires a restart. Default: Auto.",
+                    "Which graphics API the launcher renders with. Auto lets the launcher choose; Vulkan, Metal (macOS), DirectX 12 (Windows) and WebGPU force one; WebGPU reaches GPUs that neither Vulkan nor DirectX 12 can. Only APIs your system supports are listed. Try another if the launcher shows graphical glitches.. Default: Auto.",
                 ),
             },
         }
@@ -390,5 +390,16 @@ impl TextSettingId {
                 ),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Every setting applies while the launcher runs, so no help text may ask for a restart.
+    #[test]
+    fn no_setting_asks_for_a_restart() {
+        let source = include_str!("setting_specs.rs");
+        let help_texts = source.split("mod tests").next().unwrap_or(source).to_ascii_lowercase();
+        assert!(!help_texts.contains("restart"), "a setting's help text mentions a restart");
     }
 }

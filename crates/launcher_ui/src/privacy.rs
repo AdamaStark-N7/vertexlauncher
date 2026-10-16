@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::ops::Range;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 pub const REDACTED_ACCOUNT_LABEL: &str = "Hidden Account";
 pub const REDACTED_IDENTIFIER_LABEL: &str = "[redacted]";
@@ -160,23 +160,14 @@ pub fn hide_account_names(text: &str, names_lowercase: &[String]) -> Option<Stri
     changed.then_some(out)
 }
 
-/// Logs, once, that a `without_name_scrubbing` scope drew an account name. The text is not logged.
-fn warn_exempt_text_has_name() {
-    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
-        tracing::warn!(
-            target: "vertexlauncher/privacy",
-            "Text drawn inside a name-exempt UI scope contained an account name; that scope is not static."
-        );
-    }
-}
+
 
 /// What the UI is currently hiding: streamer mode and the lowercase names to hide with it.
 static HIDDEN_NAMES: Mutex<Option<(bool, Vec<String>)>> = Mutex::new(None);
 
 /// Sets up the last-chance filter that every piece of text drawn by the UI passes through
-/// (see `textui_egui::set_text_scrubber`), so account names cannot show in streamer mode
-/// whatever produced the text: log lines, error messages, anything.
+/// ([`scrub`]), so account names cannot show in streamer mode whatever produced the text: log lines,
+/// error messages, anything.
 ///
 /// Call it every frame with the current streamer mode and the names of every account the
 /// launcher knows. It does nothing unless something changed. Stray mention markup (see
@@ -203,26 +194,51 @@ pub fn update_hidden_names<'a>(streamer_mode: bool, names: impl IntoIterator<Ite
     }
     *current = Some((streamer_mode, names_lowercase.clone()));
     drop(current);
+}
 
-    let hidden = Arc::new(names_lowercase);
-    textui_egui::set_text_scrubber(Some(Arc::new(move |text: &str| {
-        let resolved = crate::account_text::plain(text, streamer_mode);
-        if streamer_mode {
-            if textui_egui::name_scrubbing_exempt() {
-                // The exemption is the caller's promise that this text holds no account name.
-                // Debug builds check it, so a wrong exemption is noticed.
-                if cfg!(debug_assertions) && hide_account_names(&resolved, &hidden).is_some() {
-                    warn_exempt_text_has_name();
-                }
-            } else if let Some(hidden_text) = hide_account_names(&resolved, &hidden) {
-                return Some(hidden_text);
-            }
+/// The hidden-name rule is process-wide, so tests that set it must not run at the same time.
+#[cfg(test)]
+static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    static EXEMPT_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+struct ExemptionGuard;
+
+impl Drop for ExemptionGuard {
+    fn drop(&mut self) {
+        EXEMPT_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Runs `draw` with name scrubbing off for static launcher text that cannot contain an account name (the Settings
+/// page, dialogs). Toolkit-free counterpart of `textui_egui::without_name_scrubbing`.
+pub fn without_name_scrubbing<R>(draw: impl FnOnce() -> R) -> R {
+    EXEMPT_DEPTH.with(|depth| depth.set(depth.get() + 1));
+    let _guard = ExemptionGuard;
+    draw()
+}
+
+/// `text` as it should be shown right now: mention markup resolved, and in streamer mode every known account name
+/// replaced. The last-chance filter for any front end; the SE5 UI passes all drawn text through it.
+pub fn scrub(text: &str) -> Cow<'_, str> {
+    let Ok(current) = HIDDEN_NAMES.lock() else {
+        return Cow::Borrowed(text);
+    };
+    let Some((streamer_mode, hidden)) = current.as_ref() else {
+        return Cow::Borrowed(text);
+    };
+    let resolved = crate::account_text::plain(text, *streamer_mode);
+    if *streamer_mode && EXEMPT_DEPTH.with(|depth| depth.get() == 0) {
+        if let Some(hidden_text) = hide_account_names(&resolved, hidden) {
+            return Cow::Owned(hidden_text);
         }
-        match resolved {
-            Cow::Owned(resolved) => Some(resolved),
-            Cow::Borrowed(_) => None,
-        }
-    })));
+    }
+    match resolved {
+        Cow::Owned(resolved) => Cow::Owned(resolved),
+        Cow::Borrowed(_) => Cow::Borrowed(text),
+    }
 }
 
 #[cfg(test)]
@@ -292,43 +308,25 @@ mod hidden_name_tests {
         );
     }
 
-    /// The whole path: the installed rule is what the UI text API draws.
-    #[test]
-    fn installed_rule_hides_names_and_resolves_stray_markup() {
-        use crate::account_text::mention;
-        let marked = format!("Hello {}!", mention("id", "Steve"));
-
-        update_hidden_names(true, ["Steve", "Alex_9"]);
-        assert_eq!(
-            textui_egui::scrubbed("Setting user: Steve (alex_9)"),
-            "Setting user: Hidden Account (Hidden Account)"
-        );
-        assert_eq!(textui_egui::scrubbed(&marked), "Hello Hidden Account!");
-        assert_eq!(textui_egui::scrubbed("no names here"), "no names here");
-
-        // Inside an exempt scope names are not guessed at, but markup is still resolved.
-        textui_egui::without_name_scrubbing(|| {
-            assert_eq!(textui_egui::scrubbed("Play as Steve"), "Play as Steve");
-            assert_eq!(textui_egui::scrubbed(&marked), "Hello Hidden Account!");
-        });
-        assert_eq!(
-            textui_egui::scrubbed("Play as Steve"),
-            "Play as Hidden Account"
-        );
-
-        update_hidden_names(false, ["Steve"]);
-        assert_eq!(
-            textui_egui::scrubbed("Setting user: Steve"),
-            "Setting user: Steve"
-        );
-        // Not hidden, but the markup is still never shown raw.
-        assert_eq!(textui_egui::scrubbed(&marked), "Hello Steve!");
-        textui_egui::set_text_scrubber(None);
-    }
-
     #[test]
     fn no_names_means_no_change() {
         assert_eq!(hide_account_names("Steve", &[]), None);
         assert_eq!(hide_account_names("", &names(&["Steve"])), None);
+    }
+}
+
+#[cfg(test)]
+mod scrub_tests {
+    use super::*;
+
+    #[test]
+    fn scrub_hides_names_only_in_streamer_mode_and_honours_exemptions() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        update_hidden_names(true, ["Steve"]);
+        assert_eq!(scrub("Playing as Steve"), "Playing as Hidden Account");
+        assert_eq!(without_name_scrubbing(|| scrub("Playing as Steve").into_owned()), "Playing as Steve");
+        update_hidden_names(false, ["Steve"]);
+        assert_eq!(scrub("Playing as Steve"), "Playing as Steve");
+        update_hidden_names(false, std::iter::empty::<&str>());
     }
 }

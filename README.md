@@ -6,7 +6,7 @@ Native Minecraft launcher written in Rust.
 
 Vertex Launcher is a multi-crate desktop launcher with:
 
-- native desktop UI built on `eframe`/`egui`
+- native desktop UI built on [SturdyEngine5](https://github.com/sturdyfool10/sturdyengine5), an immediate-mode UI on a GPU renderer
 - Microsoft and Minecraft account sign-in
 - multi-instance management
 - runtime/bootstrap setup for Minecraft and Java
@@ -15,7 +15,7 @@ Vertex Launcher is a multi-crate desktop launcher with:
 
 ## Building
 
-A plain `git clone` builds with no extra steps. `Cargo.lock` and the precompiled shader fallbacks are tracked, so everyone resolves the same dependency versions and no shader compiler is required.
+A plain `git clone` builds with no extra steps. `Cargo.lock` is tracked, so everyone resolves the same dependency versions. The first build also compiles the SturdyEngine5 C++ engine (it is fetched as a git dependency), which takes a while and needs the tools listed below.
 
 ```sh
 git clone <repo-url> vertexlauncher
@@ -28,7 +28,7 @@ cargo build --release --locked
 - Rust 1.92 or newer (edition 2024; `rustup` is the easiest way to get it)
 - Git
 - a C compiler and linker (several crates compile bundled C code: `ring`, `onig_sys`, `lzma-sys`, vendored `libdbus`)
-- optional: [Slang](https://github.com/shader-slang/slang/releases) (`slangc` on `PATH`). When it is present the skin-preview shaders are recompiled during the build; when it is not, the tracked WGSL in `crates/launcher_ui/src/screens/shaders/precompiled/` is used. If you edit a `.slang` shader, run `bash scripts/compile-slang-shaders.sh` and commit the refreshed WGSL.
+- Git, CMake 3.28 or newer, Ninja, and Clang/Clang++ with C++26 support plus a libstdc++ that ships `libstdc++.a` (the SturdyEngine5 engine is built from source by its `sturdy-sys` crate; its build script documents the `STURDY_RS_*` environment knobs, e.g. `STURDY_RS_DEPS_DIR` to share downloaded third-party sources and `STURDY_RS_OFFLINE=1` for offline builds). At run time the launcher needs only a Vulkan driver (a Direct3D 12 driver on Windows) and, on Linux, `libwayland-client`.
 
 TLS is done with rustls, so OpenSSL is not needed.
 
@@ -231,14 +231,17 @@ Staged artifacts are written to `target/release` as:
 ## Workspace Layout
 
 - `crates/vertexlauncher`: desktop app entrypoint, app shell, CLI dispatch
-- `crates/launcher_ui`: screens, widgets, notifications, desktop UI helpers
+- `crates/vertex_shell`: the SturdyEngine5 window/runtime shell and live settings appliers
+- `crates/launcher_ui`: toolkit-free screen state, background workers and view APIs (home, instance, discover, content browser, skins, game settings), notifications, desktop helpers
+- `crates/vertex_theme`: themes and the Oklch palette
+- the SE5 screens, widget kit and dialogs live in `crates/vertexlauncher/src/app/se5`
 - `crates/installation`: Minecraft setup, dependency resolution, Java/runtime provisioning, launch orchestration
 - `crates/auth`: Microsoft/Minecraft auth and account state
 - `crates/instances`: persisted instance records and related metadata
 - `crates/config`: launcher configuration and serialization
 - `crates/modprovider`, `crates/modrinth`, `crates/curseforge`: content provider integration
 - `crates/runtime_bootstrap`, `crates/launcher_runtime`: async runtime creation and task execution
-- `crates/textui`, `crates/fontloader`: text, layout, and font support
+- `crates/fontloader`: font lookup and script coverage (which installed fonts can draw emoji or CJK)
 
 ## CLI
 

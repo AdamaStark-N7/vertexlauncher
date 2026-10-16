@@ -21,9 +21,11 @@ pub(crate) struct HomeState {
     pub(crate) screenshot_candidates: Vec<ScreenshotCandidate>,
     pub(crate) screenshot_loaded_count: usize,
     pub(crate) latest_requested_screenshot_scan_id: u64,
-    pub(crate) screenshot_images: LazyImageBytes,
     pub(crate) screenshot_layout_revision: u64,
-    pub(crate) screenshot_masonry_layout_cache: Option<CachedVirtualMasonryLayout>,
+    /// File listings from the worker: (serial, instance count, forced, candidates).
+    pub(crate) candidate_scans: launcher_runtime::WorkerChannel<(u64, usize, bool, Vec<ScreenshotCandidate>)>,
+    pub(crate) candidate_scan_serial: u64,
+    pub(crate) candidate_scan_in_flight: bool,
     pub(crate) thumbnails: HomeThumbnailState,
     pub(crate) screenshot_viewer: Option<ScreenshotViewerState>,
     pub(crate) pending_delete_screenshot_key: Option<String>,
@@ -35,47 +37,9 @@ pub(crate) struct HomeState {
 impl HomeState {
     pub(crate) fn mark_screenshot_layout_dirty(&mut self) {
         self.screenshot_layout_revision = self.screenshot_layout_revision.saturating_add(1);
-        self.screenshot_masonry_layout_cache = None;
     }
 
-    pub(crate) fn purge_screenshot_state(&mut self, ctx: &egui::Context) {
-        self.latest_requested_screenshot_scan_id =
-            self.latest_requested_screenshot_scan_id.saturating_add(1);
-        self.screenshots.clear();
-        self.last_screenshot_scan_at = None;
-        self.scanned_screenshot_instance_count = 0;
-        self.screenshot_scan_pending = false;
-        self.screenshot_scan_ready = false;
-        self.screenshot_tasks_total = 0;
-        self.screenshot_tasks_done = 0;
-        self.screenshot_candidates.clear();
-        self.screenshot_loaded_count = 0;
-        self.screenshot_images.clear(ctx);
-        self.screenshot_viewer = None;
-        self.pending_delete_screenshot_key = None;
-        self.delete_screenshot_in_flight = false;
-        self.delete_screenshot_results.reset();
-        self.mark_screenshot_layout_dirty();
-    }
 
-    pub(crate) fn purge_activity_image_state(&mut self, ctx: &egui::Context) {
-        for world in &mut self.worlds {
-            if world.thumbnail_png.take().is_some() {
-                image_textures::evict_source_key(&home_world_thumbnail_uri(
-                    world.instance_id.as_str(),
-                    world.world_id.as_str(),
-                ));
-            }
-        }
-        for server in &mut self.servers {
-            if server.icon_png.take().is_some() {
-                image_textures::evict_source_key(&home_server_icon_uri(
-                    server.instance_id.as_str(),
-                    server.favorite_id.as_str(),
-                ));
-            }
-        }
-        purge_home_activity_thumbnail_state(ctx, &mut self.thumbnails);
-        self.last_scan_at = None;
-    }
+
+
 }

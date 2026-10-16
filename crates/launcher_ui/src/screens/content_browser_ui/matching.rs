@@ -39,7 +39,7 @@ fn installed_project_matches_entry(
     false
 }
 
-pub(super) fn version_matches_loader(version: &BrowserVersionEntry, loader: BrowserLoader) -> bool {
+pub(in crate::screens) fn version_matches_loader(version: &BrowserVersionEntry, loader: BrowserLoader) -> bool {
     if loader == BrowserLoader::Any || version.loaders.is_empty() {
         return true;
     }
@@ -52,7 +52,7 @@ pub(super) fn version_matches_loader(version: &BrowserVersionEntry, loader: Brow
         .any(|value| normalize_search_key(value).contains(expected))
 }
 
-pub(super) fn version_matches_game_version(
+pub(in crate::screens) fn version_matches_game_version(
     version: &BrowserVersionEntry,
     game_version_filter: &str,
 ) -> bool {
@@ -111,4 +111,9 @@ pub(in crate::screens::content_browser) fn parse_content_type(
     } else {
         None
     }
+}
+
+/// Collapses runs of whitespace to single spaces and trims the ends.
+fn normalize_inline_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
 }

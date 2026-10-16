@@ -21,16 +21,4 @@ pub(super) fn def_matches_search(search: &str, def: &OptionDef) -> bool {
             .is_some_and(|text| text.to_lowercase().contains(&needle))
 }
 
-/// Draws a group's heading the first time something under it is shown.
-pub(super) fn heading_once(ui: &mut egui::Ui, text_ui: &mut TextUi, heading: &mut Option<&str>) {
-    if let Some(text) = heading.take() {
-        ui.add_space(style::SPACE_MD);
-        let _ = text_ui.label(
-            ui,
-            ("game_settings_heading", text),
-            text,
-            &style::subtitle(ui),
-        );
-        ui.add_space(style::SPACE_SM);
-    }
-}
+

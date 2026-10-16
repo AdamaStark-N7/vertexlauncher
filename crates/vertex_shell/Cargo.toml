@@ -1,0 +1,11 @@
+[package]
+name = "vertex_shell"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+# Pinned by rev: the engine's CMake build lives in OUT_DIR, so a moving branch would rebuild it needlessly.
+sturdy = { git = "https://github.com/sturdyfool10/sturdyengine5", rev = "6a6bc7590e7ec40268d4f3cd69c64175d84fe28d", features = ["raw-window-handle", "webgpu"] }
+tracing.workspace = true
+config.workspace = true
+vertex_theme.workspace = true

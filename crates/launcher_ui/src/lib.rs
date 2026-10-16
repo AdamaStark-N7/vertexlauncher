@@ -8,15 +8,21 @@ pub mod app {
 
 pub mod account_colors;
 pub mod account_text;
+pub mod app_commands;
 pub mod assets;
 pub mod console;
 pub mod desktop;
+pub mod file_dialog;
+pub mod image_memory;
+pub mod geom;
 pub mod install_activity;
+pub mod java_actions;
 pub mod launch_settings;
+pub mod log_format;
 pub mod notification;
 pub mod privacy;
+pub mod qr;
 pub mod screens;
 pub mod screenshot_watch;
 pub mod sync_runner;
-pub mod ui;
-pub mod window_effects;
+pub mod ui_waker;

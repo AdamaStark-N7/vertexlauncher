@@ -5,10 +5,6 @@ use std::collections::BTreeMap;
 
 use super::*;
 
-const BUTTON_GAP: f32 = style::SPACE_SM;
-/// Room around the widest instance name inside a button, on top of the button's own padding.
-const BUTTON_LABEL_PADDING: f32 = 12.0;
-const BUTTONS_TOP_SPACE: f32 = style::SPACE_XS;
 
 /// One instance an entry can be launched in, and what to launch there (the world folder
 /// name or server address as that instance knows it).
@@ -99,112 +95,13 @@ pub(super) fn collapse_servers(servers: Vec<ServerEntry>) -> Vec<ServerEntry> {
     )
 }
 
-/// Instances of a grouped entry; empty for single-instance entries.
-pub(super) fn group_instances<'a>(entry: &'a HomeEntryRef<'_>) -> &'a [EntryInstance] {
-    let instances = match entry {
-        HomeEntryRef::World(world) => &world.instances,
-        HomeEntryRef::Server(server) => &server.instances,
-    };
-    if instances.len() > 1 { instances } else { &[] }
-}
 
-/// How the launch buttons are arranged for a given width.
-#[derive(Clone, Copy, Debug, Default)]
-pub(super) struct InstanceButtonsLayout {
-    pub(super) columns: usize,
-    pub(super) button_width: f32,
-    pub(super) button_height: f32,
-    pub(super) rows: usize,
-    /// Total height including the space above the buttons; zero when there are none.
-    pub(super) total_height: f32,
-}
 
-/// Buttons are all the same width, at least as wide as the longest instance name plus
-/// padding, and flow onto more lines when that doesn't fit.
-pub(super) fn instance_buttons_layout(
-    ui: &Ui,
-    text_ui: &mut TextUi,
-    instances: &[EntryInstance],
-    width: f32,
-) -> InstanceButtonsLayout {
-    if instances.is_empty() {
-        return InstanceButtonsLayout::default();
-    }
-    let label_style = style::role(ui, config::TextRole::Button, false);
-    let widest_label = instances
-        .iter()
-        .map(|instance| {
-            text_ui
-                .measure_text_size(ui, instance.instance_name.as_str(), &label_style)
-                .x
-        })
-        .fold(0.0, f32::max);
-    let padding = ButtonOptions::default().padding;
-    let min_width = widest_label + padding.x * 2.0 + BUTTON_LABEL_PADDING;
-    let width = width.max(min_width);
-    let columns = (((width + BUTTON_GAP) / (min_width + BUTTON_GAP)).floor() as usize)
-        .clamp(1, instances.len());
-    let button_width = (width - BUTTON_GAP * (columns - 1) as f32) / columns as f32;
-    let button_height = (label_style.line_height + padding.y * 2.0).max(style::CONTROL_HEIGHT);
-    let rows = instances.len().div_ceil(columns);
-    InstanceButtonsLayout {
-        columns,
-        button_width,
-        button_height,
-        rows,
-        total_height: BUTTONS_TOP_SPACE
-            + rows as f32 * button_height
-            + rows.saturating_sub(1) as f32 * BUTTON_GAP,
-    }
-}
 
-/// Draws the button rows into a rect of exactly `layout.total_height`, returning the
-/// instance whose button was clicked.
-pub(super) fn render_instance_buttons(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    id_source: impl std::hash::Hash + Copy,
-    instances: &[EntryInstance],
-    layout: &InstanceButtonsLayout,
-    enabled: bool,
-) -> Option<EntryInstance> {
-    if layout.rows == 0 {
-        return None;
-    }
-    let (rect, _) = ui.allocate_exact_size(
-        egui::vec2(ui.available_width(), layout.total_height),
-        egui::Sense::hover(),
-    );
-    let mut clicked = None;
-    let mut top = rect.top() + BUTTONS_TOP_SPACE;
-    for row in instances.chunks(layout.columns) {
-        for (column, instance) in row.iter().enumerate() {
-            let left = rect.left() + column as f32 * (layout.button_width + BUTTON_GAP);
-            let button_rect = egui::Rect::from_min_size(
-                egui::pos2(left, top),
-                egui::vec2(layout.button_width, layout.button_height),
-            );
-            ui.scope_builder(egui::UiBuilder::new().max_rect(button_rect), |ui| {
-                let options = style::neutral_button_with_min_size(ui, button_rect.size());
-                let response = ui
-                    .add_enabled_ui(enabled, |ui| {
-                        text_ui.button(
-                            ui,
-                            (id_source, "instance_button", instance.instance_id.as_str()),
-                            instance.instance_name.as_str(),
-                            &options,
-                        )
-                    })
-                    .inner;
-                if response.clicked() {
-                    clicked = Some(instance.clone());
-                }
-            });
-        }
-        top += layout.button_height + BUTTON_GAP;
-    }
-    clicked
-}
+
+
+
+
 
 #[cfg(test)]
 mod tests {

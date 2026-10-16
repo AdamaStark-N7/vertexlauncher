@@ -4,7 +4,7 @@ use super::*;
 ///
 /// The result always spans the inclusive `[0.0, 1.0]` UV range. This function does not panic.
 pub(super) fn full_uv_rect() -> Rect {
-    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+    Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0))
 }
 
 fn full_face_uvs() -> FaceUvs {

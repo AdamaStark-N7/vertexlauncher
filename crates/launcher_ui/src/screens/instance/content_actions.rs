@@ -1,6 +1,5 @@
 use super::content_updates::update_all_installed_content;
 use super::*;
-use textui_egui::interaction;
 
 pub(super) fn request_content_update(
     state: &mut InstanceScreenState,
@@ -112,123 +111,7 @@ pub(super) fn request_content_update(
     });
 }
 
-pub(super) fn render_joined_content_browser_controls(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    instance_id: &str,
-    open_browser_enabled: bool,
-) -> (egui::Response, egui::Response) {
-    let total_width = ui.available_width().max(1.0);
-    let control_height = 34.0;
-    let icon_button_width = control_height;
-    let label_width = (total_width - icon_button_width).max(120.0);
-    let button_style =
-        style::neutral_button_with_min_size(ui, egui::vec2(label_width, control_height));
-    let cr = style::CORNER_RADIUS_SM;
-    let label_radius = egui::CornerRadius {
-        nw: cr,
-        sw: cr,
-        ne: 0,
-        se: 0,
-    };
-    let icon_radius = egui::CornerRadius {
-        nw: 0,
-        sw: 0,
-        ne: cr,
-        se: cr,
-    };
-    let (outer_rect, _) = ui.allocate_exact_size(
-        egui::vec2(total_width, control_height),
-        egui::Sense::hover(),
-    );
-    let label_rect =
-        egui::Rect::from_min_size(outer_rect.min, egui::vec2(label_width, control_height));
-    let icon_rect = egui::Rect::from_min_size(
-        egui::pos2(label_rect.max.x, outer_rect.min.y),
-        egui::vec2(icon_button_width, control_height),
-    );
 
-    let label_response = ui.interact(
-        label_rect,
-        ui.id().with(("instance_add_content_label", instance_id)),
-        if open_browser_enabled {
-            egui::Sense::click()
-        } else {
-            egui::Sense::hover()
-        },
-    );
-    let label_state =
-        interaction::InteractionState::of(ui.ctx(), &label_response, open_browser_enabled);
-    ui.painter().rect(
-        label_rect,
-        label_radius,
-        interaction::FillPalette::from_visuals(ui.visuals()).fill(label_state, false),
-        interaction::hover_stroke(
-            label_state,
-            ui.visuals().widgets.inactive.bg_stroke,
-            ui.visuals().widgets.hovered.bg_stroke,
-        ),
-        egui::StrokeKind::Inside,
-    );
-    let label_inner = label_rect.shrink2(egui::vec2(button_style.padding.x, 0.0));
-    ui.scope_builder(egui::UiBuilder::new().max_rect(label_inner), |ui| {
-        ui.with_layout(
-            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
-            |ui| {
-                let label_options = LabelOptions {
-                    font_size: button_style.font_size,
-                    line_height: button_style.line_height,
-                    weight: 700,
-                    color: if open_browser_enabled {
-                        button_style.text_color
-                    } else {
-                        ui.visuals().weak_text_color()
-                    },
-                    wrap: false,
-                    ..crate::ui::style::body(ui)
-                };
-                let _ = text_ui.label(
-                    ui,
-                    ("instance_add_content_label", instance_id),
-                    "Open Content Browser",
-                    &label_options,
-                );
-            },
-        );
-    });
-
-    let icon_response = ui.interact(
-        icon_rect,
-        ui.id().with(("instance_add_content_plus", instance_id)),
-        egui::Sense::click(),
-    );
-    let icon_state = interaction::InteractionState::of(ui.ctx(), &icon_response, true);
-    ui.painter().rect(
-        icon_rect,
-        icon_radius,
-        interaction::FillPalette::from_visuals(ui.visuals()).fill(icon_state, false),
-        interaction::hover_stroke(
-            icon_state,
-            ui.visuals().widgets.inactive.bg_stroke,
-            ui.visuals().widgets.hovered.bg_stroke,
-        ),
-        egui::StrokeKind::Inside,
-    );
-    let icon_color = ui.visuals().text_color();
-    let themed_svg = crate::ui::svg_tint::tint_svg(assets::PLUS_SVG, icon_color);
-    let uri = format!(
-        "bytes://instance/content-plus/{instance_id}-{:02x}{:02x}{:02x}.svg",
-        icon_color.r(),
-        icon_color.g(),
-        icon_color.b()
-    );
-    let icon_size = (control_height - style::SPACE_MD * 2.0).clamp(12.0, 18.0);
-    let icon_draw_rect =
-        egui::Rect::from_center_size(icon_rect.center(), egui::vec2(icon_size, icon_size));
-    egui::Image::from_bytes(uri, themed_svg).paint_at(ui, icon_draw_rect);
-
-    (label_response, icon_response)
-}
 
 pub(super) fn refresh_installed_content_state(
     state: &mut InstanceScreenState,

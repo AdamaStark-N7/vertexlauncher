@@ -9,8 +9,6 @@ members = [
     "crates/fontloader",
     "crates/installation",
     "crates/managed_content",
-    "crates/modal_host",
-    "crates/ui_foundation",
     "crates/instance_sync",
     "crates/mc_options",
     "crates/instances",
@@ -23,13 +21,10 @@ members = [
     "crates/modrinth",
     "crates/runtime_bootstrap",
     "crates/shared_lru",
-    "crates/skin_preview",
-    "crates/textui",
-    "crates/textui_egui",
-    "crates/vertex_3d",
-    "crates/vertex_3d_build",
     "crates/vertex_constants",
     "crates/vtmpack",
+    "crates/vertex_shell",
+    "crates/vertex_theme",
 ]
 default-members = [
     "crates/vertexlauncher",
@@ -40,12 +35,7 @@ default-members = [
 version = "0.1.22-Alpha"
 
 [workspace.dependencies]
-eframe = { version = "0.34.1", features = ["wgpu", "serde"] }
-egui = { version = "0.34.1", features = ["serde"] }
-egui-wgpu = "0.34.1"
-egui_extras = { version = "0.34.1", features = ["http", "image", "gif", "svg", "datepicker", "syntect", "serde"] }
 serde = { version = "1.0.228", features = ["derive", "serde_derive"] }
-wgpu = "29.0.0"
 fontdb = "0.23.0"
 thiserror = "1.0.69"
 toml = "0.8.23"
@@ -53,10 +43,6 @@ serde_json = "1.0.149"
 humantime = "2.3.0"
 directories = "6.0.0"
 image = "0.24.9"
-cosmic-text = "0.18"
-swash = "0.2.6"
-glyphon = "0.10.0"
-etagere = "0.2.15"
 pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
 base64 = "0.22.1"
@@ -87,20 +73,15 @@ logged_fs = { path = "crates/logged_fs" }
 launcher_runtime = { path = "crates/launcher_runtime" }
 launcher_ui = { path = "crates/launcher_ui" }
 managed_content = { path = "crates/managed_content" }
-modal_host = { path = "crates/modal_host" }
-ui_foundation = { path = "crates/ui_foundation" }
 modrinth = { path = "crates/modrinth" }
 modprovider = { path = "crates/modprovider" }
 fontloader = { path = "crates/fontloader" }
 runtime_bootstrap = { path = "crates/runtime_bootstrap" }
 shared_lru = { path = "crates/shared_lru" }
-skin_preview = { path = "crates/skin_preview" }
-textui = { path = "crates/textui" }
-textui_egui = { path = "crates/textui_egui" }
 vtmpack = { path = "crates/vtmpack" }
+vertex_shell = { path = "crates/vertex_shell" }
+vertex_theme = { path = "crates/vertex_theme" }
 vertex_constants = { path = "crates/vertex_constants" }
-vertex_3d_build = { path = "crates/vertex_3d_build" }
-vertex_3d = { path = "crates/vertex_3d" }
 
 [profile.dev]
 # Your crates (workspace members): keep normal dev behavior
@@ -115,6 +96,78 @@ opt-level = 3
 debug = 1
 incremental = true
 codegen-units = 16
+
+
+# Everything except the launcher's own app logic (`vertexlauncher`) is optimised in dev builds: the engine glue, the
+# skin rasteriser, scanners, installers and the rest. Only the app logic stays at opt-level 0 for debugging.
+[profile.dev.package.launcher_ui]
+opt-level = 3
+
+[profile.dev.package.vertex_shell]
+opt-level = 3
+
+[profile.dev.package.vertex_theme]
+opt-level = 3
+
+[profile.dev.package.config]
+opt-level = 3
+
+[profile.dev.package.mc_options]
+opt-level = 3
+
+[profile.dev.package.installation]
+opt-level = 3
+
+[profile.dev.package.instances]
+opt-level = 3
+
+[profile.dev.package.instance_sync]
+opt-level = 3
+
+[profile.dev.package.content_resolver]
+opt-level = 3
+
+[profile.dev.package.vtmpack]
+opt-level = 3
+
+[profile.dev.package.modrinth]
+opt-level = 3
+
+[profile.dev.package.curseforge]
+opt-level = 3
+
+[profile.dev.package.modprovider]
+opt-level = 3
+
+[profile.dev.package.managed_content]
+opt-level = 3
+
+[profile.dev.package.auth]
+opt-level = 3
+
+[profile.dev.package.fontloader]
+opt-level = 3
+
+[profile.dev.package.shared_lru]
+opt-level = 3
+
+[profile.dev.package.launcher_runtime]
+opt-level = 3
+
+[profile.dev.package.runtime_bootstrap]
+opt-level = 3
+
+[profile.dev.package.app_paths]
+opt-level = 3
+
+[profile.dev.package.logged_fs]
+opt-level = 3
+
+[profile.dev.package.log_redaction]
+opt-level = 3
+
+[profile.dev.package.vertex_constants]
+opt-level = 3
 
 [profile.release]
 debug = true

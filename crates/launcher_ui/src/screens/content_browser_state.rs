@@ -63,7 +63,6 @@ pub(super) use self::game_version_options::game_version_option_labels;
 pub(super) use self::mod_sort_mode::ModSortMode;
 pub(super) use self::queued_content_download::QueuedContentDownload;
 pub(super) use self::search_update::SearchUpdate;
-pub(super) use self::version_row_action::VersionRowAction;
 
 pub(super) fn trim_content_browser_search_cache(state: &mut ContentBrowserState) {
     if state.search_cache.len() <= CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES {

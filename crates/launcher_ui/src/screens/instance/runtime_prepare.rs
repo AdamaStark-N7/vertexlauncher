@@ -617,18 +617,4 @@ pub(in super::super) fn stage_label(stage: InstallStage) -> &'static str {
     }
 }
 
-pub(in super::super) fn format_bytes(bytes: u64) -> String {
-    const KIB: f64 = 1024.0;
-    const MIB: f64 = KIB * 1024.0;
-    const GIB: f64 = MIB * 1024.0;
-    let value = bytes as f64;
-    if value >= GIB {
-        format!("{:.2} GiB", value / GIB)
-    } else if value >= MIB {
-        format!("{:.2} MiB", value / MIB)
-    } else if value >= KIB {
-        format!("{:.2} KiB", value / KIB)
-    } else {
-        format!("{bytes} B")
-    }
-}
+

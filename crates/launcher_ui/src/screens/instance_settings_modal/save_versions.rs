@@ -1,61 +1,8 @@
 use super::*;
 
-pub(super) fn render_save_versions_row(
-    ui: &mut egui::Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-    instances: &mut InstanceStore,
-    config: &Config,
-    instance_id: &str,
-    styles: &ModalStyles,
-    instances_changed: &mut bool,
-) {
-    ui.add_space(8.0);
 
-    let validation_error = metadata_validation_error(state);
-    let can_save_versions = validation_error.is_none();
-    if let Some(error) = validation_error.as_deref() {
-        let _ = text_ui.label(
-            ui,
-            ("instance_save_versions_validation_error", instance_id),
-            error,
-            &style::error_text(ui),
-        );
-        ui.add_space(6.0);
-    }
 
-    let save_versions_clicked = ui
-        .add_enabled_ui(can_save_versions, |ui| {
-            text_ui.button(
-                ui,
-                ("instance_save_versions", instance_id),
-                "Save metadata & versions",
-                &styles.action_button,
-            )
-        })
-        .inner
-        .clicked();
-    let reinstall_enabled = can_save_versions && !state.runtime_prepare_in_flight && !state.running;
-    let reinstall_clicked = ui
-        .add_enabled_ui(reinstall_enabled, |ui| {
-            text_ui.button(
-                ui,
-                ("instance_reinstall_profile", instance_id),
-                "Reinstall Profile",
-                &styles.reinstall_button,
-            )
-        })
-        .inner
-        .clicked();
-    if save_versions_clicked {
-        handle_save_versions_click(state, instance_id, instances, instances_changed);
-    }
-    if reinstall_clicked {
-        handle_reinstall_click(state, instance_id, instances, config, instances_changed);
-    }
-}
-
-fn metadata_validation_error(state: &InstanceScreenState) -> Option<String> {
+pub(super) fn metadata_validation_error(state: &InstanceScreenState) -> Option<String> {
     let trimmed_name = state.name_input.trim();
     let requested_modloader = selected_modloader_value(state);
     let requested_game_version = state.game_version_input.trim().to_owned();
@@ -87,7 +34,7 @@ fn metadata_validation_error(state: &InstanceScreenState) -> Option<String> {
     validation_error
 }
 
-fn handle_save_versions_click(
+pub(super) fn handle_save_versions_click(
     state: &mut InstanceScreenState,
     instance_id: &str,
     instances: &mut InstanceStore,
@@ -120,7 +67,7 @@ fn handle_save_versions_click(
     }
 }
 
-fn handle_reinstall_click(
+pub(super) fn handle_reinstall_click(
     state: &mut InstanceScreenState,
     instance_id: &str,
     instances: &mut InstanceStore,

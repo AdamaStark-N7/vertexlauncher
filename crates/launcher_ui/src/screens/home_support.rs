@@ -40,23 +40,6 @@ pub(super) fn format_time_ago(timestamp_ms: Option<u64>, now_ms: u64) -> String 
     format!("{days}d ago")
 }
 
-pub(super) fn open_home_instance_folder(
-    instance_id: &str,
-    instances: &InstanceStore,
-    config: &Config,
-) -> Result<(), String> {
-    let Some(instance) = instances
-        .instances
-        .iter()
-        .find(|instance| instance.id == instance_id)
-    else {
-        return Err(format!("unknown instance id: {instance_id}"));
-    };
-    let root = instance_root_path(config.minecraft_installations_root_path(), instance);
-    desktop::open_in_file_manager(root.as_path())
-}
 
-pub(super) fn open_home_instance(output: &mut HomeOutput, instance_id: &str) {
-    output.selected_instance_id = Some(instance_id.to_owned());
-    output.requested_screen = Some(AppScreen::Instance);
-}
+
+

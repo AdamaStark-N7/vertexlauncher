@@ -5,12 +5,14 @@ mod gamepad_calibration;
 mod graphics_adapter_preference;
 mod graphics_api_preference;
 mod java_runtime_version;
+mod hdr_color_space;
 mod linux_blur_protocol;
 mod macos_visual_effect_blending_mode;
 mod macos_visual_effect_material;
 mod macos_visual_effect_state;
 mod notification_easing;
 mod setting_specs;
+mod settings_diff;
 mod skin_preview_aa_mode;
 mod skin_preview_texel_aa_mode;
 mod svg_aa_mode;
@@ -26,6 +28,7 @@ pub use gamepad_calibration::GamepadCalibration;
 pub use graphics_adapter_preference::{GraphicsAdapterPreferenceType, GraphicsAdapterProfile};
 pub use graphics_api_preference::GraphicsApiPreference;
 pub use java_runtime_version::JavaRuntimeVersion;
+pub use hdr_color_space::HdrColorSpace;
 pub use linux_blur_protocol::LinuxBlurProtocol;
 pub use macos_visual_effect_blending_mode::MacosVisualEffectBlendingMode;
 pub use macos_visual_effect_material::MacosVisualEffectMaterial;
@@ -35,6 +38,7 @@ pub use setting_specs::{
     DropdownSettingId, DropdownSettingSpec, FloatSettingId, FloatSettingSpec, IntSettingId,
     IntSettingSpec, TextSettingId, TextSettingSpec, ToggleSettingId, ToggleSettingSpec,
 };
+pub use settings_diff::{SettingsDiff, SettingsDomain};
 pub use skin_preview_aa_mode::SkinPreviewAaMode;
 pub use skin_preview_texel_aa_mode::SkinPreviewTexelAaMode;
 pub use svg_aa_mode::SvgAaMode;
@@ -61,6 +65,10 @@ pub const UI_FONT_SIZE_MAX: f32 = 42.0;
 pub const UI_FONT_SIZE_STEP: f32 = 0.5;
 pub const UI_OPACITY_PERCENT_MIN: u8 = 0;
 pub const UI_OPACITY_PERCENT_MAX: u8 = 100;
+/// Corner radius of the translucent window, in logical pixels. 0 is square.
+pub const WINDOW_CORNER_RADIUS_MIN: u8 = 0;
+pub const WINDOW_CORNER_RADIUS_MAX: u8 = 28;
+pub const DEFAULT_WINDOW_CORNER_RADIUS: u8 = 12;
 pub const UI_FONT_WEIGHT_MIN: i32 = 100;
 pub const UI_FONT_WEIGHT_MAX: i32 = 900;
 pub const UI_FONT_WEIGHT_STEP: i32 = 100;
@@ -70,6 +78,10 @@ pub const INSTANCE_DEFAULT_MAX_MEMORY_MIB_STEP: u128 = 256;
 pub const DOWNLOAD_CONCURRENCY_MIN: u32 = 1;
 pub const DOWNLOAD_CONCURRENCY_MAX: u32 = 128;
 pub const DEFAULT_DOWNLOAD_CONCURRENCY: u32 = 8;
+pub const HDR_UI_WHITE_SCALE_MIN: f32 = 0.5;
+pub const HDR_UI_WHITE_SCALE_MAX: f32 = 4.0;
+pub const HDR_LIGHT_LEVEL_NITS_MIN: i32 = 50;
+pub const HDR_LIGHT_LEVEL_NITS_MAX: i32 = 10_000;
 pub const FRAME_LIMIT_FPS_MIN: i32 = 30;
 pub const FRAME_LIMIT_FPS_MAX: i32 = 240;
 pub const NOTIFICATION_FADE_OUT_SECONDS_MIN: f32 = 0.0;
@@ -95,6 +107,22 @@ const fn default_window_transparency() -> WindowTransparency {
 
 const fn default_windows_backdrop_type() -> WindowsBackdropType {
     WindowsBackdropType::Auto
+}
+
+const fn default_hdr_color_space() -> HdrColorSpace {
+    HdrColorSpace::Hdr10St2084
+}
+
+const fn default_hdr_ui_white_scale() -> f32 {
+    1.0
+}
+
+const fn default_hdr_max_cll_nits() -> i32 {
+    1000
+}
+
+const fn default_hdr_max_fall_nits() -> i32 {
+    400
 }
 
 const fn default_linux_blur_protocol() -> LinuxBlurProtocol {
@@ -127,6 +155,10 @@ const fn default_drag_scroll_enabled() -> bool {
 
 const fn default_obs_detection_enabled() -> bool {
     true
+}
+
+const fn default_window_corner_radius() -> u8 {
+    DEFAULT_WINDOW_CORNER_RADIUS
 }
 
 const fn default_ui_opacity_percent() -> u8 {
@@ -246,6 +278,8 @@ pub struct Config {
     macos_visual_effect_emphasized: bool,
     #[serde(default = "default_ui_opacity_percent")]
     ui_opacity_percent: u8,
+    #[serde(default = "default_window_corner_radius")]
+    window_corner_radius: u8,
     #[serde(default, rename = "windows_transparency_level", skip_serializing)]
     legacy_windows_transparency_level: Option<WindowsTransparencyLevel>,
     linux_set_opengl_driver: bool,
@@ -273,6 +307,17 @@ pub struct Config {
     skin_preview_fresh_format_enabled: bool,
     skin_preview_3d_layers_enabled: bool,
     hdr_when_available: bool,
+    #[serde(default = "default_hdr_color_space")]
+    hdr_color_space: HdrColorSpace,
+    /// UI reference white relative to the display's SDR white (1.0 = same); raise it to brighten the UI.
+    #[serde(default = "default_hdr_ui_white_scale")]
+    hdr_ui_white_scale: f32,
+    /// MaxCLL reported to the display, in nits.
+    #[serde(default = "default_hdr_max_cll_nits")]
+    hdr_max_cll_nits: i32,
+    /// MaxFALL reported to the display, in nits.
+    #[serde(default = "default_hdr_max_fall_nits")]
+    hdr_max_fall_nits: i32,
     frame_limiter_enabled: bool,
     discord_rich_presence_enabled: bool,
     #[serde(default)]
@@ -613,6 +658,38 @@ impl Config {
         self.windows_backdrop_type = value;
     }
 
+    pub fn hdr_color_space(&self) -> HdrColorSpace {
+        self.hdr_color_space
+    }
+
+    pub fn set_hdr_color_space(&mut self, value: HdrColorSpace) {
+        self.hdr_color_space = value;
+    }
+
+    pub fn hdr_ui_white_scale(&self) -> f32 {
+        self.hdr_ui_white_scale
+    }
+
+    pub fn set_hdr_ui_white_scale(&mut self, value: f32) {
+        self.hdr_ui_white_scale = value.clamp(HDR_UI_WHITE_SCALE_MIN, HDR_UI_WHITE_SCALE_MAX);
+    }
+
+    pub fn hdr_max_cll_nits(&self) -> i32 {
+        self.hdr_max_cll_nits
+    }
+
+    pub fn set_hdr_max_cll_nits(&mut self, value: i32) {
+        self.hdr_max_cll_nits = value.clamp(HDR_LIGHT_LEVEL_NITS_MIN, HDR_LIGHT_LEVEL_NITS_MAX);
+    }
+
+    pub fn hdr_max_fall_nits(&self) -> i32 {
+        self.hdr_max_fall_nits
+    }
+
+    pub fn set_hdr_max_fall_nits(&mut self, value: i32) {
+        self.hdr_max_fall_nits = value.clamp(HDR_LIGHT_LEVEL_NITS_MIN, HDR_LIGHT_LEVEL_NITS_MAX);
+    }
+
     pub fn linux_blur_protocol(&self) -> LinuxBlurProtocol {
         self.linux_blur_protocol
     }
@@ -655,6 +732,15 @@ impl Config {
 
     pub fn ui_opacity_percent(&self) -> u8 {
         self.ui_opacity_percent
+    }
+
+    /// Returns the window's corner radius in logical pixels (used while the window is translucent).
+    pub fn window_corner_radius(&self) -> u8 {
+        self.window_corner_radius
+    }
+
+    pub fn set_window_corner_radius(&mut self, value: u8) {
+        self.window_corner_radius = value.clamp(WINDOW_CORNER_RADIUS_MIN, WINDOW_CORNER_RADIUS_MAX);
     }
 
     pub fn set_ui_opacity_percent(&mut self, value: u8) {
@@ -971,6 +1057,9 @@ impl Config {
         self.ui_opacity_percent = self
             .ui_opacity_percent
             .clamp(UI_OPACITY_PERCENT_MIN, UI_OPACITY_PERCENT_MAX);
+        self.window_corner_radius = self
+            .window_corner_radius
+            .clamp(WINDOW_CORNER_RADIUS_MIN, WINDOW_CORNER_RADIUS_MAX);
         self.ui_font_size = self.ui_font_size.clamp(UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX);
         self.notification_fade_out_seconds = if self.notification_fade_out_seconds.is_finite() {
             self.notification_fade_out_seconds.clamp(
@@ -998,6 +1087,13 @@ impl Config {
         self.skin_preview_msaa_samples = self
             .skin_preview_msaa_samples
             .clamp(SKIN_PREVIEW_MSAA_SAMPLES_MIN, SKIN_PREVIEW_MSAA_SAMPLES_MAX);
+        self.hdr_ui_white_scale = if self.hdr_ui_white_scale.is_finite() {
+            self.hdr_ui_white_scale.clamp(HDR_UI_WHITE_SCALE_MIN, HDR_UI_WHITE_SCALE_MAX)
+        } else {
+            default_hdr_ui_white_scale()
+        };
+        self.hdr_max_cll_nits = self.hdr_max_cll_nits.clamp(HDR_LIGHT_LEVEL_NITS_MIN, HDR_LIGHT_LEVEL_NITS_MAX);
+        self.hdr_max_fall_nits = self.hdr_max_fall_nits.clamp(HDR_LIGHT_LEVEL_NITS_MIN, HDR_LIGHT_LEVEL_NITS_MAX);
         self.ui_font_weight = self
             .ui_font_weight
             .clamp(UI_FONT_WEIGHT_MIN, UI_FONT_WEIGHT_MAX);
@@ -1222,6 +1318,7 @@ impl Default for Config {
             macos_visual_effect_state: default_macos_visual_effect_state(),
             macos_visual_effect_emphasized: false,
             ui_opacity_percent: default_ui_opacity_percent(),
+            window_corner_radius: default_window_corner_radius(),
             legacy_windows_transparency_level: None,
             linux_set_opengl_driver: false,
             linux_use_zink_driver: false,
@@ -1246,6 +1343,10 @@ impl Default for Config {
             skin_preview_fresh_format_enabled: false,
             skin_preview_3d_layers_enabled: false,
             hdr_when_available: false,
+            hdr_color_space: default_hdr_color_space(),
+            hdr_ui_white_scale: default_hdr_ui_white_scale(),
+            hdr_max_cll_nits: default_hdr_max_cll_nits(),
+            hdr_max_fall_nits: default_hdr_max_fall_nits(),
             frame_limiter_enabled: false,
             discord_rich_presence_enabled: true,
             sync_servers_enabled: false,
@@ -1278,39 +1379,144 @@ impl Default for Config {
     }
 }
 
+/// The OpenType feature tags used when the feature list setting is empty.
+pub const DEFAULT_OPEN_TYPE_FEATURE_TAGS: &str = "kern, liga, calt, onum, pnum";
+
 /// Parses human input like `10mbps` into bits-per-second.
 ///
 /// Supported suffixes: `kbps`, `mbps`, `gbps`, `tbps` (case-insensitive).
 pub fn parse_bitrate_to_bps(value: &str) -> Option<u64> {
+    // Accepts what people actually type: "250Mbps", "250 Mbps", "250mbit/s", "30MB/s", "30 MiB/s", "1.5 Gbps", or a bare
+    // "250" (taken as Mbps). A lowercase or spelled-out "b"/"bit" means bits, an uppercase "B" or "byte" means bytes
+    // (8 bits); "i" prefixes (KiB, MiB...) are binary. The result is always bits per second.
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return None;
     }
-
-    let normalized = trimmed.to_ascii_lowercase();
-    let (number_part, unit_multiplier): (&str, u64) =
-        if let Some(prefix) = normalized.strip_suffix("tbps") {
-            (prefix, 1_000_000_000_000)
-        } else if let Some(prefix) = normalized.strip_suffix("gbps") {
-            (prefix, 1_000_000_000)
-        } else if let Some(prefix) = normalized.strip_suffix("mbps") {
-            (prefix, 1_000_000)
-        } else if let Some(prefix) = normalized.strip_suffix("kbps") {
-            (prefix, 1_000)
-        } else {
-            return None;
-        };
-
-    let quantity = number_part.trim().parse::<f64>().ok()?;
+    let split = trimmed
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ','))
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split);
+    let quantity = number.replace(',', ".").parse::<f64>().ok()?;
     if !quantity.is_finite() || quantity <= 0.0 {
         return None;
     }
-
-    let bps = quantity * unit_multiplier as f64;
-    if !bps.is_finite() || bps <= 0.0 || bps > u64::MAX as f64 {
+    let unit: String = unit.chars().filter(|c| !c.is_whitespace()).collect();
+    let unit = unit
+        .strip_suffix("/s")
+        .or_else(|| unit.strip_suffix("ps"))
+        .or_else(|| unit.strip_suffix("PS"))
+        .or_else(|| unit.strip_suffix("/S"))
+        .unwrap_or(&unit);
+    let multiplier = if unit.is_empty() {
+        // A bare number: megabits, like the placeholder.
+        1_000_000.0
+    } else {
+        let (prefix, rest) = unit.split_at(unit.chars().next().map_or(0, char::len_utf8));
+        let scale_char = prefix.to_ascii_lowercase();
+        let (scale_known, rest) = match scale_char.as_str() {
+            "k" | "m" | "g" | "t" => (true, rest),
+            _ => (false, unit),
+        };
+        let binary = scale_known && (rest.starts_with('i') || rest.starts_with('I'));
+        let rest = if binary { &rest[1..] } else { rest };
+        let base: f64 = if binary { 1024.0 } else { 1000.0 };
+        let scale = if !scale_known {
+            1.0
+        } else {
+            match scale_char.as_str() {
+                "k" => base,
+                "m" => base.powi(2),
+                "g" => base.powi(3),
+                _ => base.powi(4),
+            }
+        };
+        let lower = rest.to_ascii_lowercase();
+        let per_unit = if rest == "B" || lower == "byte" || lower == "bytes" {
+            8.0
+        } else if rest == "b" || lower == "bit" || lower == "bits" || (rest.is_empty() && scale_known) {
+            // "250M" alone reads as megabits, matching the bps default.
+            1.0
+        } else {
+            return None;
+        };
+        scale * per_unit
+    };
+    let bps = quantity * multiplier;
+    if !bps.is_finite() || bps < 1.0 || bps > u64::MAX as f64 {
         return None;
     }
     Some(bps.round() as u64)
+}
+
+/// `bps` as a short human rate for display: "250 Mbps (31.3 MB/s)".
+pub fn describe_bitrate(bps: u64) -> String {
+    let bits = bps as f64;
+    let (value, unit) = if bits >= 1e12 {
+        (bits / 1e12, "Tbps")
+    } else if bits >= 1e9 {
+        (bits / 1e9, "Gbps")
+    } else if bits >= 1e6 {
+        (bits / 1e6, "Mbps")
+    } else {
+        (bits / 1e3, "Kbps")
+    };
+    let bytes = bits / 8.0;
+    let (byte_value, byte_unit) = if bytes >= 1e9 {
+        (bytes / 1e9, "GB/s")
+    } else if bytes >= 1e6 {
+        (bytes / 1e6, "MB/s")
+    } else {
+        (bytes / 1e3, "KB/s")
+    };
+    format!("{} {unit} ({} {byte_unit})", trim_number(value), trim_number(byte_value))
+}
+
+fn trim_number(value: f64) -> String {
+    let text = format!("{value:.2}");
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
+}
+
+#[cfg(test)]
+mod bitrate_tests {
+    use super::{describe_bitrate, parse_bitrate_to_bps};
+
+    #[test]
+    fn accepts_the_usual_spellings() {
+        assert_eq!(parse_bitrate_to_bps("250Mbps"), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps(" 250 Mbps "), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps("250mbps"), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps("250 Mbit/s"), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps("250"), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps("250M"), Some(250_000_000));
+        assert_eq!(parse_bitrate_to_bps("1.5 Gbps"), Some(1_500_000_000));
+        assert_eq!(parse_bitrate_to_bps("1,5 Gbps"), Some(1_500_000_000));
+        assert_eq!(parse_bitrate_to_bps("500Kbps"), Some(500_000));
+        assert_eq!(parse_bitrate_to_bps("2 Tbps"), Some(2_000_000_000_000));
+    }
+
+    #[test]
+    fn bytes_are_eight_bits() {
+        assert_eq!(parse_bitrate_to_bps("30MB/s"), Some(240_000_000));
+        assert_eq!(parse_bitrate_to_bps("30 MBps"), Some(240_000_000));
+        assert_eq!(parse_bitrate_to_bps("1 MiB/s"), Some(8 * 1024 * 1024));
+        assert_eq!(parse_bitrate_to_bps("512 KiB/s"), Some(8 * 512 * 1024));
+    }
+
+    #[test]
+    fn rejects_nonsense() {
+        assert_eq!(parse_bitrate_to_bps(""), None);
+        assert_eq!(parse_bitrate_to_bps("fast"), None);
+        assert_eq!(parse_bitrate_to_bps("0 Mbps"), None);
+        assert_eq!(parse_bitrate_to_bps("-5 Mbps"), None);
+        assert_eq!(parse_bitrate_to_bps("10 Xbps"), None);
+    }
+
+    #[test]
+    fn describes_rates() {
+        assert_eq!(describe_bitrate(250_000_000), "250 Mbps (31.25 MB/s)");
+        assert_eq!(describe_bitrate(1_500_000_000), "1.5 Gbps (187.5 MB/s)");
+    }
 }
 
 /// Result of loading configuration from disk.

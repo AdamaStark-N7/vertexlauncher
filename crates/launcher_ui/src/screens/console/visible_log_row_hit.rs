@@ -1,9 +1,0 @@
-use super::*;
-
-#[derive(Clone)]
-pub(super) struct VisibleLogRowHit {
-    pub(super) line_index: usize,
-    pub(super) rect: egui::Rect,
-    pub(super) text_rect: egui::Rect,
-    pub(super) layout: Arc<ConsoleLineLayout>,
-}

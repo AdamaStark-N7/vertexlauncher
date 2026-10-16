@@ -32,5 +32,5 @@ pub(in super::super) fn uv_rect_with_inset(
     let min_y = (y as f32 / tex_h) + inset_y;
     let max_x = ((x + w) as f32 / tex_w) - inset_x;
     let max_y = ((y + h) as f32 / tex_h) - inset_y;
-    Rect::from_min_max(egui::pos2(min_x, min_y), egui::pos2(max_x, max_y))
+    Rect::from_min_max(pos2(min_x, min_y), pos2(max_x, max_y))
 }

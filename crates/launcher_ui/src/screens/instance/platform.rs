@@ -1,13 +1,6 @@
 use config::Config;
-use egui::Ui;
 use instances::InstanceRecord;
-use textui::TextUi;
-use textui_egui::prelude::*;
 
-#[cfg(target_os = "linux")]
-use crate::ui::components::settings_widgets;
-
-use super::super::platform as screen_platform;
 use super::InstanceScreenState;
 
 pub(super) fn effective_linux_graphics_settings_for_state(
@@ -58,83 +51,7 @@ pub(super) fn linux_instance_driver_settings_for_save(
     }
 }
 
-pub(super) fn render_platform_specific_instance_settings_section(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut InstanceScreenState,
-    instance_id: &str,
-    section_style: &LabelOptions,
-    muted_style: &LabelOptions,
-) {
-    let Some(section) = screen_platform::current_platform_specific_section() else {
-        return;
-    };
 
-    ui.add_space(12.0);
-    ui.separator();
-    ui.add_space(10.0);
-
-    let _ = text_ui.label(
-        ui,
-        (
-            "instance_platform_settings_heading",
-            instance_id,
-            section.id,
-        ),
-        section.heading,
-        section_style,
-    );
-    let _ = text_ui.label(
-        ui,
-        (
-            "instance_platform_settings_description",
-            instance_id,
-            section.id,
-        ),
-        section.instance_description,
-        muted_style,
-    );
-    ui.add_space(8.0);
-
-    #[cfg(target_os = "linux")]
-    {
-        let _ = ui
-            .push_id(("instance_linux_set_opengl_driver", instance_id), |ui| {
-                settings_widgets::toggle_row(
-                    text_ui,
-                    ui,
-                    "Set Linux OpenGL Driver",
-                    Some(
-                        "Linux-only. When enabled, this instance uses the Zink toggle below instead of the launcher-wide Linux OpenGL driver behavior. When disabled, this instance falls back to the launcher-wide Linux graphics settings. Versions using Vulkan directly should ignore it.",
-                    ),
-                    &mut state.linux_set_opengl_driver,
-                )
-            })
-            .inner;
-        ui.add_space(6.0);
-
-        let _ = ui.add_enabled_ui(state.linux_set_opengl_driver, |ui| {
-            ui.push_id(("instance_linux_use_zink_driver", instance_id), |ui| {
-                settings_widgets::toggle_row(
-                    text_ui,
-                    ui,
-                    "Use Zink Driver (Experimental)",
-                    Some(
-                        "Linux-only. Experimental. When the setting above is enabled, this toggle decides whether this instance forces Mesa Zink so OpenGL runs over Vulkan. When the setting above is disabled, the launcher-wide Zink setting is used instead. Versions using Vulkan directly should ignore it.",
-                    ),
-                    &mut state.linux_use_zink_driver,
-                )
-            })
-            .inner
-        });
-        ui.add_space(8.0);
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = state;
-    }
-}
 
 #[cfg(target_os = "linux")]
 fn effective_linux_graphics_settings_for_flags(

@@ -58,9 +58,9 @@ fn scan(root: &Path) -> RootListing {
 }
 
 impl RootEntries {
-    /// The current listing for `root`, starting a background refresh when it is stale or the
-    /// root changed. Never touches the filesystem on the calling thread.
-    pub(super) fn get(&mut self, ctx: &egui::Context, root: &Path) -> RootListing {
+    /// The current listing for `root`, starting a background refresh when it is stale or the root changed, and when
+    /// the caller should look again. Never touches the filesystem on the calling thread.
+    pub(super) fn poll(&mut self, root: &Path) -> (RootListing, Option<Duration>) {
         for (scanned_root, listing) in self.results.drain().items {
             self.in_flight = false;
             if scanned_root == root {
@@ -81,18 +81,17 @@ impl RootEntries {
             self.in_flight = true;
             let tx = self.results.sender();
             let root = root.to_path_buf();
-            let ctx = ctx.clone();
             tokio_runtime::spawn_blocking_detached(move || {
                 let listing = scan(&root);
                 let _ = tx.send((root, listing));
-                ctx.request_repaint();
+                crate::ui_waker::wake();
             });
         }
-        if self.in_flight || stale {
-            ctx.request_repaint_after(REFRESH_INTERVAL);
-        }
-        self.listing.clone()
+        let wake = (self.in_flight || stale).then_some(REFRESH_INTERVAL);
+        (self.listing.clone(), wake)
     }
+
+
 }
 
 #[cfg(test)]

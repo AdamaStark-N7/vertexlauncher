@@ -455,12 +455,10 @@ fn decode_server_icon(raw: Option<&str>) -> Option<Arc<[u8]>> {
     if decoded.is_empty() || decoded.len() > 4 * 1024 * 1024 {
         return None;
     }
-    Some(prepare_owned_image_bytes_for_memory(decoded))
+    Some(crate::image_memory::prepare_owned_image_bytes_for_memory(decoded))
 }
 
-pub(super) fn home_server_icon_uri(instance_id: &str, favorite_id: &str) -> String {
-    format!("bytes://home/server-icon/{instance_id}/{favorite_id}")
-}
+
 
 pub(super) fn server_meta_line(
     server: &ServerEntry,
@@ -483,62 +481,6 @@ fn collapse_motd_for_meta_line(motd: &str) -> String {
     motd.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-pub(super) fn render_server_ping_icon(ui: &mut Ui, ping: Option<&ServerPingSnapshot>) {
-    let (icon, color, tip) =
-        ping_icon_for_status(ui.visuals(), ping.map(|snapshot| snapshot.status));
-    let themed_svg = crate::ui::svg_tint::tint_svg(icon, color);
-    let uri = format!(
-        "bytes://home/server-ping/{:?}-{:02x}{:02x}{:02x}.svg",
-        ping.map(|value| value.status),
-        color.r(),
-        color.g(),
-        color.b()
-    );
-    let response = ui.add(
-        egui::Image::from_bytes(uri, themed_svg)
-            .fit_to_exact_size(egui::vec2(SERVER_PING_ICON_SIZE, SERVER_PING_ICON_SIZE))
-            .sense(egui::Sense::hover()),
-    );
-    crate::ui::style::hover_tip(ui, response, tip);
-}
 
-fn ping_icon_for_status(
-    visuals: &egui::Visuals,
-    status: Option<ServerPingStatus>,
-) -> (&'static [u8], Color32, String) {
-    match status.unwrap_or(ServerPingStatus::Unknown) {
-        ServerPingStatus::Unknown => (
-            assets::ANTENNA_BARS_OFF_SVG,
-            visuals.weak_text_color().gamma_multiply(0.9),
-            "Ping unknown".to_owned(),
-        ),
-        ServerPingStatus::Offline => (
-            assets::ANTENNA_BARS_OFF_SVG,
-            visuals.error_fg_color,
-            "Server offline".to_owned(),
-        ),
-        ServerPingStatus::Online { latency_ms } => {
-            let (icon, color) = if latency_ms <= 80 {
-                (assets::ANTENNA_BARS_5_SVG, visuals.text_cursor.stroke.color)
-            } else if latency_ms <= 140 {
-                (
-                    assets::ANTENNA_BARS_4_SVG,
-                    visuals.text_cursor.stroke.color.gamma_multiply(0.9),
-                )
-            } else if latency_ms <= 220 {
-                (
-                    assets::ANTENNA_BARS_3_SVG,
-                    visuals.warn_fg_color.gamma_multiply(0.85),
-                )
-            } else if latency_ms <= 320 {
-                (assets::ANTENNA_BARS_2_SVG, visuals.warn_fg_color)
-            } else {
-                (
-                    assets::ANTENNA_BARS_1_SVG,
-                    visuals.error_fg_color.gamma_multiply(0.92),
-                )
-            };
-            (icon, color, format!("Latency: {latency_ms}ms"))
-        }
-    }
-}
+
+

@@ -23,41 +23,7 @@ pub(super) fn shown_value<'a>(live: &'a LiveOptions, def: &'a OptionDef) -> &'a 
     value::unquote(live.get(def.key).unwrap_or(def.default)).0
 }
 
-pub(super) fn render_choice_row(
-    ui: &mut egui::Ui,
-    text_ui: &mut TextUi,
-    live: &mut LiveOptions,
-    def: &OptionDef,
-    version: Option<Ver>,
-    labels: Vec<(String, String)>,
-) {
-    let current = shown_value(live, def).to_owned();
-    let mut labels = labels;
-    let mut selected = labels.iter().position(|(stored, _)| *stored == current);
-    if selected.is_none() {
-        // Show what the file really holds instead of pretending it's a known choice.
-        labels.push((current.clone(), format!("{current} (unrecognized)")));
-        selected = Some(labels.len() - 1);
-    }
-    let mut index = selected.unwrap_or(0);
-    let before = index;
-    let names: Vec<&str> = labels.iter().map(|(_, label)| label.as_str()).collect();
-    let tip = tooltip_for(def);
-    let _ = settings_widgets::full_width_dropdown_row(
-        text_ui,
-        ui,
-        ("game_setting", def.key),
-        def.label,
-        Some(tip.as_str()),
-        &mut index,
-        &names,
-    );
-    if index != before
-        && let Some((stored, _)) = labels.get(index)
-    {
-        commit(live, def, version, stored);
-    }
-}
+
 
 /// Languages for the dropdown. The stored code keeps whatever case the file uses (older versions
 /// write `en_US`), so the current language is selected regardless of case.

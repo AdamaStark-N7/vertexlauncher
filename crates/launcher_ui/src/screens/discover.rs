@@ -1,38 +1,26 @@
 use std::{
-    collections::{HashMap, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
+    collections::HashMap,
+    hash::Hash,
     sync::{Mutex, OnceLock},
     time::Duration,
 };
 
 use curseforge::{Client as CurseForgeClient, MINECRAFT_GAME_ID};
-use egui::Ui;
 use installation::{MinecraftVersionEntry, VersionCatalogFilter, fetch_version_catalog};
 use modrinth::Client as ModrinthClient;
-use textui::TextUi;
-use textui_egui::interaction;
-use textui_egui::{apply_gamepad_scroll_to_registered_id, make_gamepad_scrollable, prelude::*};
-use ui_foundation::{UiMetrics, responsive_columns, themed_text_input};
 
-use crate::{
-    app::tokio_runtime,
-    assets,
-    screens::AppScreen,
-    ui::{
-        components::{remote_tiled_image, settings_widgets},
-        style,
-    },
-};
 
 const DISCOVER_PROVIDER_LIMIT: u32 = 36;
-const DISCOVER_CARD_GAP: f32 = 12.0;
-const DISCOVER_MASONRY_WIDTH_BUCKET_POINTS: f32 = 32.0;
+
+
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const DETAIL_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 const DISCOVER_SEARCH_CACHE_MAX_ENTRIES: usize = 10;
 
 #[path = "discover/cached_discover_masonry_layout.rs"]
 mod cached_discover_masonry_layout;
+#[path = "discover/discover_api.rs"]
+pub mod api;
 #[path = "discover_detail.rs"]
 mod discover_detail;
 #[path = "discover/discover_entry.rs"]
@@ -83,10 +71,11 @@ mod search_mode;
 mod search_tag_chips;
 
 use self::cached_discover_masonry_layout::CachedDiscoverMasonryLayout;
-use self::discover_detail::{
-    DiscoverVersionEntry, DiscoverVersionsResult, format_compact_number, format_short_date,
-    open_detail_page, render_discover_detail_content,
-};
+use self::discover_detail::DiscoverVersionEntry;
+use self::discover_detail::DiscoverVersionsResult;
+use self::discover_detail::format_compact_number;
+use self::discover_detail::format_short_date;
+use self::discover_detail::open_detail_page;
 use self::discover_entry::DiscoverEntry;
 pub use self::discover_install_request::DiscoverInstallRequest;
 pub use self::discover_install_source::DiscoverInstallSource;
@@ -94,7 +83,6 @@ use self::discover_loader_filter::DiscoverLoaderFilter;
 use self::discover_masonry_column::DiscoverMasonryColumn;
 use self::discover_masonry_item::DiscoverMasonryItem;
 use self::discover_masonry_layout::DiscoverMasonryLayout;
-pub use self::discover_output::DiscoverOutput;
 use self::discover_project_ref::DiscoverProjectRef;
 use self::discover_provider_entry::DiscoverProviderEntry;
 use self::discover_provider_filter::DiscoverProviderFilter;
@@ -105,640 +93,27 @@ use self::discover_search_snapshot::DiscoverSearchSnapshot;
 use self::discover_sort_mode::DiscoverSortMode;
 use self::discover_source::DiscoverSource;
 pub use self::discover_state::DiscoverState;
-use self::discover_tile_render_result::DiscoverTileRenderResult;
-use self::discover_ui_metrics::DiscoverUiMetrics;
 use self::game_version_options::game_version_option_labels;
 use self::search_mode::SearchMode;
-use self::search_tag_chips::{SearchTagChipIds, add_search_tag, render_search_tag_chips};
+use self::search_tag_chips::add_search_tag;
+use crate::app::tokio_runtime;
 
-const SEARCH_TAG_CHIP_IDS: SearchTagChipIds = SearchTagChipIds {
-    remove_icon_uri_prefix: "bytes://discover/tag-remove",
-    label_id: "discover_search_tag",
-};
 
-pub fn render(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut DiscoverState,
-    detail_mode: bool,
-) -> DiscoverOutput {
-    let full_width = ui.available_width().max(1.0);
-    let full_height = ui.available_height().max(1.0);
-    let mut output = DiscoverOutput::default();
-    ui.horizontal(|ui| {
-        ui.add_space(style::SPACE_XS);
-        ui.allocate_ui_with_layout(
-            egui::vec2((full_width - style::SPACE_XS * 2.0).max(1.0), full_height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                output = if detail_mode {
-                    render_discover_detail_content(ui, text_ui, state)
-                } else {
-                    render_discover_browse_content(ui, text_ui, state)
-                };
-            },
-        );
-        ui.add_space(style::SPACE_XS);
-    });
-    output
-}
 
-fn render_discover_browse_content(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    state: &mut DiscoverState,
-) -> DiscoverOutput {
-    let mut output = DiscoverOutput::default();
-    poll_version_catalog(state);
-    request_version_catalog(state);
-    poll_search_results(state);
-    if !state.initial_search_requested {
-        state.initial_search_requested = true;
-        request_search(state, false, SearchMode::Replace);
-    }
-    if state.search_in_flight {
-        ui.ctx().request_repaint_after(Duration::from_millis(100));
-    }
 
-    let muted_style = style::muted(ui);
-    let warning_style = style::warning_text(ui);
-    let mut filter_controls_have_focus = false;
 
-    egui::Frame::new()
-        .fill(ui.visuals().faint_bg_color)
-        .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
-        .inner_margin(egui::Margin::same(style::SPACE_MD as i8))
-        .show(ui, |ui| {
-            let old_provider_filter = state.provider_filter;
-            let old_loader_filter = state.loader_filter;
-            let old_sort_mode = state.sort_mode;
-            let old_game_version_filter = state.game_version_filter.clone();
-            let search_response = themed_text_input(
-                text_ui,
-                ui,
-                "discover_search_input",
-                &mut state.query_input,
-                InputOptions {
-                    desired_width: Some(ui.available_width()),
-                    placeholder_text: Some("Search modpacks and press Enter".to_owned()),
-                    ..crate::ui::style::input_options(ui)
-                },
-            );
-            let mut search_submitted = false;
-            let enter_pressed = ui.input(|input| input.key_pressed(egui::Key::Enter));
-            let submit_pressed =
-                enter_pressed && (search_response.has_focus() || search_response.lost_focus());
-            if submit_pressed {
-                if ui.input(|input| input.modifiers.shift) {
-                    if add_search_tag(&mut state.search_tags, state.query_input.as_str()) {
-                        state.query_input.clear();
-                        search_submitted = true;
-                    }
-                } else {
-                    search_submitted = true;
-                }
-            }
-            if !state.search_tags.is_empty() && {
-                ui.add_space(style::SPACE_SM);
-                render_search_tag_chips(ui, text_ui, &mut state.search_tags, SEARCH_TAG_CHIP_IDS)
-            } {
-                search_submitted = true;
-            }
-            ui.add_space(style::SPACE_SM);
 
-            let (filter_columns, dropdown_width) =
-                responsive_columns(ui.available_width(), 180.0, DISCOVER_CARD_GAP, 4);
-            filter_controls_have_focus = search_response.has_focus();
-            let mut render_filter_row = |ui: &mut Ui, row: usize| {
-                ui.spacing_mut().item_spacing.x = DISCOVER_CARD_GAP;
-                let provider_index = row * filter_columns;
-                if provider_index == 0 {
-                    let provider_options =
-                        DiscoverProviderFilter::ALL.map(DiscoverProviderFilter::label);
-                    let mut provider_index = DiscoverProviderFilter::ALL
-                        .iter()
-                        .position(|provider| *provider == state.provider_filter)
-                        .unwrap_or(0);
-                    let response = sized_dropdown_picker(
-                        ui,
-                        text_ui,
-                        "discover_provider_filter",
-                        dropdown_width,
-                        &mut provider_index,
-                        &provider_options,
-                    );
-                    state.provider_filter = DiscoverProviderFilter::ALL[provider_index];
-                    filter_controls_have_focus |= response.has_focus();
-                }
-                if provider_index <= 1 && 1 < (row + 1) * filter_columns {
-                    let loader_options = DiscoverLoaderFilter::ALL.map(DiscoverLoaderFilter::label);
-                    let mut loader_index = DiscoverLoaderFilter::ALL
-                        .iter()
-                        .position(|loader| *loader == state.loader_filter)
-                        .unwrap_or(0);
-                    let response = sized_dropdown_picker(
-                        ui,
-                        text_ui,
-                        "discover_loader_filter",
-                        dropdown_width,
-                        &mut loader_index,
-                        &loader_options,
-                    );
-                    state.loader_filter = DiscoverLoaderFilter::ALL[loader_index];
-                    filter_controls_have_focus |= response.has_focus();
-                }
-                if provider_index <= 2 && 2 < (row + 1) * filter_columns {
-                    let sort_options = DiscoverSortMode::ALL.map(DiscoverSortMode::label);
-                    let mut sort_index = DiscoverSortMode::ALL
-                        .iter()
-                        .position(|sort_mode| *sort_mode == state.sort_mode)
-                        .unwrap_or(0);
-                    let response = sized_dropdown_picker(
-                        ui,
-                        text_ui,
-                        "discover_sort_mode",
-                        dropdown_width,
-                        &mut sort_index,
-                        &sort_options,
-                    );
-                    state.sort_mode = DiscoverSortMode::ALL[sort_index];
-                    filter_controls_have_focus |= response.has_focus();
-                }
-                if provider_index <= 3 && 3 < (row + 1) * filter_columns {
-                    let game_version_option_refs = state
-                        .game_version_options
-                        .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>();
-                    let mut game_version_index = 0_usize;
-                    if !state.game_version_filter.trim().is_empty()
-                        && let Some(found_index) = state
-                            .available_game_versions
-                            .iter()
-                            .position(|version| version.id == state.game_version_filter)
-                    {
-                        game_version_index = found_index + 1;
-                    }
-                    let response = sized_dropdown_picker(
-                        ui,
-                        text_ui,
-                        "discover_game_version",
-                        dropdown_width,
-                        &mut game_version_index,
-                        &game_version_option_refs,
-                    );
-                    state.game_version_filter = if game_version_index == 0 {
-                        String::new()
-                    } else {
-                        state.available_game_versions[game_version_index - 1]
-                            .id
-                            .clone()
-                    };
-                    filter_controls_have_focus |= response.has_focus();
-                }
-            };
-            let filter_rows = 4_usize.div_ceil(filter_columns);
-            ui.vertical(|ui| {
-                for row in 0..filter_rows {
-                    ui.horizontal(|ui| render_filter_row(ui, row));
-                    if row + 1 < filter_rows {
-                        ui.add_space(DISCOVER_CARD_GAP);
-                    }
-                }
-            });
-            let filters_changed = state.provider_filter != old_provider_filter
-                || state.loader_filter != old_loader_filter
-                || state.sort_mode != old_sort_mode
-                || state.game_version_filter != old_game_version_filter;
-            if search_submitted || filters_changed {
-                request_search(state, true, SearchMode::Replace);
-            }
-        });
 
-    ui.add_space(style::SPACE_MD);
-    if let Some(status) = state.status_message.as_deref() {
-        let _ = text_ui.label(ui, "discover_status", status, &muted_style);
-    }
-    for warning in &state.warnings {
-        let _ = text_ui.label(ui, ("discover_warning", warning), warning, &warning_style);
-    }
 
-    if state.search_in_flight {
-        ui.add_space(style::SPACE_SM);
-        ui.horizontal(|ui| {
-            ui.spinner();
-            let _ = text_ui.label(
-                ui,
-                "discover_search_in_flight",
-                "Loading modpacks...",
-                &muted_style,
-            );
-        });
-    }
 
-    ui.add_space(style::SPACE_MD);
-    let mut should_load_more = false;
-    let results_height = ui.available_height().max(1.0);
-    let scroll_output = egui::ScrollArea::vertical()
-        .scroll_source(modal_host::drag_scroll_source())
-        .id_salt("discover_results_scroll")
-        .auto_shrink([false, false])
-        .max_height(results_height)
-        .show_viewport(ui, |ui, viewport| {
-            if state.entries.is_empty() && !state.search_in_flight {
-                let _ = text_ui.label(
-                    ui,
-                    "discover_empty",
-                    "No modpacks matched the current search and filters.",
-                    &muted_style,
-                );
-                return;
-            }
-            if let Some(entry) = render_masonry_tiles(
-                ui,
-                text_ui,
-                state.entries.as_slice(),
-                &mut state.tile_height_cache,
-                &mut state.tile_height_cache_revision,
-                &mut state.masonry_layout_cache,
-                viewport,
-            ) {
-                open_detail_page(state, &entry);
-                output.requested_screen = Some(AppScreen::DiscoverDetail);
-            }
-            let content_bottom = ui.min_rect().bottom();
-            should_load_more = state.has_more_results
-                && !state.search_in_flight
-                && viewport.bottom() >= content_bottom - 320.0;
-        });
-    make_gamepad_scrollable(ui.ctx(), &scroll_output);
-    if filter_controls_have_focus
-        && apply_gamepad_scroll_to_registered_id(
-            ui.ctx(),
-            scroll_output.id,
-            egui::vec2(0.0, 100_000.0),
-        )
-    {
-        ui.ctx().request_repaint();
-    }
 
-    if should_load_more {
-        request_search(state, false, SearchMode::Append);
-    }
-    output
-}
 
-fn render_masonry_tiles(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    entries: &[DiscoverEntry],
-    tile_height_cache: &mut HashMap<(String, u32), f32>,
-    tile_height_cache_revision: &mut u64,
-    masonry_layout_cache: &mut Option<CachedDiscoverMasonryLayout>,
-    viewport: egui::Rect,
-) -> Option<DiscoverEntry> {
-    let metrics = DiscoverUiMetrics::from_ui(ui);
-    let layout = build_discover_masonry_layout(
-        ui,
-        entries,
-        tile_height_cache,
-        *tile_height_cache_revision,
-        masonry_layout_cache,
-        metrics,
-    );
-    let overscan = metrics.card_image_height.max(220.0);
-    let visible_top = viewport.top() - overscan;
-    let visible_bottom = viewport.bottom() + overscan;
-    let mut opened_entry = None;
-    ui.allocate_ui_with_layout(
-        egui::vec2(layout.content_width, 0.0),
-        egui::Layout::left_to_right(egui::Align::Min),
-        |ui| {
-            ui.spacing_mut().item_spacing.x = DISCOVER_CARD_GAP;
-            for column in &layout.columns {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(layout.column_width, 0.0),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        ui.set_width(layout.column_width);
-                        let mut visible_started = false;
-                        let mut skipped_height = 0.0;
-                        let mut rendered_bottom = 0.0;
 
-                        for item in &column.items {
-                            let item_bottom = item.offset_y + item.height;
-                            if item_bottom < visible_top {
-                                skipped_height = item_bottom + DISCOVER_CARD_GAP;
-                                continue;
-                            }
-                            if item.offset_y > visible_bottom {
-                                break;
-                            }
-                            if !visible_started {
-                                if skipped_height > 0.0 {
-                                    ui.add_space(skipped_height);
-                                }
-                                visible_started = true;
-                            }
-                            let tile_result = render_discover_tile(
-                                ui,
-                                text_ui,
-                                &entries[item.entry_index],
-                                metrics,
-                            );
-                            let height_cache_key = discover_tile_height_cache_key(
-                                entries[item.entry_index].dedupe_key.as_str(),
-                                layout.column_width,
-                            );
-                            let previous = tile_height_cache
-                                .insert(height_cache_key, tile_result.measured_height);
-                            if previous.is_none_or(|height| {
-                                (height - tile_result.measured_height).abs() > 0.5
-                            }) {
-                                *tile_height_cache_revision =
-                                    tile_height_cache_revision.saturating_add(1);
-                            }
-                            if tile_result.clicked {
-                                opened_entry = Some(entries[item.entry_index].clone());
-                            }
-                            rendered_bottom = item_bottom + DISCOVER_CARD_GAP;
-                            ui.add_space(DISCOVER_CARD_GAP);
-                        }
 
-                        if !visible_started {
-                            if column.total_height > 0.0 {
-                                ui.add_space(column.total_height);
-                            }
-                        } else {
-                            let trailing_height = (column.total_height - rendered_bottom).max(0.0);
-                            if trailing_height > 0.0 {
-                                ui.add_space(trailing_height);
-                            }
-                        }
-                    },
-                );
-            }
-        },
-    );
-    opened_entry
-}
 
-fn build_discover_masonry_layout(
-    ui: &Ui,
-    entries: &[DiscoverEntry],
-    tile_height_cache: &HashMap<(String, u32), f32>,
-    tile_height_cache_revision: u64,
-    masonry_layout_cache: &mut Option<CachedDiscoverMasonryLayout>,
-    metrics: DiscoverUiMetrics,
-) -> DiscoverMasonryLayout {
-    let content_width = ui.available_width().max(metrics.card_min_width);
-    let (column_count, column_width) =
-        responsive_columns(content_width, metrics.card_min_width, DISCOVER_CARD_GAP, 4);
-    let width_bucket = (column_width / DISCOVER_MASONRY_WIDTH_BUCKET_POINTS)
-        .round()
-        .max(1.0) as u32;
-    let entries_fingerprint = discover_entries_fingerprint(entries, width_bucket);
-    if let Some(cached) = masonry_layout_cache.as_ref()
-        && cached.width_bucket == width_bucket
-        && cached.entries_fingerprint == entries_fingerprint
-        && cached.height_cache_revision == tile_height_cache_revision
-    {
-        return cached.layout.clone();
-    }
-    let mut columns = (0..column_count)
-        .map(|_| DiscoverMasonryColumn {
-            items: Vec::new(),
-            total_height: 0.0,
-        })
-        .collect::<Vec<_>>();
 
-    for (index, entry) in entries.iter().enumerate() {
-        let estimated_height = tile_height_cache
-            .get(&discover_tile_height_cache_key(
-                entry.dedupe_key.as_str(),
-                column_width,
-            ))
-            .copied()
-            .unwrap_or_else(|| discover_tile_estimated_height(entry, column_width, metrics));
-        let target_column = columns
-            .iter()
-            .enumerate()
-            .min_by(|(_, left), (_, right)| left.total_height.total_cmp(&right.total_height))
-            .map(|(index, _)| index)
-            .unwrap_or(0);
-        let offset_y = columns[target_column].total_height;
-        columns[target_column].items.push(DiscoverMasonryItem {
-            entry_index: index,
-            offset_y,
-            height: estimated_height,
-        });
-        columns[target_column].total_height += estimated_height + DISCOVER_CARD_GAP;
-    }
 
-    let layout = DiscoverMasonryLayout {
-        columns,
-        content_width,
-        column_width,
-    };
-    *masonry_layout_cache = Some(CachedDiscoverMasonryLayout {
-        width_bucket,
-        entries_fingerprint,
-        height_cache_revision: tile_height_cache_revision,
-        layout: layout.clone(),
-    });
-    layout
-}
 
-fn discover_tile_estimated_height(
-    entry: &DiscoverEntry,
-    column_width: f32,
-    metrics: DiscoverUiMetrics,
-) -> f32 {
-    let summary_lines = (entry.summary.len() as f32 / (column_width / 5.8).max(32.0))
-        .ceil()
-        .clamp(2.0, 6.0);
-    metrics.estimated_card_base_height + (summary_lines * 18.0)
-}
-
-fn discover_tile_height_cache_key(dedupe_key: &str, column_width: f32) -> (String, u32) {
-    (
-        dedupe_key.to_owned(),
-        (column_width / DISCOVER_MASONRY_WIDTH_BUCKET_POINTS)
-            .round()
-            .max(1.0) as u32,
-    )
-}
-
-fn discover_entries_fingerprint(entries: &[DiscoverEntry], width_bucket: u32) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    width_bucket.hash(&mut hasher);
-    entries.len().hash(&mut hasher);
-    for entry in entries {
-        entry.dedupe_key.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-fn render_discover_tile(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    entry: &DiscoverEntry,
-    metrics: DiscoverUiMetrics,
-) -> DiscoverTileRenderResult {
-    let id = ui.make_persistent_id(("discover_tile_click", entry.dedupe_key.as_str()));
-
-    // Read last frame's hover/focus state so the frame is styled before it renders.
-    let (was_hovered, was_focused): (bool, bool) =
-        ui.ctx().data(|d| d.get_temp(id).unwrap_or_default());
-
-    let base_stroke_width = ui.visuals().widgets.noninteractive.bg_stroke.width;
-    let sel_color = ui.visuals().selection.bg_fill;
-    let (fill, stroke) = if was_focused {
-        (
-            sel_color.gamma_multiply(0.15),
-            egui::Stroke::new(base_stroke_width, sel_color),
-        )
-    } else {
-        (
-            ui.visuals().window_fill,
-            ui.visuals().widgets.noninteractive.bg_stroke,
-        )
-    };
-
-    let heading_style = LabelOptions {
-        wrap: true,
-        ..style::stat_label(ui)
-    };
-    let body_style = style::body(ui);
-    let muted_style = style::muted(ui);
-    let badge_fill = ui.visuals().widgets.inactive.weak_bg_fill;
-    let badge_stroke = ui.visuals().widgets.inactive.bg_stroke;
-
-    let response = egui::Frame::new()
-        .fill(fill)
-        .stroke(stroke)
-        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_MD))
-        .inner_margin(egui::Margin::same(style::SPACE_MD as i8))
-        .show(ui, |ui| {
-            let page_link_clicked = false;
-            if let Some(icon_url) = entry.icon_url.as_deref() {
-                remote_tiled_image::show(
-                    ui,
-                    icon_url,
-                    egui::vec2(ui.available_width(), metrics.card_image_height),
-                    ("discover_tile_image", entry.dedupe_key.as_str()),
-                    assets::DISCOVER_SVG,
-                );
-            } else {
-                ui.add(
-                    egui::Image::from_bytes(
-                        format!("bytes://discover/placeholder/{}", entry.dedupe_key),
-                        assets::DISCOVER_SVG.to_vec(),
-                    )
-                    .fit_to_exact_size(egui::vec2(ui.available_width(), metrics.card_image_height)),
-                );
-            }
-
-            ui.add_space(style::SPACE_SM);
-            let _ = text_ui.label(
-                ui,
-                ("discover_tile_name", entry.dedupe_key.as_str()),
-                entry.name.as_str(),
-                &heading_style,
-            );
-            if let Some(author) = entry
-                .author
-                .as_deref()
-                .filter(|author| !author.trim().is_empty())
-            {
-                let _ = text_ui.label(
-                    ui,
-                    ("discover_tile_author", entry.dedupe_key.as_str()),
-                    &format!("by {author}"),
-                    &muted_style,
-                );
-            }
-            ui.add_space(style::SPACE_XS);
-            let _ = text_ui.label(
-                ui,
-                ("discover_tile_summary", entry.dedupe_key.as_str()),
-                entry.summary.as_str(),
-                &body_style,
-            );
-
-            ui.add_space(style::SPACE_SM);
-            ui.horizontal_wrapped(|ui| {
-                for source in &entry.sources {
-                    egui::Frame::new()
-                        .fill(badge_fill)
-                        .stroke(badge_stroke)
-                        .corner_radius(egui::CornerRadius::same(style::CORNER_RADIUS_SM))
-                        .inner_margin(egui::Margin::symmetric(8, 4))
-                        .show(ui, |ui| {
-                            let _ = text_ui.label(
-                                ui,
-                                (
-                                    "discover_tile_source",
-                                    entry.dedupe_key.as_str(),
-                                    source.label(),
-                                ),
-                                source.label(),
-                                &LabelOptions {
-                                    wrap: false,
-                                    ..style::body(ui)
-                                },
-                            );
-                        });
-                }
-            });
-
-            ui.add_space(style::SPACE_SM);
-            if let Some(downloads) = entry.popularity_score {
-                let _ = text_ui.label(
-                    ui,
-                    ("discover_tile_downloads", entry.dedupe_key.as_str()),
-                    &format!("Downloads: {}", format_compact_number(downloads)),
-                    &muted_style,
-                );
-            }
-            if let Some(updated_at) = entry.updated_at.as_deref() {
-                let _ = text_ui.label(
-                    ui,
-                    ("discover_tile_updated", entry.dedupe_key.as_str()),
-                    &format!("Updated: {}", format_short_date(updated_at)),
-                    &muted_style,
-                );
-            }
-            page_link_clicked
-        });
-    let interaction = ui.interact(response.response.rect, id, egui::Sense::click());
-    let tile_state = interaction::InteractionState::of(ui.ctx(), &interaction, true);
-    interaction::paint_card_highlight(
-        ui.painter(),
-        ui.visuals(),
-        tile_state,
-        response.response.rect,
-        style::CORNER_RADIUS_MD,
-        true,
-    );
-
-    // Persist state for the next frame so the frame fill/stroke can be set
-    // correctly before the frame renders (egui renders before interact returns).
-    let now_hovered = interaction.hovered();
-    let now_focused = interaction.has_focus();
-    let state_changed = now_hovered != was_hovered || now_focused != was_focused;
-    if state_changed {
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(id, (now_hovered, now_focused)));
-        ui.ctx().request_repaint();
-    }
-
-    DiscoverTileRenderResult {
-        clicked: interaction.clicked() && !response.inner,
-        measured_height: response.response.rect.height(),
-    }
-}
 
 fn request_search(state: &mut DiscoverState, show_cached_status: bool, mode: SearchMode) {
     if state.search_in_flight {
@@ -1161,23 +536,7 @@ fn compose_search_query(input: &str, tags: &[String]) -> String {
     parts.join(" ")
 }
 
-fn sized_dropdown_picker(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    id: impl std::hash::Hash,
-    width: f32,
-    selected_index: &mut usize,
-    options: &[&str],
-) -> egui::Response {
-    ui.allocate_ui_with_layout(
-        egui::vec2(width, style::CONTROL_HEIGHT),
-        egui::Layout::left_to_right(egui::Align::Center),
-        |ui| {
-            settings_widgets::dropdown_picker(text_ui, ui, id, selected_index, options, Some(width))
-        },
-    )
-    .inner
-}
+
 
 fn request_version_catalog(state: &mut DiscoverState) {
     if state.version_catalog_in_flight

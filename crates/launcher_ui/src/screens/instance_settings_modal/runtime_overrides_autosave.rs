@@ -66,24 +66,23 @@ pub(super) fn save_runtime_overrides(
     .map_err(|err| err.to_string())
 }
 
-/// Saves runtime overrides once they have been idle for
-/// [`RUNTIME_OVERRIDES_AUTOSAVE_DELAY`]. Returns true when the store changed.
-pub(super) fn autosave_runtime_overrides(
-    ctx: &egui::Context,
+/// Saves runtime overrides once they have been idle for [`RUNTIME_OVERRIDES_AUTOSAVE_DELAY`]. Returns whether the
+/// store changed and, while edits are waiting out the delay, how long until the UI should look again.
+pub(super) fn autosave_runtime_overrides_step(
     state: &mut InstanceScreenState,
     instance_id: &str,
     instances: &mut InstanceStore,
     java_options: &[(u8, String)],
     memory_slider_max: u128,
-) -> bool {
+) -> (bool, Option<Duration>) {
     let fingerprint = runtime_overrides_fingerprint(state);
     let Some(saved) = state.runtime_overrides_saved_fingerprint.as_ref() else {
         state.runtime_overrides_saved_fingerprint = Some(fingerprint);
-        return false;
+        return (false, None);
     };
     if *saved == fingerprint {
         state.runtime_overrides_dirty_since = None;
-        return false;
+        return (false, None);
     }
     let dirty_since = match state.runtime_overrides_dirty_since.as_ref() {
         Some((pending, since)) if *pending == fingerprint => *since,
@@ -95,25 +94,20 @@ pub(super) fn autosave_runtime_overrides(
     };
     let elapsed = dirty_since.elapsed();
     if elapsed < RUNTIME_OVERRIDES_AUTOSAVE_DELAY {
-        ctx.request_repaint_after(RUNTIME_OVERRIDES_AUTOSAVE_DELAY - elapsed);
-        return false;
+        return (false, Some(RUNTIME_OVERRIDES_AUTOSAVE_DELAY - elapsed));
     }
     state.runtime_overrides_dirty_since = None;
     state.runtime_overrides_saved_fingerprint = Some(fingerprint);
-    match save_runtime_overrides(
-        state,
-        instance_id,
-        instances,
-        java_options,
-        memory_slider_max,
-    ) {
-        Ok(()) => true,
+    match save_runtime_overrides(state, instance_id, instances, java_options, memory_slider_max) {
+        Ok(()) => (true, None),
         Err(err) => {
             state.status_message = Some(err);
-            false
+            (false, None)
         }
     }
 }
+
+
 
 /// Writes pending edits immediately, used when the modal closes mid-delay.
 pub(super) fn flush_runtime_overrides_autosave(

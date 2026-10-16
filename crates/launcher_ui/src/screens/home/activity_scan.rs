@@ -209,5 +209,5 @@ pub(super) fn read_world_thumbnail(path: &Path) -> Option<Arc<[u8]>> {
     if bytes.len() > 4 * 1024 * 1024 {
         return None;
     }
-    Some(prepare_owned_image_bytes_for_memory(bytes))
+    Some(crate::image_memory::prepare_owned_image_bytes_for_memory(bytes))
 }

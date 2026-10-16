@@ -2,7 +2,6 @@
 name = "vertexlauncher"
 version.workspace = true
 edition = "2024"
-# egui 0.34 (and so the whole dependency graph) requires Rust 1.92.
 rust-version = "1.92"
 build = "build.rs"
 
@@ -13,14 +12,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 logged_fs.workspace = true
 log_redaction.workspace = true
 app_paths.workspace = true
-eframe.workspace = true
-egui.workspace = true
-egui_extras.workspace = true
 fontloader.workspace = true
 config.workspace = true
-textui.workspace = true
-textui_egui.workspace = true
-ui_foundation.workspace = true
 auth.workspace = true
 content_resolver.workspace = true
 instance_sync.workspace = true
@@ -46,10 +39,11 @@ tar = "0.4"
 xz2 = "0.1"
 vtmpack.workspace = true
 vertex_constants.workspace = true
-vertex_3d.workspace = true
 zip = { version = "8.6", default-features = false, features = ["deflate"] }
 discord-rich-presence = "1.1.0"
 gilrs.workspace = true
+vertex_shell.workspace = true
+vertex_theme.workspace = true
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = "0.11"

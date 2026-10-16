@@ -7,11 +7,11 @@ Use the MSVC target (for example: x86_64-pc-windows-msvc) so WebView2 loader lib
 
 mod app;
 
-fn main() -> eframe::Result<()> {
+fn main() -> std::process::ExitCode {
     let _ = app::init_tracing();
 
     match app::maybe_run_webview_helper() {
-        Ok(true) => return Ok(()),
+        Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {}
         Err(err) => {
             eprintln!("{err}");
@@ -19,7 +19,7 @@ fn main() -> eframe::Result<()> {
         }
     }
     match app::maybe_run_cli_command() {
-        Ok(true) => return Ok(()),
+        Ok(true) => return std::process::ExitCode::SUCCESS,
         Ok(false) => {}
         Err(err) => {
             eprintln!("{err}");
@@ -34,7 +34,7 @@ fn main() -> eframe::Result<()> {
                 "Vertex Launcher is already running on this machine.",
                 rfd::MessageLevel::Warning,
             );
-            return Ok(());
+            return std::process::ExitCode::SUCCESS;
         }
         Err(app::SingleInstanceError::Unavailable(err)) => {
             report_startup_message(
@@ -45,8 +45,9 @@ fn main() -> eframe::Result<()> {
         }
     };
 
-    match app::run() {
-        Ok(()) => Ok(()),
+    let result = app::run_se5();
+    match result {
+        Ok(code) => code,
         Err(app::RunError::RuntimeBootstrap(err)) => {
             report_startup_message(
                 format!("Vertex Launcher could not start its background runtime: {err}"),
@@ -54,7 +55,6 @@ fn main() -> eframe::Result<()> {
             );
             std::process::exit(1);
         }
-        Err(app::RunError::Ui(err)) => Err(err),
     }
 }
 

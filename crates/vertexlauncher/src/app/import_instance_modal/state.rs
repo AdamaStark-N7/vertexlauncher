@@ -26,19 +26,18 @@ mod launcher_kind;
 mod modal_action;
 
 pub use self::import_instance_state::ImportInstanceState;
-pub(super) use self::import_mode::ImportMode;
+pub(crate) use self::import_mode::ImportMode;
 pub use self::import_package_error::ImportPackageError;
-pub(super) use self::import_package_kind::ImportPackageKind;
-pub(super) use self::import_preview::ImportPreview;
-pub(super) use self::import_preview_kind::ImportPreviewKind;
+pub(crate) use self::import_package_kind::ImportPackageKind;
+pub(crate) use self::import_preview::ImportPreview;
+pub(crate) use self::import_preview_kind::ImportPreviewKind;
 pub use self::import_progress::ImportProgress;
 pub use self::import_request::ImportRequest;
 pub use self::import_source::ImportSource;
 pub use self::import_task_result::ImportTaskResult;
-pub(super) use self::launcher_kind::LauncherKind;
-pub use self::modal_action::ModalAction;
+pub(crate) use self::launcher_kind::LauncherKind;
 
-pub(super) fn poll_preview_results(state: &mut ImportInstanceState) {
+pub(crate) fn poll_preview_results(state: &mut ImportInstanceState) {
     for (request_serial, message) in state.preview_progress.drain().items {
         if request_serial == state.preview_request_serial {
             state.preview_status_message = Some(message);
@@ -100,7 +99,7 @@ pub(super) fn poll_preview_results(state: &mut ImportInstanceState) {
     }
 }
 
-pub(super) const LAUNCHER_KIND_OPTIONS: [&str; 5] = [
+pub(crate) const LAUNCHER_KIND_OPTIONS: [&str; 5] = [
     "Auto-detect",
     "Modrinth",
     "CurseForge",
@@ -108,11 +107,11 @@ pub(super) const LAUNCHER_KIND_OPTIONS: [&str; 5] = [
     "ATLauncher",
 ];
 
-pub(super) fn selected_import_mode(state: &ImportInstanceState) -> ImportMode {
+pub(crate) fn selected_import_mode(state: &ImportInstanceState) -> ImportMode {
     ImportMode::from_index(state.source_mode_index)
 }
 
-pub(super) fn selected_launcher_hint(state: &ImportInstanceState) -> Option<LauncherKind> {
+pub(crate) fn selected_launcher_hint(state: &ImportInstanceState) -> Option<LauncherKind> {
     match state.launcher_kind_index {
         1 => Some(LauncherKind::Modrinth),
         2 => Some(LauncherKind::CurseForge),
@@ -122,11 +121,11 @@ pub(super) fn selected_launcher_hint(state: &ImportInstanceState) -> Option<Laun
     }
 }
 
-pub(super) fn path_input_string(path: &Path) -> String {
+pub(crate) fn path_input_string(path: &Path) -> String {
     path.as_os_str().to_string_lossy().into_owned()
 }
 
-pub(super) fn update_path_from_input(path: &mut PathBuf, input: &str) -> bool {
+pub(crate) fn update_path_from_input(path: &mut PathBuf, input: &str) -> bool {
     let trimmed = input.trim();
     let next = if trimmed.is_empty() {
         PathBuf::new()

@@ -9,10 +9,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 [dependencies]
 log_redaction.workspace = true
 app_paths.workspace = true
-eframe.workspace = true
-egui.workspace = true
-egui-wgpu.workspace = true
-wgpu.workspace = true
+vertex_theme.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 directories.workspace = true
@@ -23,16 +20,11 @@ mc_options.workspace = true
 instances.workspace = true
 installation.workspace = true
 managed_content.workspace = true
-modal_host.workspace = true
-ui_foundation.workspace = true
 modprovider.workspace = true
 modrinth.workspace = true
 curseforge.workspace = true
-textui.workspace = true
-textui_egui.workspace = true
 launcher_runtime.workspace = true
 shared_lru.workspace = true
-skin_preview.workspace = true
 tokio.workspace = true
 toml.workspace = true
 raw-window-handle.workspace = true
@@ -48,7 +40,6 @@ qrcode.workspace = true
 tar = "0.4"
 xz2 = "0.1"
 vtmpack.workspace = true
-vertex_3d.workspace = true
 ansi_escapers = { git = "https://github.com/SturdyFool10/ANSIEscapeRS" }
 colorlab.workspace = true
 zip = { version = "8.6", default-features = false, features = ["deflate"] }

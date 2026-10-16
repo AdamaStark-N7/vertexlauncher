@@ -30,6 +30,9 @@ jobs:
           sudo apt-get update
           base_pkgs=(
             pkg-config
+            cmake
+            ninja-build
+            clang
             libglib2.0-dev
             libgtk-3-dev
             libgdk-pixbuf-2.0-dev

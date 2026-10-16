@@ -1,5 +1,3 @@
-use super::*;
-
 pub(crate) fn normalize_minecraft_game_version(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {

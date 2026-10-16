@@ -90,7 +90,7 @@ fn numeric_tooltips_state_the_real_default() {
 
 #[test]
 fn open_type_tooltips_list_the_real_default_features() {
-    let defaults = textui::DEFAULT_OPEN_TYPE_FEATURE_TAGS;
+    let defaults = config::DEFAULT_OPEN_TYPE_FEATURE_TAGS;
     let list = tooltip(TextSettingId::OpenTypeFeaturesToEnable.spec().info_tooltip);
     assert!(
         list.contains(defaults),

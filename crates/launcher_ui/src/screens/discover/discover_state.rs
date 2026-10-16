@@ -86,6 +86,11 @@ impl Default for DiscoverState {
 }
 
 impl DiscoverState {
+    /// A search or install is running in the background (the UI should keep polling).
+    pub fn is_busy(&self) -> bool {
+        self.search_in_flight || self.install_in_flight
+    }
+
     pub fn begin_install(&mut self, message: impl Into<String>) {
         self.install_in_flight = true;
         self.install_error = None;

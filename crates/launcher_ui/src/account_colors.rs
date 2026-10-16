@@ -9,7 +9,8 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
-use egui::Color32;
+use crate::geom::Color32;
+
 
 const COLORS_FILE_NAME: &str = "account_colors.json";
 
@@ -370,7 +371,7 @@ mod tests {
     fn clearing_removes_the_entry_from_disk() {
         let path = temp_path("clear");
         let mut store = AccountColorStore::load(path.clone());
-        store.set("abc", Some(Color32::RED)).expect("save");
+        store.set("abc", Some(Color32::from_rgb(255, 0, 0))).expect("save");
         store.set("abc", None).expect("save");
         assert_eq!(AccountColorStore::load(path.clone()).get("abc"), None);
         let _ = fs::remove_dir_all(path.parent().unwrap());
@@ -384,10 +385,10 @@ mod tests {
         let mut store = AccountColorStore::load(path.clone());
         assert_eq!(store.get("abc"), None);
         assert!(path.with_extension("json.corrupt").exists());
-        store.set("abc", Some(Color32::BLUE)).expect("save");
+        store.set("abc", Some(Color32::from_rgb(0, 0, 255))).expect("save");
         assert_eq!(
             AccountColorStore::load(path.clone()).get("abc"),
-            Some(Color32::BLUE)
+            Some(Color32::from_rgb(0, 0, 255))
         );
         let _ = fs::remove_dir_all(path.parent().unwrap());
     }

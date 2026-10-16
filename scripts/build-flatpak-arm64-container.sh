@@ -25,7 +25,6 @@ REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-docker.io/library/debian:bookworm}"
 WORK_ROOT="${REPO_ROOT}/.cache/flatpak-arm64-container"
 
-bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 
 # Remove host-compiled build-script executables and the aarch64 binary before
 # entering the container so that the container recompiles them against its glibc.

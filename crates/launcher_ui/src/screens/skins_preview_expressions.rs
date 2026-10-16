@@ -311,11 +311,11 @@ fn rig_uv(uv: [u32; 4]) -> Rect {
     let inset_u = if uv[0] <= uv[2] { inset } else { -inset };
     let inset_v = if uv[1] <= uv[3] { inset } else { -inset };
     Rect::from_min_max(
-        egui::pos2(
+        pos2(
             (uv[0] as f32 + inset_u) / 64.0,
             (uv[1] as f32 + inset_v) / 64.0,
         ),
-        egui::pos2(
+        pos2(
             (uv[2] as f32 - inset_u) / 64.0,
             (uv[3] as f32 - inset_v) / 64.0,
         ),

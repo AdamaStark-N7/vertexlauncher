@@ -3,11 +3,11 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use launcher_ui::ui::theme::{Oklch, Theme};
 use url::Url;
 use vertex_constants::launcher::system_browser_sign_in::{
     ACCEPT_POLL_INTERVAL, AUTO_CLOSE_DELAY_SECS, CALLBACK_TIMEOUT,
 };
+use vertex_theme::{Oklch, Theme};
 const CALLBACK_PAGE_TEMPLATE: &str = include_str!("callback_page_template.html");
 
 #[path = "system_browser_sign_in/callback_page_colors.rs"]

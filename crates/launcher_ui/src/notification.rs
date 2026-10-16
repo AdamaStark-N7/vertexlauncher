@@ -2,8 +2,6 @@
 mod emitters;
 #[path = "notification/natural_language.rs"]
 pub mod natural_language;
-#[path = "notification/popups.rs"]
-mod popups;
 #[path = "notification/store.rs"]
 mod store;
 
@@ -14,14 +12,12 @@ use std::time::{Duration, Instant};
 
 use config::NotificationEasing;
 
-use crate::assets;
 
 pub use emitters::{
     NotificationBuilder, emit, emit_progress, emit_replace, emit_spinner, emit_with_actions,
     emit_with_icon, retract_from_stack,
 };
 pub use natural_language::{count_word, join_natural};
-pub use popups::render_popups;
 use store::{drain_notifications, entry_fade_opacity, entry_ttl};
 
 const NOTIFICATION_TTL: Duration = Duration::from_secs(7);
@@ -29,7 +25,7 @@ const NOTIFICATION_TTL: Duration = Duration::from_secs(7);
 const NOTIFICATION_ACTION_TTL: Duration = Duration::from_secs(15);
 const PROGRESS_NOTIFICATION_STALE_TTL: Duration = Duration::from_secs(14);
 const NOTIFICATION_MAX_STACK: usize = 8;
-const NOTIFICATION_EXPIRY_BAR_HEIGHT: f32 = 4.0;
+
 
 /// User-configurable presentation settings for notification popups.
 #[derive(Debug, Clone, Copy)]
@@ -47,11 +43,12 @@ pub enum Severity {
     Error,
 }
 
-/// A button attached to a notification. The callback runs on the UI thread when it is clicked.
+/// A button attached to a notification. The callback runs on the UI thread when it is clicked; anything that needs
+/// the front end goes through [`crate::app_commands`].
 #[derive(Clone)]
 pub struct NotificationAction {
     pub label: String,
-    pub callback: Arc<dyn Fn(&egui::Context) + Send + Sync>,
+    pub callback: Arc<dyn Fn() + Send + Sync>,
     /// Draws the label in the theme's danger color, for destructive actions.
     pub danger: bool,
 }
@@ -59,7 +56,7 @@ pub struct NotificationAction {
 impl NotificationAction {
     pub fn new(
         label: impl Into<String>,
-        callback: impl Fn(&egui::Context) + Send + Sync + 'static,
+        callback: impl Fn() + Send + Sync + 'static,
     ) -> Self {
         Self {
             label: label.into(),
@@ -172,23 +169,9 @@ fn center() -> &'static NotificationCenter {
     })
 }
 
-fn icon_for_severity(severity: Severity) -> &'static [u8] {
-    match severity {
-        Severity::Log => assets::LOG_SVG,
-        Severity::Info => assets::INFO_CIRCLE_SVG,
-        Severity::Warn => assets::WARN_SVG,
-        Severity::Error => assets::ERROR_SVG,
-    }
-}
 
-fn severity_name(severity: Severity) -> &'static str {
-    match severity {
-        Severity::Log => "Log",
-        Severity::Info => "Info",
-        Severity::Warn => "Warn",
-        Severity::Error => "Error",
-    }
-}
+
+
 
 #[macro_export]
 macro_rules! __notification_log {
@@ -280,3 +263,58 @@ macro_rules! __notification_progress {
 }
 
 pub use crate::__notification_progress as progress;
+
+/// One notification popup as plain data, for front ends that draw their own popups.
+#[derive(Debug, Clone)]
+pub struct NotificationView {
+    pub id: u64,
+    pub severity: Severity,
+    pub source: String,
+    pub message: String,
+    pub progress: Option<f32>,
+    pub spinner: bool,
+    /// How many identical notifications were folded into this one (the "xN" badge).
+    pub count: u32,
+    pub actions: Vec<NotificationAction>,
+    /// 1 while the popup is live, falling to 0 as it fades out.
+    pub opacity: f32,
+    /// Share of the popup's lifetime left, for the expiry bar.
+    pub remaining: f32,
+}
+
+/// Absorbs newly emitted notifications and returns the popups to show, newest first. Mirrors what
+/// [`render_popups`] shows, including the streamer-mode name scrubbing done by the emitters.
+pub fn visible_notifications(settings: &NotificationDisplaySettings) -> Vec<NotificationView> {
+    drain_notifications(settings.fade_out);
+    let Ok(store) = center().store.lock() else {
+        return Vec::new();
+    };
+    let now = Instant::now();
+    store
+        .entries
+        .iter()
+        .map(|entry| {
+            let ttl = entry_ttl(entry);
+            let remaining = ttl.saturating_sub(now.saturating_duration_since(entry.last_seen));
+            NotificationView {
+                id: entry.id,
+                severity: entry.severity,
+                source: entry.source.clone(),
+                message: entry.message.clone(),
+                progress: entry.progress,
+                spinner: entry.spinner,
+                count: entry.count,
+                actions: entry.actions.clone(),
+                opacity: entry_fade_opacity(entry, now, settings),
+                remaining: (remaining.as_secs_f32() / ttl.as_secs_f32().max(f32::EPSILON)).clamp(0.0, 1.0),
+            }
+        })
+        .collect()
+}
+
+/// Removes a popup now (its close button).
+pub fn dismiss(id: u64) {
+    if let Ok(mut store) = center().store.lock() {
+        store.entries.retain(|entry| entry.id != id);
+    }
+}

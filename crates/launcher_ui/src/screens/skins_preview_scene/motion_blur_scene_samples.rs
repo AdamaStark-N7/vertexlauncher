@@ -7,7 +7,7 @@ use super::*;
 /// produce a visible effect.
 ///
 /// This function does not panic.
-pub(in super::super) fn build_motion_blur_scene_samples(
+pub(in crate::screens) fn build_motion_blur_scene_samples(
     rect: Rect,
     cape_uv: FaceUvs,
     yaw: f32,
@@ -47,8 +47,8 @@ pub(in super::super) fn build_motion_blur_scene_samples(
         } else {
             distance / center
         };
-        let falloff = egui::lerp(4.8..=1.35, amount);
-        let edge_floor = egui::lerp(0.0..=0.08, amount * amount);
+        let falloff = lerp(4.8..=1.35, amount);
+        let edge_floor = lerp(0.0..=0.08, amount * amount);
         let weight = (1.0 - normalized_distance * normalized_distance)
             .max(0.0)
             .powf(falloff)

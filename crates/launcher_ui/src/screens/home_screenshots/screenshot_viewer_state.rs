@@ -7,5 +7,5 @@ pub(crate) struct ScreenshotViewerState {
     /// Used to retain and display the image during rescans when `screenshots` is temporarily empty.
     pub(crate) entry_snapshot: ScreenshotEntry,
     pub(crate) zoom: f32,
-    pub(crate) pan_uv: egui::Vec2,
+    pub(crate) pan_uv: crate::geom::Vec2,
 }

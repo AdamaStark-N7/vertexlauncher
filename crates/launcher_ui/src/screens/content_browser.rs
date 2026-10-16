@@ -1,13 +1,11 @@
-use config::Config;
 use content_resolver::detect_installed_content_kind;
 use curseforge::{Client as CurseForgeClient, MINECRAFT_GAME_ID};
-use egui::Ui;
 use installation::{
     DownloadBatchTask, DownloadPolicy, InstallProgressCallback, InstallStage,
     MinecraftVersionEntry, VersionCatalogFilter, download_batch_with_progress,
     fetch_version_catalog,
 };
-use instances::{InstanceStore, instance_root_path};
+use instances::{InstanceRecord, instance_root_path, normalize_optional};
 use managed_content::{
     ContentInstallManifest, InstalledContentProject, ManagedContentSource, load_content_manifest,
     save_content_manifest,
@@ -23,21 +21,14 @@ use std::{
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use textui::TextUi;
-use textui_egui::prelude::*;
-use ui_foundation::{UiMetrics, themed_text_input};
 
 use crate::app::tokio_runtime;
-use crate::assets;
 use crate::install_activity;
 use crate::notification;
-use crate::ui::{
-    components::{remote_tiled_image, settings_widgets},
-    style,
-};
 
-use super::AppScreen;
 
+#[path = "content_browser/content_browser_api.rs"]
+pub mod api;
 #[path = "content_browser_install.rs"]
 mod content_browser_install;
 #[path = "content_browser/content_browser_output.rs"]
@@ -49,7 +40,6 @@ mod content_browser_ui;
 #[path = "content_browser_workers.rs"]
 mod content_browser_workers;
 use self::content_browser_install::*;
-use self::content_browser_output::ContentBrowserOutput;
 pub(crate) use self::content_browser_state::BulkContentUpdate;
 pub use self::content_browser_state::ContentBrowserState;
 use self::content_browser_state::*;
@@ -66,19 +56,19 @@ const DEFAULT_DISCOVERY_QUERY_SHADER: &str = "shader";
 const DEFAULT_DISCOVERY_QUERY_DATA_PACK: &str = "data pack";
 const DETAIL_VERSION_FETCH_PAGE_SIZE: u32 = 50;
 const DETAIL_VERSION_FETCH_MAX_PAGES: u32 = 5;
-const TILE_ACTION_BUTTON_WIDTH: f32 = 28.0;
-const TILE_ACTION_BUTTON_HEIGHT: f32 = 28.0;
-const TILE_ACTION_BUTTON_GAP_XS: f32 = 4.0;
-const TILE_DOWNLOAD_PROGRESS_WIDTH: f32 = 96.0;
+
+
+
+
 const CONTENT_UPDATE_LOG_TARGET: &str = "vertexlauncher/content_update";
 const VERTEX_PREFETCH_DIR_NAME: &str = "vertex_prefetch";
 const VERSION_CATALOG_FETCH_TIMEOUT: Duration = Duration::from_secs(75);
 const DETAIL_VERSIONS_FETCH_TIMEOUT: Duration = Duration::from_secs(45);
 const CONTENT_BROWSER_SEARCH_CACHE_MAX_ENTRIES: usize = 12;
-const CONTENT_BROWSER_VERSION_DROPDOWN_ID_KEY: &str = "content_browser_version_dropdown_id";
-const CONTENT_BROWSER_SCOPE_DROPDOWN_ID_KEY: &str = "content_browser_scope_dropdown_id";
-const CONTENT_BROWSER_SORT_DROPDOWN_ID_KEY: &str = "content_browser_sort_dropdown_id";
-const CONTENT_BROWSER_LOADER_DROPDOWN_ID_KEY: &str = "content_browser_loader_dropdown_id";
+
+
+
+
 
 static PENDING_EXTERNAL_DETAIL_OPEN: OnceLock<Mutex<Option<UnifiedContentEntry>>> = OnceLock::new();
 
@@ -89,242 +79,15 @@ pub(crate) fn request_open_detail_for_content(entry: UnifiedContentEntry) {
     }
 }
 
-pub fn version_dropdown_id(ctx: &egui::Context) -> Option<egui::Id> {
-    ctx.data(|data| {
-        data.get_temp::<egui::Id>(egui::Id::new(CONTENT_BROWSER_VERSION_DROPDOWN_ID_KEY))
-    })
-}
 
-pub fn scope_dropdown_id(ctx: &egui::Context) -> Option<egui::Id> {
-    ctx.data(|data| data.get_temp::<egui::Id>(egui::Id::new(CONTENT_BROWSER_SCOPE_DROPDOWN_ID_KEY)))
-}
 
-pub fn sort_dropdown_id(ctx: &egui::Context) -> Option<egui::Id> {
-    ctx.data(|data| data.get_temp::<egui::Id>(egui::Id::new(CONTENT_BROWSER_SORT_DROPDOWN_ID_KEY)))
-}
 
-pub fn loader_dropdown_id(ctx: &egui::Context) -> Option<egui::Id> {
-    ctx.data(|data| {
-        data.get_temp::<egui::Id>(egui::Id::new(CONTENT_BROWSER_LOADER_DROPDOWN_ID_KEY))
-    })
-}
 
-pub fn render(
-    ui: &mut Ui,
-    text_ui: &mut TextUi,
-    selected_instance_id: Option<&str>,
-    instances: &InstanceStore,
-    config: &Config,
-    state: &mut ContentBrowserState,
-    force_reset: bool,
-) -> ContentBrowserOutput {
-    let mut output = ContentBrowserOutput::default();
-    if force_reset {
-        *state = ContentBrowserState::default();
-    }
 
-    poll_search(state);
-    poll_detail_versions(state);
-    poll_downloads(state);
-    poll_version_catalog(state);
-    poll_identify_results(state);
 
-    if state.search_in_flight
-        || state.detail_versions_in_flight
-        || state.download_in_flight
-        || state.identify_in_flight
-        || state.version_catalog_in_flight
-    {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(100));
-    }
 
-    let Some(instance_id) = selected_instance_id else {
-        let _ = text_ui.label(
-            ui,
-            "content_browser_no_instance",
-            "Select an instance first. Content Browser installs into the selected instance.",
-            &style::muted(ui),
-        );
-        return output;
-    };
 
-    let Some(instance) = instances.find(instance_id) else {
-        let _ = text_ui.label(
-            ui,
-            "content_browser_missing_instance",
-            "Selected instance no longer exists.",
-            &style::error_text(ui),
-        );
-        return output;
-    };
 
-    if state.active_instance_id.as_deref() != Some(instance.id.as_str()) {
-        state.active_instance_id = Some(instance.id.clone());
-        state.active_instance_name = Some(instance.name.clone());
-        state.loader = browser_loader_from_modloader(instance.modloader.as_str());
-        state.minecraft_version_filter = instance.game_version.clone();
-        state.content_scope = ContentScope::Mods;
-        state.mod_sort_mode = ModSortMode::Popularity;
-        state.download_queue.clear();
-        state.download_in_flight = false;
-        state.active_download = None;
-        state.cached_manifest = None;
-        state.manifest_dirty = true;
-        state.current_page = 1;
-        state.current_view = ContentBrowserPage::Browse;
-        state.detail_entry = None;
-        state.detail_tab = ContentDetailTab::Overview;
-        state.detail_versions.clear();
-        state.detail_versions_project_key = None;
-        state.detail_versions_error = None;
-        state.detail_versions_in_flight = false;
-        state.detail_loader_filter = state.loader;
-        state.detail_minecraft_version_filter = instance.game_version.clone();
-        state.results = BrowserSearchSnapshot::default();
-        state.active_search_request = None;
-        state.search_completed_tasks = 0;
-        state.search_total_tasks = 0;
-        state.search_in_flight = false;
-        state.search_notification_active = false;
-        state.auto_populated_instance_id = None;
-    }
-
-    let installations_root = config.minecraft_installations_root_path().to_path_buf();
-    let instance_root = instance_root_path(&installations_root, instance);
-    let game_version = instance.game_version.trim().to_owned();
-
-    request_version_catalog(state);
-    apply_pending_external_detail_open(state);
-
-    let _ = text_ui.label(
-        ui,
-        ("content_browser_context", instance.id.as_str()),
-        &format!(
-            "Instance: {} | Minecraft {} | Loader {}",
-            instance.name,
-            if game_version.is_empty() {
-                "n/a"
-            } else {
-                game_version.as_str()
-            },
-            instance.modloader.trim()
-        ),
-        &style::caption(ui),
-    );
-    ui.add_space(style::SPACE_MD);
-
-    maybe_start_queued_download(state, instance.name.as_str(), instance_root.as_path());
-
-    if let Some(status) = state.status_message.as_deref() {
-        let _ = text_ui.label(
-            ui,
-            ("content_browser_status", instance.id.as_str()),
-            status,
-            &style::muted(ui),
-        );
-    }
-
-    for warning in &state.results.warnings {
-        let _ = text_ui.label(
-            ui,
-            ("content_browser_warning", instance.id.as_str(), warning),
-            warning,
-            &style::warning_text(ui),
-        );
-    }
-
-    poll_manifest_load(state);
-    if state.manifest_load_in_flight {
-        ui.ctx().request_repaint_after(Duration::from_millis(100));
-    }
-
-    ui.add_space(style::SPACE_MD);
-    match state.current_view {
-        ContentBrowserPage::Browse => {
-            let manifest = cached_manifest_for_instance(state, instance_root.as_path());
-            render_controls(ui, text_ui, instance.id.as_str(), state);
-
-            if state.auto_populated_instance_id.as_deref() != Some(instance.id.as_str())
-                && !state.search_in_flight
-                && state.query_input.trim().is_empty()
-                && state.search_tags.is_empty()
-            {
-                let request = BrowserSearchRequest {
-                    query: None,
-                    tags: Vec::new(),
-                    game_version: normalize_optional(state.minecraft_version_filter.as_str()),
-                    loader: state.loader,
-                    content_scope: ContentScope::Mods,
-                    mod_sort_mode: ModSortMode::Popularity,
-                    page: 1,
-                };
-                state.current_page = 1;
-                request_search(state, request);
-                state.auto_populated_instance_id = Some(instance.id.clone());
-            }
-
-            let results_height = (ui.available_height() - 42.0).max(140.0);
-            let render_outcome = render_results(
-                ui,
-                text_ui,
-                instance.id.as_str(),
-                state,
-                manifest.as_ref(),
-                results_height,
-            );
-            if let Some(page) = render_outcome.requested_page
-                && page != state.current_page
-            {
-                state.current_page = page;
-                request_search_for_current_filters(state, false);
-            }
-            if let Some(entry) = render_outcome.open_entry {
-                open_detail_page(state, &entry);
-            }
-        }
-        ContentBrowserPage::Detail => {
-            render_detail_page(
-                ui,
-                text_ui,
-                instance.id.as_str(),
-                instance_root.as_path(),
-                state,
-            );
-        }
-    }
-
-    ui.add_space(style::SPACE_LG);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = style::SPACE_SM;
-        let button_style = style::neutral_button(ui);
-        if state.current_view == ContentBrowserPage::Detail {
-            if text_ui
-                .button(
-                    ui,
-                    ("content_browser_back_to_browser", instance.id.as_str()),
-                    "Back to Mod Browser",
-                    &button_style,
-                )
-                .clicked()
-            {
-                state.current_view = ContentBrowserPage::Browse;
-            }
-        }
-        if text_ui
-            .button(
-                ui,
-                ("content_browser_back_to_instance", instance.id.as_str()),
-                "Back to Instance",
-                &button_style,
-            )
-            .clicked()
-        {
-            output.requested_screen = Some(AppScreen::Instance);
-        }
-    });
-    output
-}
 
 fn poll_manifest_load(state: &mut ContentBrowserState) {
     let drained = state.manifest_load.drain();
@@ -828,6 +591,8 @@ fn collect_content_download_tasks_for_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+use instances::InstanceStore;
+use instances::instance_root_path;
 
     fn temp_test_root(test_name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(

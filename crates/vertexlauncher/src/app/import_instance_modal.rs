@@ -16,13 +16,11 @@ use std::time::{Duration, Instant};
 
 use content_resolver::{InstalledContentKind, detect_installed_content_kind};
 use curseforge::Client as CurseForgeClient;
-use eframe::egui;
 use instances::{
     InstanceRecord, InstanceStore, NewInstanceSpec, create_instance, delete_instance,
     instance_root_path,
 };
 use launcher_runtime as tokio_runtime;
-use launcher_ui::{ui::components::settings_widgets, ui::style};
 use managed_content::{
     CONTENT_MANIFEST_FILE_NAME, ContentInstallManifest, InstalledContentProject,
     ManagedContentSource, ModpackInstallState, load_content_manifest, load_modpack_install_state,
@@ -31,9 +29,6 @@ use managed_content::{
 use modrinth::Client as ModrinthClient;
 use serde::Deserialize;
 use serde_json::Value;
-use textui::TextUi;
-use textui_egui::prelude::*;
-use ui_foundation::{DialogPreset, dialog_options, primary_button, secondary_button, show_dialog};
 use vtmpack::{
     VtmpackDownloadableEntry, VtmpackManifest, open_vtmpack_tar_archive,
     read_vtmpack_manifest_with_progress,
@@ -51,16 +46,24 @@ mod package_import;
 mod render_impl;
 mod state;
 
+/// "Fabric 0.16.0" style label for an import preview.
+pub(crate) fn loader_label_for_display(modloader: &str, version: &str) -> String {
+    format_loader_label(modloader, version)
+}
 pub use package_import::{
     CurseForgeManualDownloadRequirement, attach_curseforge_modpack_install_state,
     format_curseforge_download_url_error, prepare_curseforge_manual_download_for_file,
     prepare_curseforge_manual_downloads,
 };
 pub use render_impl::import_package_with_progress;
-pub use render_impl::render;
+pub(crate) use render_impl::load_preview_from_state;
 pub use state::{
     ImportInstanceState, ImportPackageError, ImportProgress, ImportRequest, ImportSource,
-    ImportTaskResult, ModalAction,
+    ImportTaskResult,
+};
+pub(crate) use state::{
+    ImportMode, ImportPackageKind, ImportPreviewKind, LAUNCHER_KIND_OPTIONS, path_input_string,
+    poll_preview_results, selected_import_mode, selected_launcher_hint, update_path_from_input,
 };
 
 use self::{inspection::*, package_import::*, state::*};

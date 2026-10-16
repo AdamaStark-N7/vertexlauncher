@@ -174,7 +174,7 @@ impl AuthState {
         self.device_code_flow = Some(auth::start_device_code_login(client_id));
     }
 
-    pub fn start_system_browser_sign_in(&mut self, theme: &launcher_ui::ui::theme::Theme) {
+    pub fn start_system_browser_sign_in(&mut self, theme: &vertex_theme::Theme) {
         if self.flow.is_some() || self.renewal.is_some() {
             return;
         }

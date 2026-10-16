@@ -224,8 +224,8 @@ pub(crate) fn minecraft_box_quads(cube: MinecraftBox) -> [MinecraftBoxQuad; 6] {
         vertices: [vertices[1], vertices[0], vertices[3], vertices[2]],
         normal,
         uv: Rect::from_min_max(
-            egui::pos2(u_a / tex_w, v_a / tex_h),
-            egui::pos2(u_b / tex_w, v_b / tex_h),
+            pos2(u_a / tex_w, v_a / tex_h),
+            pos2(u_b / tex_w, v_b / tex_h),
         ),
     })
 }
@@ -354,7 +354,7 @@ fn project_point(camera_space: Vec3, projection: Projection, rect: Rect) -> Opti
 
 fn color_with_brightness(base: Color32, brightness: f32) -> Color32 {
     let b = brightness.clamp(0.0, 1.0);
-    Color32::from_rgba_premultiplied(
+    Color32::from_rgba_unmultiplied(
         ((base.r() as f32) * b).round() as u8,
         ((base.g() as f32) * b).round() as u8,
         ((base.b() as f32) * b).round() as u8,

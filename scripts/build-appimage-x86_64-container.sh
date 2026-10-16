@@ -17,7 +17,6 @@ CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
   "${CONTAINER_DIR}/vertexlauncher-centos7-webkit.Dockerfile" \
   "${CONTAINER_DIR}")}"
 
-bash "${REPO_ROOT}/scripts/compile-slang-shaders.sh"
 
 # Remove host-compiled build-script executables and the final binary before
 # entering the container so that the container recompiles them against its glibc.

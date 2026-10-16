@@ -6,17 +6,10 @@ use std::{
 #[cfg(target_os = "linux")]
 use std::{fs, io};
 
-use auth::MinecraftSkinVariant;
 use config::GamepadCalibration;
-use egui::FocusDirection;
 use gilrs::{Axis, Button, EventType, Gamepad, GamepadId, Gilrs};
 use launcher_ui::notification;
-use launcher_ui::screens::{self, AppScreen};
-use launcher_ui::ui::{components::settings_widgets, sidebar};
-use textui_egui::{
-    apply_gamepad_scroll_to_focused_target, apply_gamepad_scroll_to_registered_id,
-    set_gamepad_scroll_delta,
-};
+use launcher_ui::screens::AppScreen;
 
 /// How long to wait after the first press before starting to repeat navigation.
 const INITIAL_REPEAT_DELAY: Duration = Duration::from_millis(350);
@@ -27,9 +20,9 @@ const RIGHT_STICK_SCROLL_SPEED: f32 = 1100.0;
 /// Minimum right-stick deflection before scrolling begins.
 const RIGHT_STICK_SCROLL_DEADZONE: f32 = 0.15;
 
-/// Direction to move focus within egui's spatial navigation graph.
+/// Direction to move focus in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NavDir {
+pub enum NavDir {
     Up,
     Right,
     Down,
@@ -57,12 +50,40 @@ pub struct GamepadStickSample {
     pub y: f32,
 }
 
+/// A plain 2D vector, so the poll result carries no UI toolkit type.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+pub struct Vec2f {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Vec2f {
+    const ZERO: Self = Self { x: 0.0, y: 0.0 };
+}
+
+/// What the controllers asked for this frame.
 #[derive(Debug, Default, Clone)]
-pub struct GamepadUpdate {
-    pub calibration_requested: Option<GamepadDeviceIdentity>,
+pub struct GamepadPoll {
+    /// Focus moves, in order: presses and held-direction repeats.
+    pub nav: Vec<NavDir>,
+    /// A (South) was pressed.
+    pub south: bool,
+    /// B (East) was pressed.
+    pub back: bool,
+    /// X (West) was pressed: open the focused item's context menu.
+    pub context_menu: bool,
+    /// Left stick click: jump focus to the sidebar.
+    pub home_focus: bool,
+    /// Net slider steps (left/right while a slider has focus).
+    pub slider_step: i32,
+    /// Scroll to apply this frame, already scaled by the frame time (x = horizontal, y = vertical).
+    pub scroll: Vec2f,
     pub skins_preview_orbit: f32,
-    pub screenshot_viewer_pan: egui::Vec2,
+    pub screenshot_viewer_pan: Vec2f,
     pub screenshot_viewer_zoom: f32,
+    /// Any controller input was seen (so the UI can show focus rings).
+    pub input_seen: bool,
+    pub calibration_requested: Option<GamepadDeviceIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -173,15 +194,14 @@ impl GamepadNavigator {
         }
     }
 
-    /// Process all pending gamepad events and inject navigation into egui.
-    ///
-    /// Should be called at the start of each `update` frame, before any widgets render.
-    pub fn update(
+    /// Reads the controllers and says what the user asked for this frame. Knows nothing about any UI toolkit:
+    /// `slider_focused` says the focused control is a slider, which takes left/right as value steps.
+    pub fn poll(
         &mut self,
-        ctx: &egui::Context,
         calibrations: &BTreeMap<String, GamepadCalibration>,
         active_screen: AppScreen,
-    ) -> GamepadUpdate {
+        slider_focused: bool,
+    ) -> GamepadPoll {
         let now = Instant::now();
         let dt = now
             .duration_since(self.last_scroll_update)
@@ -191,24 +211,11 @@ impl GamepadNavigator {
         self.detect_startup_gamepads(calibrations);
         self.maybe_log_linux_input_probe();
         self.maybe_warn_about_linux_input_access();
-        settings_widgets::set_gamepad_slider_step_delta(ctx, 0);
-        settings_widgets::set_gamepad_activate_target(ctx, None);
-        sidebar::request_home_focus(ctx, false);
-        set_gamepad_scroll_delta(ctx, egui::Vec2::ZERO);
 
-        let mut activate = false;
-        let mut back = false;
-        let mut context_menu_requested = false;
+        let mut out = GamepadPoll::default();
         let mut scroll_delta: f32 = 0.0;
         let mut h_scroll_delta: f32 = 0.0;
-        let mut skins_preview_orbit: f32 = 0.0;
-        let mut screenshot_viewer_pan = egui::Vec2::ZERO;
-        let mut screenshot_viewer_zoom: f32 = 0.0;
-        let mut slider_step_delta: i32 = 0;
         let mut nav_actions = Vec::new();
-        let mut controller_input_seen = false;
-        let active_slider = settings_widgets::gamepad_active_slider(ctx);
-        let focused_id = ctx.memory(|memory| memory.focused());
 
         // Drain all pending events from gilrs.
         while let Some(ev) = self.gilrs.next_event() {
@@ -253,57 +260,53 @@ impl GamepadNavigator {
                 }
                 EventType::ButtonPressed(button, _) => match button {
                     Button::DPadUp => {
-                        controller_input_seen = true;
+                        out.input_seen = true;
                         nav_actions.push((ev.id, NavDir::Up, HoldSource::Dpad))
                     }
                     Button::DPadRight => {
-                        controller_input_seen = true;
-                        if active_slider.is_some() && active_slider == focused_id {
-                            slider_step_delta += 1;
+                        out.input_seen = true;
+                        if slider_focused {
+                            out.slider_step += 1;
                         } else {
                             nav_actions.push((ev.id, NavDir::Right, HoldSource::Dpad))
                         }
                     }
                     Button::DPadDown => {
-                        controller_input_seen = true;
+                        out.input_seen = true;
                         nav_actions.push((ev.id, NavDir::Down, HoldSource::Dpad))
                     }
                     Button::DPadLeft => {
-                        controller_input_seen = true;
-                        if active_slider.is_some() && active_slider == focused_id {
-                            slider_step_delta -= 1;
+                        out.input_seen = true;
+                        if slider_focused {
+                            out.slider_step -= 1;
                         } else {
                             nav_actions.push((ev.id, NavDir::Left, HoldSource::Dpad))
                         }
                     }
                     Button::South => {
-                        controller_input_seen = true;
-                        settings_widgets::set_gamepad_activate_target(ctx, focused_id);
-                        activate = focused_id
-                            .map(|id| !settings_widgets::is_gamepad_custom_activate_id(ctx, id))
-                            .unwrap_or(true);
+                        out.input_seen = true;
+                        out.south = true;
                     }
                     Button::East => {
-                        controller_input_seen = true;
-                        back = true
+                        out.input_seen = true;
+                        out.back = true
                     }
                     // X opens the focused item's context menu (the keyboard Shift+F10 chord).
                     Button::West => {
-                        controller_input_seen = true;
-                        context_menu_requested = true;
+                        out.input_seen = true;
+                        out.context_menu = true;
                     }
                     Button::LeftThumb => {
-                        controller_input_seen = true;
-                        settings_widgets::set_gamepad_active_slider(ctx, None);
-                        sidebar::request_home_focus(ctx, true);
+                        out.input_seen = true;
+                        out.home_focus = true;
                     }
                     // Bumpers: coarse scroll
                     Button::LeftTrigger => {
-                        controller_input_seen = true;
+                        out.input_seen = true;
                         scroll_delta += 200.0
                     }
                     Button::RightTrigger => {
-                        controller_input_seen = true;
+                        out.input_seen = true;
                         scroll_delta -= 200.0
                     }
                     _ => {}
@@ -324,36 +327,26 @@ impl GamepadNavigator {
             .iter()
             .any(|(_, _, source)| *source == HoldSource::Analog)
         {
-            controller_input_seen = true;
+            out.input_seen = true;
         }
-        if active_slider.is_some() && active_slider == focused_id {
+        if slider_focused {
             if let Some(dir) = nav_actions
                 .iter()
                 .rev()
                 .find_map(|(_, dir, source)| (*source == HoldSource::Analog).then_some(*dir))
             {
                 match dir {
-                    NavDir::Left => slider_step_delta -= 1,
-                    NavDir::Right => slider_step_delta += 1,
+                    NavDir::Left => out.slider_step -= 1,
+                    NavDir::Right => out.slider_step += 1,
                     NavDir::Up | NavDir::Down => {}
                 }
             }
             nav_actions.retain(|(_, dir, _)| !matches!(dir, NavDir::Left | NavDir::Right));
         }
-        settings_widgets::set_gamepad_slider_step_delta(ctx, slider_step_delta);
 
         // --- Hold-to-navigate ---
         for (id, dir, source) in nav_actions {
-            if Self::handle_explicit_screen_focus_bridge(ctx, active_screen, dir) {
-                if let Some(state) = self.device_states.get_mut(&id) {
-                    state.held_dir = Some(dir);
-                    state.held_source = Some(source);
-                    state.held_since = Some(now);
-                    state.last_repeat = None;
-                }
-                continue;
-            }
-            Self::fire_nav(ctx, dir);
+            out.nav.push(dir);
             if let Some(state) = self.device_states.get_mut(&id) {
                 state.held_dir = Some(dir);
                 state.held_source = Some(source);
@@ -369,9 +362,7 @@ impl GamepadNavigator {
                         .last_repeat
                         .unwrap_or(held_since + INITIAL_REPEAT_DELAY);
                     if now.duration_since(repeat_base) >= REPEAT_INTERVAL {
-                        if !Self::handle_explicit_screen_focus_bridge(ctx, active_screen, dir) {
-                            Self::fire_nav(ctx, dir);
-                        }
+                        out.nav.push(dir);
                         state.last_repeat = Some(now);
                     }
                 }
@@ -379,93 +370,57 @@ impl GamepadNavigator {
         }
 
         // --- Right stick continuous scroll ---
+        let mut skins_preview_orbit: f32 = 0.0;
+        let mut screenshot_viewer_pan = Vec2f::ZERO;
+        let mut screenshot_viewer_zoom: f32 = 0.0;
         for state in self.device_states.values() {
             if state.right_stick_y.abs() > RIGHT_STICK_SCROLL_DEADZONE {
                 scroll_delta += state.right_stick_y * RIGHT_STICK_SCROLL_SPEED;
-                controller_input_seen = true;
+                out.input_seen = true;
             }
             if active_screen == AppScreen::Skins {
                 if state.right_stick_x.abs() > RIGHT_STICK_SCROLL_DEADZONE {
                     skins_preview_orbit += state.right_stick_x;
-                    controller_input_seen = true;
+                    out.input_seen = true;
                 }
             } else if matches!(active_screen, AppScreen::Home | AppScreen::Instance) {
                 if state.right_stick_x.abs() > RIGHT_STICK_SCROLL_DEADZONE
                     || state.right_stick_y.abs() > RIGHT_STICK_SCROLL_DEADZONE
                 {
-                    screenshot_viewer_pan += egui::vec2(state.right_stick_x, -state.right_stick_y);
-                    controller_input_seen = true;
+                    screenshot_viewer_pan.x += state.right_stick_x;
+                    screenshot_viewer_pan.y += -state.right_stick_y;
+                    out.input_seen = true;
                 }
                 let trigger_zoom = state.right_trigger - state.left_trigger;
                 if trigger_zoom.abs() > 0.05 {
                     screenshot_viewer_zoom += trigger_zoom;
-                    controller_input_seen = true;
+                    out.input_seen = true;
                 }
             } else if state.right_stick_x.abs() > RIGHT_STICK_SCROLL_DEADZONE {
                 h_scroll_delta -= state.right_stick_x * RIGHT_STICK_SCROLL_SPEED;
-                controller_input_seen = true;
+                out.input_seen = true;
             }
         }
 
-        if controller_input_seen {
-            settings_widgets::set_gamepad_input_history(ctx, true);
-        }
-
-        let scroll_delta = egui::vec2(h_scroll_delta, scroll_delta) * dt;
-
-        // --- Activate (A / South button) ---
-        if activate {
-            Self::inject_key(ctx, egui::Key::Enter, egui::Modifiers::default());
-        }
-
-        // --- Context menu (X / West button) ---
-        if context_menu_requested {
-            Self::inject_key(
-                ctx,
-                egui::Key::F10,
-                egui::Modifiers {
-                    shift: true,
-                    ..Default::default()
-                },
-            );
-        }
-
-        // --- Back (B / East button) ---
-        if back {
-            Self::inject_key(ctx, egui::Key::Escape, egui::Modifiers::default());
-        }
-
-        // --- Scroll ---
-        if scroll_delta != egui::Vec2::ZERO {
-            let scrolled = if active_screen == AppScreen::Console {
-                // Hard-bind right stick to the console log scroll area regardless of focus.
-                if let Some(console_id) = screens::console_log_scroll_id(ctx) {
-                    apply_gamepad_scroll_to_registered_id(ctx, console_id, scroll_delta)
-                } else {
-                    apply_gamepad_scroll_to_focused_target(ctx, scroll_delta)
-                }
-            } else {
-                apply_gamepad_scroll_to_focused_target(ctx, scroll_delta)
-            };
-            if scrolled {
-                ctx.request_repaint();
+        out.scroll = Vec2f {
+            x: h_scroll_delta * dt,
+            y: scroll_delta * dt,
+        };
+        let pan_len_sq = screenshot_viewer_pan.x * screenshot_viewer_pan.x
+            + screenshot_viewer_pan.y * screenshot_viewer_pan.y;
+        out.screenshot_viewer_pan = if pan_len_sq > 1.0 {
+            let len = pan_len_sq.sqrt();
+            Vec2f {
+                x: screenshot_viewer_pan.x / len,
+                y: screenshot_viewer_pan.y / len,
             }
-        } else if skins_preview_orbit.abs() > 0.0 {
-            ctx.request_repaint();
-        }
-
-        let screenshot_viewer_pan = if screenshot_viewer_pan.length_sq() > 1.0 {
-            screenshot_viewer_pan.normalized()
         } else {
             screenshot_viewer_pan
         };
-
-        GamepadUpdate {
-            calibration_requested: self.pending_calibration_request.take(),
-            skins_preview_orbit: skins_preview_orbit.clamp(-1.0, 1.0),
-            screenshot_viewer_pan,
-            screenshot_viewer_zoom: screenshot_viewer_zoom.clamp(-1.0, 1.0),
-        }
+        out.skins_preview_orbit = skins_preview_orbit.clamp(-1.0, 1.0);
+        out.screenshot_viewer_zoom = screenshot_viewer_zoom.clamp(-1.0, 1.0);
+        out.calibration_requested = self.pending_calibration_request.take();
+        out
     }
 
     fn poll_current_axes(
@@ -700,6 +655,11 @@ impl GamepadNavigator {
         );
     }
 
+    /// How many tracked controllers are connected.
+    pub fn connected(&self) -> usize {
+        self.known_gamepads.len()
+    }
+
     pub fn current_left_stick(&self, device_key: &str) -> Option<GamepadStickSample> {
         self.gilrs.gamepads().find_map(|(_, gamepad)| {
             if !Self::should_track_gamepad(gamepad) {
@@ -897,232 +857,6 @@ impl GamepadNavigator {
 
     fn normalized_y(value: f32, calibration: &GamepadCalibration) -> f32 {
         (value - calibration.center_y) * calibration.y_backward_sign as f32
-    }
-
-    /// Advance egui keyboard focus in the requested direction.
-    fn fire_nav(ctx: &egui::Context, dir: NavDir) {
-        let direction = match dir {
-            NavDir::Up => FocusDirection::Up,
-            NavDir::Right => FocusDirection::Right,
-            NavDir::Down => FocusDirection::Down,
-            NavDir::Left => FocusDirection::Left,
-        };
-        ctx.memory_mut(|memory| memory.move_focus(direction));
-        ctx.request_repaint();
-    }
-
-    fn handle_explicit_screen_focus_bridge(
-        ctx: &egui::Context,
-        active_screen: AppScreen,
-        dir: NavDir,
-    ) -> bool {
-        if active_screen == AppScreen::Settings
-            && dir == NavDir::Right
-            && Self::focused_widget_is_in_sidebar(ctx)
-        {
-            if let Some(focused_id) = ctx.memory(|memory| memory.focused()) {
-                ctx.memory_mut(|memory| memory.surrender_focus(focused_id));
-            }
-            screens::request_settings_theme_focus(ctx);
-            ctx.request_repaint();
-            return true;
-        }
-
-        if active_screen == AppScreen::Skins
-            && dir == NavDir::Right
-            && Self::focused_widget_is_in_sidebar(ctx)
-        {
-            if let Some(focused_id) = ctx.memory(|memory| memory.focused()) {
-                ctx.memory_mut(|memory| memory.surrender_focus(focused_id));
-            }
-            screens::request_skins_motion_focus(ctx);
-            ctx.request_repaint();
-            return true;
-        }
-
-        if active_screen == AppScreen::Console
-            && dir == NavDir::Right
-            && Self::focused_widget_is_in_sidebar(ctx)
-        {
-            if let Some(focused_id) = ctx.memory(|memory| memory.focused()) {
-                ctx.memory_mut(|memory| memory.surrender_focus(focused_id));
-            }
-            screens::request_console_tab_focus(ctx);
-            ctx.request_repaint();
-            return true;
-        }
-
-        if active_screen == AppScreen::Skins {
-            let focused_id = ctx.memory(|memory| memory.focused());
-            if dir == NavDir::Right && focused_id == screens::skins_classic_model_button_id(ctx) {
-                screens::request_skins_model_focus(ctx, MinecraftSkinVariant::Slim);
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Left && focused_id == screens::skins_slim_model_button_id(ctx) {
-                screens::request_skins_model_focus(ctx, MinecraftSkinVariant::Classic);
-                ctx.request_repaint();
-                return true;
-            }
-        }
-
-        if active_screen == AppScreen::Instance {
-            let focused_id = ctx.memory(|memory| memory.focused());
-            if dir == NavDir::Right
-                && focused_id == screens::instance_top_content_tab_id(ctx)
-                && let Some(target) = screens::instance_top_screenshots_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Right
-                && focused_id == screens::instance_top_screenshots_tab_id(ctx)
-                && let Some(target) = screens::instance_top_logs_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Left
-                && focused_id == screens::instance_top_logs_tab_id(ctx)
-                && let Some(target) = screens::instance_top_screenshots_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Left
-                && focused_id == screens::instance_top_screenshots_tab_id(ctx)
-                && let Some(target) = screens::instance_top_content_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Right
-                && focused_id == screens::instance_content_resource_packs_tab_id(ctx)
-                && let Some(target) = screens::instance_content_shader_packs_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-            if dir == NavDir::Left
-                && focused_id == screens::instance_content_shader_packs_tab_id(ctx)
-                && let Some(target) = screens::instance_content_resource_packs_tab_id(ctx)
-            {
-                ctx.memory_mut(|memory| {
-                    if let Some(focused_id) = focused_id {
-                        memory.surrender_focus(focused_id);
-                    }
-                    memory.request_focus(target);
-                });
-                ctx.request_repaint();
-                return true;
-            }
-        }
-
-        if active_screen == AppScreen::ContentBrowser {
-            let focused_id = ctx.memory(|memory| memory.focused());
-            let move_focus = |target: Option<egui::Id>| {
-                if let Some(target) = target {
-                    ctx.memory_mut(|memory| {
-                        if let Some(focused_id) = focused_id {
-                            memory.surrender_focus(focused_id);
-                        }
-                        memory.request_focus(target);
-                    });
-                    ctx.request_repaint();
-                    return true;
-                }
-                false
-            };
-
-            if dir == NavDir::Right
-                && focused_id == screens::content_browser_version_dropdown_id(ctx)
-            {
-                return move_focus(screens::content_browser_scope_dropdown_id(ctx));
-            }
-            if dir == NavDir::Right && focused_id == screens::content_browser_scope_dropdown_id(ctx)
-            {
-                return move_focus(screens::content_browser_sort_dropdown_id(ctx));
-            }
-            if dir == NavDir::Right && focused_id == screens::content_browser_sort_dropdown_id(ctx)
-            {
-                return move_focus(screens::content_browser_loader_dropdown_id(ctx));
-            }
-            if dir == NavDir::Left && focused_id == screens::content_browser_loader_dropdown_id(ctx)
-            {
-                return move_focus(screens::content_browser_sort_dropdown_id(ctx));
-            }
-            if dir == NavDir::Left && focused_id == screens::content_browser_sort_dropdown_id(ctx) {
-                return move_focus(screens::content_browser_scope_dropdown_id(ctx));
-            }
-            if dir == NavDir::Left && focused_id == screens::content_browser_scope_dropdown_id(ctx)
-            {
-                return move_focus(screens::content_browser_version_dropdown_id(ctx));
-            }
-        }
-
-        false
-    }
-
-    fn focused_widget_is_in_sidebar(ctx: &egui::Context) -> bool {
-        let Some(focused_id) = ctx.memory(|memory| memory.focused()) else {
-            return false;
-        };
-        let Some(response) = ctx.read_response(focused_id) else {
-            return false;
-        };
-        let viewport_width = ctx.input(|input| input.content_rect().width());
-        let sidebar_boundary = (viewport_width * 0.2).clamp(72.0, 180.0);
-        response.rect.center().x <= sidebar_boundary
-    }
-
-    /// Inject a key press+release pair.
-    fn inject_key(ctx: &egui::Context, key: egui::Key, modifiers: egui::Modifiers) {
-        ctx.input_mut(|i| {
-            i.events.push(egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: true,
-                repeat: false,
-                modifiers,
-            });
-            i.events.push(egui::Event::Key {
-                key,
-                physical_key: None,
-                pressed: false,
-                repeat: false,
-                modifiers,
-            });
-        });
     }
 }
 

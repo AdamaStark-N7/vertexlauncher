@@ -19,8 +19,8 @@ mod overlay_voxel_face;
 mod voxel_overlay_layer;
 
 use self::built_character_scene::BuiltCharacterScene;
-pub(super) use self::character_scene_builder::build_character_scene;
-pub(super) use self::motion_blur_scene_samples::build_motion_blur_scene_samples;
+pub(in crate::screens) use self::character_scene_builder::build_character_scene;
+pub(in crate::screens) use self::motion_blur_scene_samples::build_motion_blur_scene_samples;
 use self::overlay_part_spec::OverlayPartSpec;
 use self::overlay_region_spec::OverlayRegionSpec;
 use self::overlay_voxel_face::OverlayVoxelFace;

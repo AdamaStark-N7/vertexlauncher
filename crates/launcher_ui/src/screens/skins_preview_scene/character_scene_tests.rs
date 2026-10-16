@@ -5,8 +5,8 @@ fn triangles_within_uv<'a>(
     min: [u32; 2],
     max: [u32; 2],
 ) -> impl Iterator<Item = &'a RenderTriangle> {
-    let lo = egui::pos2(min[0] as f32 / 64.0, min[1] as f32 / 64.0);
-    let hi = egui::pos2(max[0] as f32 / 64.0, max[1] as f32 / 64.0);
+    let lo = pos2(min[0] as f32 / 64.0, min[1] as f32 / 64.0);
+    let hi = pos2(max[0] as f32 / 64.0, max[1] as f32 / 64.0);
     scene.triangles.iter().filter(move |tri| {
         tri.uv
             .iter()
@@ -24,7 +24,7 @@ fn mean_screen_x_for_uv(scene: &BuiltCharacterScene, min: [u32; 2], max: [u32; 2
 
 #[test]
 fn right_limbs_render_on_the_same_side_as_the_right_half_of_the_face() {
-    let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
     let skin = Arc::new(RgbaImage::from_pixel(
         64,
         64,
@@ -78,7 +78,7 @@ fn right_limbs_render_on_the_same_side_as_the_right_half_of_the_face() {
 
 #[test]
 fn walk_cycle_produces_finite_geometry() {
-    let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
     let skin = Arc::new(RgbaImage::from_pixel(
         64,
         64,
@@ -129,7 +129,7 @@ fn snapped_texel_region(bounds: Rect, dims: [f32; 2]) -> ([i32; 2], [i32; 2]) {
 
 #[test]
 fn every_face_samples_only_its_own_texel_region() {
-    let rect = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(400.0, 400.0));
+    let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(400.0, 400.0));
     let skin = Arc::new(RgbaImage::from_pixel(
         64,
         64,

@@ -1,9 +1,0 @@
-[package]
-name = "vertex_3d_build"
-version.workspace = true
-edition = "2024"
-
-[dependencies]
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
