@@ -138,10 +138,20 @@ prepare_clean_source_tree() {
     [[ -f "${SOURCE_TREE}/Cargo.lock" ]] || die "Clean source tree missing Cargo.lock"
 }
 
-prebuilt_aarch64() {
-    # Returns true when a cross-compiled aarch64 binary is available and
-    # the current arch is aarch64, meaning we skip cargo entirely.
-    [[ "${1:-}" == "aarch64" && -n "${VERTEX_PREBUILT_AARCH64:-}" && -f "${VERTEX_PREBUILT_AARCH64}" ]]
+# Prints the already built binary for an arch, if there is one: VERTEX_PREBUILT_AARCH64 / VERTEX_PREBUILT_X86_64, else
+# the release binary the Linux container builds leave in target/<triple>/release. The binary is always built outside
+# flatpak-builder: the engine's build fetches its third-party sources and needs a newer clang than the Flatpak SDK.
+prebuilt_binary() {
+    local arch="${1:-}" candidate=""
+    case "${arch}" in
+        aarch64) candidate="${VERTEX_PREBUILT_AARCH64:-${REPO_ROOT}/target/aarch64-unknown-linux-gnu/release/vertexlauncher}" ;;
+        x86_64) candidate="${VERTEX_PREBUILT_X86_64:-${REPO_ROOT}/target/x86_64-unknown-linux-gnu/release/vertexlauncher}" ;;
+    esac
+    [[ -n "${candidate}" && -f "${candidate}" ]] && printf '%s\n' "${candidate}"
+}
+
+has_prebuilt() {
+    prebuilt_binary "${1:-}" >/dev/null
 }
 
 generate_cargo_sources() {
@@ -189,7 +199,7 @@ write_manifest_prebuilt() {
     local manifest_path="$2"
     local bin_dest="${GEN_DIR}/vertexlauncher-prebuilt-${arch}"
 
-    cp "${VERTEX_PREBUILT_AARCH64}" "${bin_dest}"
+    cp "$(prebuilt_binary "${arch}")" "${bin_dest}"
     log "Prebuilt binary staged: ${bin_dest}"
 
     cat > "${manifest_path}" <<MANIFEST
@@ -295,7 +305,7 @@ write_manifest() {
     local manifest_path="${GEN_DIR}/${APP_ID}-${arch}.yaml"
     mkdir -p "${GEN_DIR}"
 
-    if prebuilt_aarch64 "${arch}"; then
+    if has_prebuilt "${arch}"; then
         write_manifest_prebuilt "${arch}" "${manifest_path}"
         return
     fi
@@ -533,12 +543,18 @@ main() {
             continue
         fi
 
+        # The binary is built outside flatpak-builder (see prebuilt_binary); build it now if nothing has yet.
+        if [[ "${arch}" == "x86_64" ]] && ! has_prebuilt "${arch}"; then
+            log "No x86_64 binary yet; building it in the Linux build container"
+            bash "${SCRIPT_DIR}/build-linux-x86_64-container.sh"
+        fi
+
         ensure_runtime_bits "${arch}"
         ensure_appstream_compose "${arch}"
 
         if [[ "${source_prepared}" -eq 0 ]]; then
             prepare_clean_source_tree
-            if ! prebuilt_aarch64 "${arch}"; then
+            if ! has_prebuilt "${arch}"; then
                 generate_cargo_sources || {
                     log "Failed to generate cargo-sources.json"
                     exit 1

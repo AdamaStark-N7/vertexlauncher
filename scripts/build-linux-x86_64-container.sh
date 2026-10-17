@@ -13,9 +13,9 @@ CONTAINER_DIR="${REPO_ROOT}/containers"
 source "${REPO_ROOT}/scripts/lib/portable-linux-common.sh"
 
 CONTAINER_IMAGE="${CONTAINER_IMAGE:-$(ensure_podman_image \
-  centos7-webkit \
+  linux-build \
   x86_64 \
-  "${CONTAINER_DIR}/vertexlauncher-centos7-webkit.Dockerfile" \
+  "${CONTAINER_DIR}/vertexlauncher-linux-build.Dockerfile" \
   "${CONTAINER_DIR}")}"
 
 
@@ -30,9 +30,17 @@ rm -f "${REPO_ROOT}/target/release/vertexlauncher" 2>/dev/null || true
 
 mkdir -p "${WORK_ROOT}" "${CARGO_HOME_DIR}" "${RUSTUP_HOME_DIR}"
 
+# While crates/vertex_shell points at a local SturdyEngine5 checkout by path (engine work in progress), mount it where
+# that relative path lands inside the container. No effect once the dependency is a git revision again.
+ENGINE_MOUNT=()
+if [[ -d "${REPO_ROOT}/../SturdyEngine5" ]]; then
+  ENGINE_MOUNT=(-v "$(cd "${REPO_ROOT}/../SturdyEngine5" && pwd):/SturdyEngine5")
+fi
+
 podman run --rm \
   --arch=amd64 \
   -v "${REPO_ROOT}:/workspace" \
+  "${ENGINE_MOUNT[@]}" \
   -v "${WORK_ROOT}:/cache" \
   -v "${CARGO_HOME_DIR}:/usr/local/cargo" \
   -v "${RUSTUP_HOME_DIR}:/usr/local/rustup" \
@@ -49,6 +57,8 @@ podman run --rm \
     export RUSTUP_HOME=/usr/local/rustup
     export HOME=/root
     export XDG_CACHE_HOME=/cache/xdg-cache
+    # Separate from .cache/sturdy-deps on the host: CMake sub-build state there records absolute host paths.
+    export STURDY_RS_DEPS_DIR=/workspace/.cache/sturdy-deps-container
     export XDG_DATA_HOME=/cache/xdg-data
     mkdir -p "${CARGO_HOME}" "${RUSTUP_HOME}" "${XDG_CACHE_HOME}" "${XDG_DATA_HOME}"
 

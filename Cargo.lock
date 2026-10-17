@@ -4491,7 +4491,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 [[package]]
 name = "sturdy"
 version = "0.1.0"
-source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=6a6bc7590e7ec40268d4f3cd69c64175d84fe28d#6a6bc7590e7ec40268d4f3cd69c64175d84fe28d"
+source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=908dc3e5534b9d1d9ca619303354a931ea43fe62#908dc3e5534b9d1d9ca619303354a931ea43fe62"
 dependencies = [
  "bytemuck",
  "cxx",
@@ -4505,7 +4505,7 @@ dependencies = [
 [[package]]
 name = "sturdy-macros"
 version = "0.1.0"
-source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=6a6bc7590e7ec40268d4f3cd69c64175d84fe28d#6a6bc7590e7ec40268d4f3cd69c64175d84fe28d"
+source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=908dc3e5534b9d1d9ca619303354a931ea43fe62#908dc3e5534b9d1d9ca619303354a931ea43fe62"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4515,7 +4515,7 @@ dependencies = [
 [[package]]
 name = "sturdy-sys"
 version = "0.1.0"
-source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=6a6bc7590e7ec40268d4f3cd69c64175d84fe28d#6a6bc7590e7ec40268d4f3cd69c64175d84fe28d"
+source = "git+https://github.com/sturdyfool10/sturdyengine5?rev=908dc3e5534b9d1d9ca619303354a931ea43fe62#908dc3e5534b9d1d9ca619303354a931ea43fe62"
 dependencies = [
  "cxx",
  "cxx-gen",
@@ -5354,6 +5354,7 @@ name = "vertex_shell"
 version = "0.1.22-Alpha"
 dependencies = [
  "config",
+ "cxx",
  "sturdy",
  "tracing",
  "vertex_theme",

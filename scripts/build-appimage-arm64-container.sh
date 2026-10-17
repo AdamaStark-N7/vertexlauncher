@@ -27,7 +27,7 @@ set -e
 echo "glib-2.0: $(pkg-config --modversion glib-2.0)"
 echo "webkit2gtk-4.1: $(pkg-config --modversion webkit2gtk-4.1)"
 echo "javascriptcoregtk-4.1: $(pkg-config --modversion javascriptcoregtk-4.1)"
-echo "libsoup-2.4: $(pkg-config --modversion libsoup-2.4)"
+echo "libsoup-3.0: $(pkg-config --modversion libsoup-3.0)"
 pkg-config --exists "glib-2.0 >= 2.70"
 '
 

@@ -247,7 +247,8 @@ function Invoke-BuildCommand {
             }
 
             try {
-                & cargo xwin build --release --target $Spec.Target --cross-compiler clang -p $package
+                # clang-cl: xwin's MSVC CRT/SDK plus the CMake toolchain file the engine's build script cross compiles with.
+                & cargo xwin build --release --target $Spec.Target --cross-compiler clang-cl -p $package
             }
             finally {
                 foreach ($varName in $crossEnvVars) {
