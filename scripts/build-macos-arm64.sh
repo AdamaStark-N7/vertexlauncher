@@ -52,6 +52,9 @@ done
 
 # The engine's C++ (CMake) cross compiles with clang + ld64.lld against the SDK; sturdy-sys picks this file up through
 # CMAKE_TOOLCHAIN_FILE_<target>. Rust's own link goes through cargo-zigbuild.
+# Absolute compiler paths: a bare "clang" resolves for C/C++ but not when the engine enables Objective-C in a fresh build
+# directory ("CMAKE_OBJC_COMPILER: clang is not a full path and was not found in the PATH").
+CLANG_BIN="$(dirname "$(command -v clang)")"
 MACOS_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-11.0}"
 TOOLCHAIN_FILE="${REPO_ROOT}/.cache/macos-arm64-toolchain.cmake"
 mkdir -p "$(dirname "${TOOLCHAIN_FILE}")"
@@ -61,10 +64,10 @@ set(CMAKE_SYSTEM_PROCESSOR arm64)
 set(CMAKE_OSX_SYSROOT "${SDK_ROOT}" CACHE PATH "")
 set(CMAKE_OSX_ARCHITECTURES arm64 CACHE STRING "")
 set(CMAKE_OSX_DEPLOYMENT_TARGET ${MACOS_DEPLOYMENT_TARGET} CACHE STRING "")
-set(CMAKE_C_COMPILER clang)
-set(CMAKE_CXX_COMPILER clang++)
-set(CMAKE_OBJC_COMPILER clang)
-set(CMAKE_OBJCXX_COMPILER clang++)
+set(CMAKE_C_COMPILER ${CLANG_BIN}/clang)
+set(CMAKE_CXX_COMPILER ${CLANG_BIN}/clang++)
+set(CMAKE_OBJC_COMPILER ${CLANG_BIN}/clang)
+set(CMAKE_OBJCXX_COMPILER ${CLANG_BIN}/clang++)
 set(CMAKE_C_COMPILER_TARGET arm64-apple-macos${MACOS_DEPLOYMENT_TARGET})
 set(CMAKE_CXX_COMPILER_TARGET arm64-apple-macos${MACOS_DEPLOYMENT_TARGET})
 set(CMAKE_OBJC_COMPILER_TARGET arm64-apple-macos${MACOS_DEPLOYMENT_TARGET})
