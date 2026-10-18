@@ -620,7 +620,7 @@ pub fn viewer(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, key: &str) -
         (false, false, false, false, false);
     let controller = (state.gamepad.viewer_pan, state.gamepad.viewer_zoom);
     let viewer = &mut state.viewer;
-    let response = ui_kit::modal(ui, "home-screenshot", &style, !deleting, |ui| {
+    let response = kit::modal(ui, "home-screenshot", &style, !deleting, |ui| {
         let _column = ui.element(
             &ElementDesc::new()
                 .width(Sizing::Fit)

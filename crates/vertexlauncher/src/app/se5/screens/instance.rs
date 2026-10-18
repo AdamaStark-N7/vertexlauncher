@@ -307,6 +307,7 @@ fn content_tab(
         border: kit.palette.border_muted,
         corner_radius: 12.0,
         padding: Padding::all(kit::SPACE_SM),
+        z_index: kit::Z_POPUP,
         ..PopupStyle::default()
     };
     let mut menu = std::mem::take(&mut state.add_content_menu);

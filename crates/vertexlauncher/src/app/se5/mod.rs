@@ -221,6 +221,8 @@ pub struct AppState {
     pub home_menu_target: Option<String>,
     pub add_content_menu: PopupState,
     pub confirming_screenshot_delete: Option<String>,
+    /// A screenshot delete was started from the dialog; checked once when it finishes.
+    pub screenshot_delete_requested: bool,
     pub discover: DiscoverState,
     pub content: ContentBrowserState,
     pub flows: flows::Flows,
@@ -257,6 +259,8 @@ pub struct AppState {
     config_saver: Saver<Config>,
     store_saver: Saver<InstanceStore>,
     initial_install: launcher_runtime::WorkerChannel<InitialInstanceInstallResult>,
+    /// Screenshot files read for the clipboard: (is PNG, bytes or error).
+    image_copies: launcher_runtime::WorkerChannel<Result<Vec<u8>, String>>,
     discord: DiscordPresenceManager,
     obs: ObsWatcher,
     /// The latest config and instances, written synchronously once the window closes so a background save that the
@@ -430,8 +434,37 @@ impl AppState {
         vertex_shell::wake_after(next);
     }
 
+    /// Reads the image on the launcher runtime; `handle_commands` puts it on the clipboard once it arrives.
+    fn start_copy_image(&mut self, path: std::path::PathBuf) {
+        let is_png = path
+            .extension()
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
+        let tx = self.image_copies.sender();
+        launcher_runtime::spawn_blocking_detached(move || {
+            let result = if is_png {
+                std::fs::read(&path).map_err(|err| err.to_string())
+            } else {
+                Err("Only PNG screenshots can be copied to the clipboard.".to_owned())
+            };
+            let _ = tx.send(result);
+            vertex_shell::wake();
+        });
+    }
+
     /// Handles what notification buttons and background code asked the UI to do.
     fn handle_commands(&mut self, ui: &mut Ui<'_>) {
+        if let Some(tab) = launcher_ui::console::take_focus_request()
+            && self.config.follow_console_on_launch()
+        {
+            launcher_ui::console::set_active_tab(&tab);
+            self.screen = AppScreen::Console;
+        }
+        for result in self.image_copies.drain().items {
+            match result {
+                Ok(bytes) => copy_image(ui, &bytes),
+                Err(err) => notification::error!("screenshots", "Failed to copy screenshot: {}", err),
+            }
+        }
         let drops = ui.engine().take_drop_events();
         for event in drops {
             if let DropEvent::File { path, .. } = event {
@@ -445,7 +478,7 @@ impl AppState {
         for command in launcher_ui::app_commands::drain() {
             match command {
                 AppCommand::ViewScreenshot(path) => self.dialog = Some(Dialog::Screenshot(path)),
-                AppCommand::CopyImage(path) => copy_image(ui, &path),
+                AppCommand::CopyImage(path) => self.start_copy_image(path),
                 AppCommand::CopyText(text) => {
                     let _ = ui
                         .engine()
@@ -718,6 +751,7 @@ impl App {
             home_menu_target: None,
             add_content_menu: PopupState::default(),
             confirming_screenshot_delete: None,
+            screenshot_delete_requested: false,
             discover: DiscoverState::default(),
             content: ContentBrowserState::default(),
             flows: flows::Flows::default(),
@@ -754,6 +788,7 @@ impl App {
                 instances::save_store(store).map_err(|err| err.to_string())
             }),
             initial_install: Default::default(),
+            image_copies: Default::default(),
             discord: DiscordPresenceManager::default(),
             obs: ObsWatcher::spawn(vertex_shell::wake, obs_enabled),
             exit_snapshot,
@@ -970,29 +1005,12 @@ fn update_hit_regions(ui: &mut Ui<'_>) {
         .map(|mut window| window.set_hit_test_regions(&regions));
 }
 
-/// Puts an image file on the clipboard. PNG (what Minecraft writes) is passed through as is.
-fn copy_image(ui: &mut Ui<'_>, path: &std::path::Path) {
-    let is_png = path
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("png"));
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) if is_png => bytes,
-        Ok(_) => {
-            notification::error!(
-                "screenshots",
-                "Only PNG screenshots can be copied to the clipboard."
-            );
-            return;
-        }
-        Err(err) => {
-            notification::error!("screenshots", "Failed to copy screenshot: {}", err);
-            return;
-        }
-    };
+/// Puts PNG bytes (what Minecraft writes screenshots as) on the clipboard.
+fn copy_image(ui: &mut Ui<'_>, bytes: &[u8]) {
     let copied = ui
         .engine()
         .primary_window_control()
-        .map(|mut window| window.set_clipboard_data("image/png", &bytes))
+        .map(|mut window| window.set_clipboard_data("image/png", bytes))
         .unwrap_or_else(|| Err(vertex_shell::sturdy::Error::new("no window")));
     match copied {
         Ok(()) => notification::info!("screenshots", "Copied screenshot to clipboard."),

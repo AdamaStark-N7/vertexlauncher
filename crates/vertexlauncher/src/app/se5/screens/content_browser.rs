@@ -3,11 +3,10 @@
 
 use std::time::Duration;
 
-use launcher_ui::file_dialog::{Dialog as PickerDialog, Pick};
 use launcher_ui::screens::AppScreen;
 use launcher_ui::screens::content_browser_api as api;
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -17,7 +16,6 @@ use super::super::images::ImageSource;
 use super::super::kit::{self, ButtonKind, Kit, TextRole};
 
 const SCROLL_ID: &str = "content::scroll";
-const IDENTIFY_SLOT: &str = "content::identify";
 
 pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     let Some(instance) = state
@@ -39,13 +37,6 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     let instance_root = instances::instance_root_path(root.as_path(), &instance);
     if api::tick(&mut state.content, &instance, root.as_path()) {
         kit.keep_awake_for(Duration::from_millis(100));
-    }
-    if let Some(path) = state
-        .file_dialogs
-        .take(IDENTIFY_SLOT)
-        .and_then(|paths| paths.into_iter().next())
-    {
-        api::identify(&mut state.content, path);
     }
 
     let _scroll = kit.scroll(ui, SCROLL_ID, kit::SPACE_LG, kit::SPACE_XL);
@@ -154,15 +145,7 @@ fn controls(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     }
     if !api::tags(&state.content).is_empty() {
         let tags = api::tags(&state.content).to_vec();
-        let mut remove = None;
-        {
-            let _row = kit.row(ui, kit::SPACE_SM);
-            for (index, tag) in tags.iter().enumerate() {
-                if kit.chip(ui, &format!("content::tag::{index}"), tag) {
-                    remove = Some(index);
-                }
-            }
-        }
+        let remove = kit.chip_rows(ui, "content::tags", &tags);
         if let Some(index) = remove {
             api::remove_tag(&mut state.content, index);
         }
@@ -179,6 +162,9 @@ fn controls(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         if let Some(index) = kit.dropdown(ui, "content::scope", scope, &current.scopes, 170.0) {
             scope = index;
         }
+    }
+    {
+        let _row = kit.row(ui, kit::SPACE_MD);
         if let Some(index) = kit.dropdown(ui, "content::sort", sort, &current.sorts, 170.0) {
             sort = index;
         }
@@ -187,27 +173,6 @@ fn controls(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         }
     }
     api::apply_controls(&mut state.content, version, scope, sort, loader);
-    {
-        let _row = kit.row(ui, kit::SPACE_MD);
-        if kit.button(
-            ui,
-            "content::identify",
-            "Identify Content File",
-            ButtonKind::Neutral,
-            !current.identify_busy,
-        ) {
-            state.file_dialogs.open(
-                IDENTIFY_SLOT,
-                Pick::File,
-                PickerDialog::new()
-                    .title("Identify Content File")
-                    .filter("Minecraft Content", &["jar", "zip"])
-                    .filter("Mods", &["jar"])
-                    .filter("Packs", &["zip"]),
-            );
-        }
-        kit.text(ui, TextRole::Muted, &current.queue_status);
-    }
 }
 
 /// Returns (opened, quick install requested).
@@ -249,7 +214,9 @@ fn result_tile(ui: &mut Ui<'_>, kit: &mut Kit, tile: &api::TileView) -> (bool, b
                     .width(Sizing::Grow)
                     .height(Sizing::Fit)
                     .direction(Direction::TopToBottom)
-                    .child_gap(kit::SPACE_XS),
+                    .child_gap(kit::SPACE_XS)
+                    // Never wider than the space left of the actions, so they stay on the card's right edge.
+                    .clip(Clip::horizontal()),
             );
             {
                 let _title = kit.row(ui, kit::SPACE_SM);
@@ -266,7 +233,15 @@ fn result_tile(ui: &mut Ui<'_>, kit: &mut Kit, tile: &api::TileView) -> (bool, b
             );
         }
         {
-            let _actions = kit.row(ui, kit::SPACE_XS);
+            // Fit-width, not `kit.row` (which grows): two growing siblings would split the card in half.
+            let _actions = ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Fit)
+                    .height(Sizing::Fit)
+                    .direction(Direction::LeftToRight)
+                    .child_gap(kit::SPACE_XS)
+                    .align(ChildAlignment::new(AlignX::Right, AlignY::Center)),
+            );
             icon_button(ui, kit, &info_id, Icon::Settings, true);
             if tile.downloading {
                 kit.progress(ui, &format!("{id}::progress"), None, kit::uptime());

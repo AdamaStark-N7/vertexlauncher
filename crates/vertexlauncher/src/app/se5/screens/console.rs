@@ -22,6 +22,9 @@ pub const LINES_ID: &str = "console::lines";
 pub struct ConsoleView {
     /// Keep the newest line in view as lines arrive.
     follow: bool,
+    /// Following has caught up with the bottom since it was enabled. Until then, being scrolled up is not the user
+    /// leaving: they enabled follow from there, and the next line moves the view down.
+    engaged: bool,
     last_line_count: usize,
 }
 
@@ -29,6 +32,7 @@ impl Default for ConsoleView {
     fn default() -> Self {
         Self {
             follow: true,
+            engaged: false,
             last_line_count: 0,
         }
     }
@@ -131,16 +135,18 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     }
 
     let follow = state.console.follow;
-    let (count, left_bottom) = log_lines_view(
+    let (count, left_bottom, at_bottom) = log_lines_view(
         ui,
         kit,
         LINES_ID,
         &snapshot.active_lines,
         "Nothing logged yet.",
         follow,
+        state.console.engaged,
         state.console.last_line_count,
     );
     state.console.last_line_count = count;
+    state.console.engaged = follow && (state.console.engaged || at_bottom);
     if follow && left_bottom {
         // The user scrolled up to read something; following would drag the view back down under them.
         state.console.follow = false;
@@ -150,10 +156,11 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
 /// A virtualised, colour-coded log viewer: only the visible lines are built. Lines are coloured by their ANSI codes
 /// or, failing that, their severity. Returns the number of lines shown.
 pub fn log_lines(ui: &mut Ui<'_>, kit: &mut Kit, id: &str, lines: &[String], empty_text: &str) {
-    let _ = log_lines_view(ui, kit, id, lines, empty_text, false, lines.len());
+    let _ = log_lines_view(ui, kit, id, lines, empty_text, false, false, lines.len());
 }
 
-/// Returns the number of lines shown and whether the view stopped showing the whole bottom line while following.
+/// Returns the number of lines shown, whether the view left the bottom while following (only once `engaged`), and
+/// whether the view currently shows the bottom.
 fn log_lines_view(
     ui: &mut Ui<'_>,
     kit: &mut Kit,
@@ -161,8 +168,9 @@ fn log_lines_view(
     lines: &[String],
     empty_text: &str,
     follow: bool,
+    engaged: bool,
     last_count: usize,
-) -> (usize, bool) {
+) -> (usize, bool, bool) {
     let line_style = TextStyle {
         wrap: TextWrap::None,
         ..kit.style(TextRole::Body)
@@ -323,17 +331,17 @@ fn log_lines_view(
             || (-m.offset.y) + m.container_size.y >= m.content_size.y - 2.0
     });
     let wheel_up = ui.hovered(id) && ui.engine().input().wheel_delta().y > 0.0;
-    if follow && lines.len() == last_count && (!at_bottom || wheel_up) {
+    if follow && engaged && lines.len() == last_count && (!at_bottom || wheel_up) {
         selection.away_frames += 1;
     } else {
         selection.away_frames = 0;
     }
-    let left_bottom = follow && (wheel_up || selection.away_frames >= 4);
+    let left_bottom = follow && engaged && (wheel_up || selection.away_frames >= 4);
     kit.log_selections.insert(id.to_owned(), selection);
     // Following the newest line would scroll the selection away, so it pauses while one exists.
     if follow && !selecting && lines.len() != last_count {
         // Scroll offsets are negative when scrolled down; a huge value clamps to the end.
         ui.set_scroll_offset(id, Vec2::new(0.0, -1.0e9));
     }
-    (lines.len(), left_bottom)
+    (lines.len(), left_bottom, at_bottom)
 }

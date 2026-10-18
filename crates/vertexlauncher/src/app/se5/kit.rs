@@ -17,12 +17,17 @@ use vertex_shell::sturdy::ui::{
     ElementDesc, ElementScope, FloatTarget, Floating, Padding, Sizing, TextStyle, TextWrap, Ui,
 };
 use vertex_shell::sturdy::ui_kit::{
-    self, AnimationKeepAlive, FocusNavigator, NavInput, PopupStyle,
+    self, AnimationKeepAlive, FocusNavigator, ModalStyle, NavInput, PopupStyle,
 };
 use vertex_shell::sturdy::widgets::{
     ButtonState, DropdownState, ScrollAreaState, ScrollbarStyle, SliderConfig, SliderInput,
     SliderKey, SliderState, TextEditState, ToggleState,
 };
+
+/// Layers of floating UI, lowest to highest. Modals are at 2000 (a few go slightly above), so dropdowns and menus sit
+/// above them, and tooltips above those; otherwise anything opened from inside a dialog would draw behind it.
+pub const Z_POPUP: i16 = 2500;
+pub const Z_TOOLTIP: i16 = 3000;
 
 pub const SPACE_XS: u16 = 4;
 pub const SPACE_SM: u16 = 8;
@@ -35,6 +40,17 @@ pub const CONTROL_HEIGHT: f32 = 34.0;
 const SEARCHABLE_DROPDOWN_THRESHOLD: usize = 12;
 
 /// Seconds since the UI started: the clock for indeterminate progress bars.
+/// Animation state of one [`Kit::collapsible`].
+#[derive(Default)]
+struct Collapse {
+    open: bool,
+    /// 0 = closed, 1 = open.
+    progress: f32,
+    /// The content's height when last laid out, which the animation is a fraction of.
+    height: f32,
+    last_frame: f64,
+}
+
 pub fn uptime() -> f64 {
     use std::sync::OnceLock;
     use std::time::Instant;
@@ -78,7 +94,123 @@ pub fn wrapped_label(ui: &mut Ui<'_>, text: &str, style: &TextStyle, max_width: 
 }
 
 fn label_text(ui: &mut Ui<'_>, text: &str, style: &TextStyle) {
-    ui.text(&launcher_ui::privacy::scrub(text), style);
+    let text = launcher_ui::privacy::scrub(text);
+    match MODAL_WIDTH.get() {
+        Some(width) if style.wrap != TextWrap::None => {
+            ui.text(&break_long_words(ui, &text, style, width), style)
+        }
+        _ => ui.text(&text, style),
+    }
+}
+
+/// The z-index for a floating piece of a widget (scrollbar thumb, focus ring) that normally sits just above the page.
+/// Inside a dialog, which is itself a high layer, it has to sit above the dialog instead.
+fn in_modal_layer(z: i16) -> i16 {
+    if MODAL_WIDTH.get().is_some() {
+        MODAL_LAYER + z
+    } else {
+        z
+    }
+}
+
+/// Base layer of widget parts inside dialogs: above the dialogs (2000, a few at 2100) and below popups.
+const MODAL_LAYER: i16 = 2200;
+
+thread_local! {
+    /// The inner width of the modal being built, if any. Text inside a dialog may not be wider than it.
+    static MODAL_WIDTH: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// `text` with any run of non-space characters wider than `max_width` (a long path or URL, which word wrapping cannot
+/// split) broken over several lines.
+fn break_long_words(ui: &Ui<'_>, text: &str, style: &TextStyle, max_width: f32) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while !rest.is_empty() {
+        let split = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, tail) = rest.split_at(split);
+        if word.chars().count() > 12 && ui.measure_text(style, word).x > max_width {
+            let mut line = String::new();
+            for ch in word.chars() {
+                line.push(ch);
+                if ui.measure_text(style, &line).x > max_width && line.chars().count() > 1 {
+                    line.pop();
+                    out.push_str(&line);
+                    out.push('\n');
+                    line.clear();
+                    line.push(ch);
+                }
+            }
+            out.push_str(&line);
+        } else {
+            out.push_str(word);
+        }
+        let gap = tail
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(tail.len());
+        out.push_str(&tail[..gap]);
+        rest = &tail[gap..];
+    }
+    out
+}
+
+/// A dialog. Like `ui_kit::modal`, but its content sits in a column exactly as wide as the panel's inside, so nothing
+/// inside can stretch the dialog past its edges or push right-aligned buttons off them, and text in it breaks long
+/// unspaced words to fit. Wider-than-window dialogs shrink to the window.
+pub fn modal(
+    ui: &mut Ui<'_>,
+    modal_id: &str,
+    style: &ModalStyle,
+    dismissible: bool,
+    content: impl FnOnce(&mut Ui<'_>),
+) -> ui_kit::ModalResponse {
+    let mut style = *style;
+    let mut inner = None;
+    if let Sizing::Fixed(width) = style.width {
+        let width = width.min((ui.viewport_size().x - 32.0).max(240.0));
+        style.width = Sizing::Fixed(width);
+        inner = Some(width - f32::from(style.padding.left) - f32::from(style.padding.right));
+    }
+    ui_kit::modal(ui, modal_id, &style, dismissible, |ui| {
+        let Some(inner) = inner else {
+            return content(ui);
+        };
+        let previous = MODAL_WIDTH.replace(Some(inner));
+        // A dialog taller than the window scrolls instead of running off it. The content height is last frame's.
+        let body_id = format!("{modal_id}::body");
+        let content_id = format!("{modal_id}::content");
+        let room = (ui.viewport_size().y - 2.0 * f32::from(style.padding.top) - 48.0).max(160.0);
+        let measured = ui
+            .element_bounds(&content_id)
+            .map_or(0.0, |(_, size)| size.y);
+        let scrolls = measured > room;
+        {
+            let _body = ui.element(&if scrolls {
+                ElementDesc::new()
+                    .id(body_id)
+                    .width(Sizing::Fixed(inner))
+                    .height(Sizing::Fixed(room))
+                    .direction(Direction::TopToBottom)
+                    .clip(Clip::vertical())
+            } else {
+                ElementDesc::new()
+                    .id(body_id)
+                    .width(Sizing::Fixed(inner))
+                    .height(Sizing::Fit)
+                    .direction(Direction::TopToBottom)
+            });
+            let _inner = ui.element(
+                &ElementDesc::new()
+                    .id(content_id)
+                    .width(Sizing::Fixed(inner))
+                    .height(Sizing::Fit)
+                    .direction(Direction::TopToBottom)
+                    .child_gap(12),
+            );
+            content(ui);
+        }
+        MODAL_WIDTH.set(previous);
+    })
 }
 
 /// Text roles, sized relative to the user's UI font size.
@@ -247,6 +379,8 @@ pub struct Kit {
     searches: HashMap<String, (ui_kit::PopupState, String)>,
     /// Open/close progress (0..1) and the last open state of every context menu, for its reveal and fold animation.
     menu_anim: HashMap<String, MenuAnim>,
+    /// Open/close progress of every collapsible section, by id.
+    collapsibles: HashMap<String, Collapse>,
     /// Keyboard and gamepad focus: widgets declare themselves focusable as they are drawn.
     pub focus: FocusNavigator,
     /// Gamepad steps for the focused slider this frame.
@@ -282,6 +416,7 @@ impl Kit {
             areas: HashMap::new(),
             scroll_drag: None,
             menu_anim: HashMap::new(),
+            collapsibles: HashMap::new(),
             icon_after: false,
             levels: HashMap::new(),
             log_selections: HashMap::new(),
@@ -406,7 +541,7 @@ impl Kit {
                 .floating(Some(Floating {
                     element_attach_point: AttachPoint::LeftTop,
                     parent_attach_point: AttachPoint::LeftTop,
-                    z_index: 20,
+                    z_index: in_modal_layer(20),
                     capture_pointer: false,
                     ..Floating::new(FloatTarget::Element(id.to_owned()))
                 })),
@@ -755,8 +890,11 @@ impl Kit {
                     element_attach_point: AttachPoint::RightTop,
                     parent_attach_point: AttachPoint::RightTop,
                     offset: Vec2::new(-3.0, MARGIN + thumb_top),
-                    z_index: 100,
+                    z_index: in_modal_layer(100),
                     capture_pointer: true,
+                    // Otherwise the thumb draws over everything and ignores the clips around its list: a collapsing
+                    // section, or the page's own scroll area.
+                    clip_to_target: true,
                     ..Floating::new(FloatTarget::Element(id.to_owned()))
                 })),
         );
@@ -1238,6 +1376,7 @@ impl Kit {
             border: self.palette.border_muted,
             corner_radius: 10.0,
             padding: Padding::all(8),
+            z_index: Z_POPUP,
             ..PopupStyle::default()
         };
         // Closing: a fresh popup pinned where the panel was, so it folds away without reacting to clicks.
@@ -1426,6 +1565,22 @@ impl Kit {
         step: Option<f64>,
         enabled: bool,
     ) -> Option<f64> {
+        self.slider_sized(ui, id, value, min, max, step, enabled, 260.0)
+    }
+
+    /// [`Kit::slider`] with an explicit track width.
+    #[allow(clippy::too_many_arguments)]
+    pub fn slider_sized(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: f64,
+        min: f64,
+        max: f64,
+        step: Option<f64>,
+        enabled: bool,
+        width: f32,
+    ) -> Option<f64> {
         let style = self.palette.slider();
         let focused = enabled && self.focusable(id);
         // Controller left/right adjust the focused slider; the engine handles the keyboard itself.
@@ -1445,7 +1600,7 @@ impl Kit {
         let result = ui.slider(
             &ElementDesc::new()
                 .id(id.into())
-                .width(Sizing::Fixed(260.0))
+                .width(Sizing::Fixed(width))
                 .height(Sizing::Fixed(22.0)),
             &SliderConfig {
                 min,
@@ -1549,6 +1704,7 @@ impl Kit {
             border: self.palette.border_muted,
             corner_radius: 10.0,
             padding: Padding::all(SPACE_SM),
+            z_index: Z_POPUP,
             ..PopupStyle::default()
         };
         let mut chosen = None;
@@ -1726,6 +1882,152 @@ impl Kit {
         top + size.y >= -margin && top <= metrics.container_size.y + margin
     }
 
+    /// A section that expands and collapses with an animation. The header is the label on the left, a gap, a rule that
+    /// takes the remaining width, and a chevron that points right when closed and turns clockwise to down when open; a rule of the same
+    /// look closes the section's bottom. `body` is not built while the section is closed.
+    pub fn collapsible(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        label: &str,
+        body: impl FnOnce(&mut Ui<'_>, &mut Kit),
+    ) {
+        const CHEVRON: f32 = 18.0;
+        let header_id = format!("{id}::header");
+        let was_open = self.collapsibles.get(id).is_some_and(|c| c.open);
+        let open = if self.clicked(ui, &header_id) {
+            !was_open
+        } else {
+            was_open
+        };
+        let (progress, eased) = self.animate_collapse(id, open);
+
+        let hovered = ui.hovered(&header_id);
+        {
+            let _header = ui.element(
+                &ElementDesc::new()
+                    .id(header_id.clone())
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(30.0))
+                    .direction(Direction::LeftToRight)
+                    .child_gap(SPACE_XS)
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
+                    .cursor(Cursor::Pointer),
+            );
+            self.text(ui, TextRole::Heading, label);
+            self.gap(ui, f32::from(SPACE_XS));
+            self.fill_rule(ui, if hovered { self.palette.border } else { self.palette.border_muted });
+            // Pointing right when closed, turning clockwise a quarter-turn to point down when open. The down chevron
+            // turned 270 degrees clockwise points right; 360 is down again.
+            let degrees = 270.0 + 90.0 * eased;
+            icons::warm_turns(Icon::ChevronDown, 270.0, 360.0);
+            icons::draw_turned(
+                ui,
+                Icon::ChevronDown,
+                degrees,
+                CHEVRON,
+                if hovered {
+                    self.palette.text
+                } else {
+                    self.palette.text_muted
+                },
+                self.svg_supersample,
+            );
+        }
+        self.collapse_body(ui, id, progress, eased, SPACE_MD, |ui, kit| {
+            body(ui, kit);
+            kit.fill_rule(ui, kit.palette.border_muted);
+        });
+    }
+
+    /// Moves the open/close animation of section `id` toward `open` and returns its (progress, eased progress), both
+    /// 0 when closed and 1 when open. A section seen for the first time starts at its target, with no animation.
+    pub fn animate_collapse(&mut self, id: &str, open: bool) -> (f32, f32) {
+        const SECONDS: f32 = 0.22;
+        let now = uptime();
+        let target = if open { 1.0 } else { 0.0 };
+        let entry = self
+            .collapsibles
+            .entry(id.to_owned())
+            .or_insert_with(|| Collapse {
+                progress: target,
+                last_frame: now,
+                ..Collapse::default()
+            });
+        entry.open = open;
+        let delta = (now - entry.last_frame).clamp(0.0, 0.1) as f32;
+        entry.last_frame = now;
+        if entry.progress < target {
+            entry.progress = (entry.progress + delta / SECONDS).min(target);
+        } else if entry.progress > target {
+            entry.progress = (entry.progress - delta / SECONDS).max(target);
+        }
+        let progress = entry.progress;
+        if progress != target {
+            self.keep_awake_for(Duration::from_millis(32));
+        }
+        let eased = if progress < 0.5 {
+            2.0 * progress * progress
+        } else {
+            1.0 - (-2.0 * progress + 2.0).powi(2) / 2.0
+        };
+        (progress, eased)
+    }
+
+    /// The part of a section that reveals: nothing while closed, a clip whose height follows `eased` while moving, and
+    /// the plain content when open. `gap` is the space between the content's children.
+    pub fn collapse_body(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        progress: f32,
+        eased: f32,
+        gap: u16,
+        body: impl FnOnce(&mut Ui<'_>, &mut Kit),
+    ) {
+        if progress <= 0.0 {
+            return;
+        }
+        let content_id = format!("{id}::content");
+        let known_height = self.collapsibles.get(id).map_or(0.0, |c| c.height);
+        // Fully open: natural height, so the body can change size. Otherwise a clip whose height follows the animation,
+        // from the content height measured on an earlier frame.
+        let clip = if progress >= 1.0 {
+            ElementDesc::new().height(Sizing::Fit)
+        } else {
+            ElementDesc::new()
+                .height(Sizing::Fixed((known_height * eased).max(1.0)))
+                .clip(Clip::vertical())
+        };
+        {
+            let _clip = ui.element(&clip.id(format!("{id}::clip")).width(Sizing::Grow));
+            let _content = ui.element(
+                &ElementDesc::new()
+                    .id(content_id.clone())
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fit)
+                    .direction(Direction::TopToBottom)
+                    .child_gap(gap),
+            );
+            body(ui, self);
+        }
+        if let Some((_, size)) = ui.element_bounds(&content_id) {
+            self.collapsibles.entry(id.to_owned()).or_default().height = size.y;
+        }
+    }
+
+    /// A one-pixel rule that takes the rest of its row's width, or a full-width one in a column.
+    fn fill_rule(&self, ui: &mut Ui<'_>, color: Vec4) {
+        drop(
+            ui.element(
+                &ElementDesc::new()
+                    .width(Sizing::Grow)
+                    .height(Sizing::Fixed(1.0))
+                    .background(color),
+            ),
+        );
+    }
+
     /// A removable chip (a search tag). Returns true when its close button was clicked.
     pub fn chip(&mut self, ui: &mut Ui<'_>, id: &str, label: &str) -> bool {
         let close = format!("{id}::close");
@@ -1755,6 +2057,58 @@ impl Kit {
             }
         }
         ui.clicked(&close)
+    }
+
+    /// Removable chips laid out in as many rows as the width needs, so a long tag list wraps instead of overflowing.
+    /// `id` names the wrapping column (its last-frame width decides the row breaks). Returns the index of a chip whose
+    /// close button was clicked.
+    pub fn chip_rows(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        tags: &[String],
+    ) -> Option<usize> {
+        let style = self.style(TextRole::Body);
+        let available = ui.element_bounds(id).map_or(600.0, |(_, size)| size.x);
+        // Padding on both sides, the gap before the close button, and the button itself.
+        let chrome = 2.0 * f32::from(SPACE_MD) + f32::from(SPACE_SM) + 16.0;
+        let gap = f32::from(SPACE_SM);
+        let mut rows: Vec<Vec<usize>> = Vec::new();
+        let mut used = 0.0_f32;
+        for (index, tag) in tags.iter().enumerate() {
+            let width = ui
+                .measure_text(&style, &launcher_ui::privacy::scrub(tag))
+                .x
+                + chrome;
+            match rows.last_mut() {
+                Some(row) if used + gap + width <= available => {
+                    row.push(index);
+                    used += gap + width;
+                }
+                _ => {
+                    rows.push(vec![index]);
+                    used = width;
+                }
+            }
+        }
+        let mut removed = None;
+        let _column = ui.element(
+            &ElementDesc::new()
+                .id(id.into())
+                .width(Sizing::Grow)
+                .height(Sizing::Fit)
+                .direction(Direction::TopToBottom)
+                .child_gap(SPACE_SM),
+        );
+        for row in rows {
+            let _row = self.row(ui, SPACE_SM);
+            for index in row {
+                if self.chip(ui, &format!("{id}::{index}"), &tags[index]) {
+                    removed = Some(index);
+                }
+            }
+        }
+        removed
     }
 
     /// A multi-line text box bound to `value`; `lines` sets its height. Returns true when the text changed.
@@ -1984,7 +2338,7 @@ impl Kit {
         floating.element_attach_point = AttachPoint::LeftTop;
         floating.parent_attach_point = AttachPoint::LeftTop;
         floating.offset = Vec2::new(x.max(0.0), y);
-        floating.z_index = 1000;
+        floating.z_index = Z_TOOLTIP;
         floating.capture_pointer = false;
         {
             let _tip = ui.element(
@@ -2120,18 +2474,21 @@ impl Kit {
         format: impl Fn(f64) -> String,
     ) -> Option<f64> {
         let mut out = None;
+        let step = (step > 0.0).then_some(step);
+        // A dialog is too narrow for label, value and a 260px track side by side: the label would be squeezed to a
+        // sliver. There the track gets its own full-width line under the label and value.
+        if let Some(width) = MODAL_WIDTH.get() {
+            self.setting_row(ui, id, label, info, |kit, ui| {
+                kit.text(ui, TextRole::Muted, &format(value));
+            });
+            // Inset by the thumb's radius so it is not cut off at the ends.
+            out = self.slider_sized(ui, id, value, min, max, step, enabled, (width - 12.0).max(120.0));
+            return out;
+        }
         self.setting_row(ui, id, label, info, |kit, ui| {
             let shown = format(value);
             kit.text(ui, TextRole::Muted, &shown);
-            out = kit.slider(
-                ui,
-                id,
-                value,
-                min,
-                max,
-                (step > 0.0).then_some(step),
-                enabled,
-            );
+            out = kit.slider(ui, id, value, min, max, step, enabled);
         });
         out
     }

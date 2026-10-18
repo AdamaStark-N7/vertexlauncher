@@ -52,7 +52,7 @@ pub fn dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> bool {
     let mut pick_file = false;
     let mut pick_folder = false;
     let import = &mut state.flows.import;
-    let response = ui_kit::modal(ui, "import-instance", &style, !in_flight, |ui| {
+    let response = kit::modal(ui, "import-instance", &style, !in_flight, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Import Profile");
         kit.text(
@@ -375,7 +375,7 @@ pub fn manual_download_dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppSta
     };
     let mut cancel = false;
     let mut open_folder = false;
-    let response = ui_kit::modal(ui, "curseforge-manual", &style, true, |ui| {
+    let response = kit::modal(ui, "curseforge-manual", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Manual CurseForge downloads needed");
         kit::label(

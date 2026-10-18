@@ -137,14 +137,7 @@ fn filters(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     }
     if !api::tags(&state.discover).is_empty() {
         let tags: Vec<String> = api::tags(&state.discover).to_vec();
-        let mut remove = None;
-        let _row = kit.row(ui, kit::SPACE_SM);
-        for (index, tag) in tags.iter().enumerate() {
-            if kit.chip(ui, &format!("discover::tag::{index}"), tag) {
-                remove = Some(index);
-            }
-        }
-        drop(_row);
+        let remove = kit.chip_rows(ui, "discover::tags", &tags);
         if let Some(index) = remove {
             api::remove_tag(&mut state.discover, index);
         }

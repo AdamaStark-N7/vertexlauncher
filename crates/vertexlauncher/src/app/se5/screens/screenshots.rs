@@ -29,7 +29,7 @@ pub fn viewer(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, path: &Path)
     let mut delete = false;
     let controller = (state.gamepad.viewer_pan, state.gamepad.viewer_zoom);
     let viewer = &mut state.viewer;
-    let response = ui_kit::modal(ui, "screenshot-viewer", &style, true, |ui| {
+    let response = kit::modal(ui, "screenshot-viewer", &style, true, |ui| {
         let _column = ui.element(
             &ElementDesc::new()
                 .width(Sizing::Fit)
@@ -103,7 +103,8 @@ pub fn viewer(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, path: &Path)
         }
     });
     if delete {
-        match std::fs::remove_file(path) {
+        let path = path.to_path_buf();
+        launcher_runtime::spawn_blocking_detached(move || match std::fs::remove_file(&path) {
             Ok(()) => {
                 launcher_ui::notification::info!("screenshots", "Deleted screenshot from disk.")
             }
@@ -112,7 +113,7 @@ pub fn viewer(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, path: &Path)
                 "Failed to delete screenshot: {}",
                 err
             ),
-        }
+        });
         close = true;
     }
     let _ = state;

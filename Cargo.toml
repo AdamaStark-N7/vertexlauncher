@@ -32,7 +32,7 @@ default-members = [
 
 [workspace.package]
 # The one place the app version lives; every crate inherits it with `version.workspace = true`.
-version = "0.1.22-Alpha"
+version = "0.1.23-Alpha"
 
 [workspace.dependencies]
 serde = { version = "1.0.228", features = ["derive", "serde_derive"] }

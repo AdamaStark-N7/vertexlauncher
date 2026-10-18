@@ -176,10 +176,8 @@ pub fn instance_root(state: &AppState, instance_id: &str) -> Option<PathBuf> {
 /// The instance's thumbnail, or a tinted square with its initial when it has none.
 pub fn thumbnail(ui: &mut Ui<'_>, kit: &mut Kit, instance: &InstanceRecord, id: &str, size: f32) {
     use super::super::images::ImageSource;
-    if let Some(path) = instance
-        .thumbnail_path
-        .clone()
-        .filter(|path| path.is_file())
+    if let Some(path) = instance.thumbnail_path.clone()
+        && !kit.images.failed(&format!("thumb::{}", path.display()))
     {
         let key = format!("thumb::{}", path.display());
         kit.image(ui, id, &key, || ImageSource::File(path), size, size, 12.0);
@@ -449,7 +447,7 @@ pub fn confirm_delete(
     let mut close = false;
     let mut delete = false;
     let error = state.runtime.delete_error.clone();
-    let response = ui_kit::modal(ui, "library::delete", &style, !deleting, |ui| {
+    let response = kit::modal(ui, "library::delete", &style, !deleting, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text_colored(ui, "Delete Instance Folder?", kit.palette.danger, 1.3);
         kit::label(

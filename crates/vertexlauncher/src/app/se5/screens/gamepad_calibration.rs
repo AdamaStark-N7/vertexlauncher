@@ -38,7 +38,7 @@ pub fn dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> bool {
     };
     let mut cancel = false;
     let mut action = ModalAction::None;
-    let response = ui_kit::modal(ui, "gamepad-calibration", &style, true, |ui| {
+    let response = kit::modal(ui, "gamepad-calibration", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_SM);
         kit.text(ui, TextRole::Heading, "Calibrate Gamepad");
         kit::label(

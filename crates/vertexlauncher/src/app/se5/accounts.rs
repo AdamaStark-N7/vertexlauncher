@@ -80,6 +80,7 @@ pub fn account_menu(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, anchor
         border: kit.palette.border_muted,
         corner_radius: 12.0,
         padding: vertex_shell::sturdy::ui::Padding::all(kit::SPACE_MD),
+        z_index: kit::Z_POPUP,
         ..PopupStyle::default()
     };
     let entries = state.auth.account_entries();
@@ -553,7 +554,7 @@ pub fn sign_in_dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> b
     let status = state.auth.status_message().map(str::to_owned);
     let mut actions = MenuActions::default();
     let mut close = false;
-    let response = ui_kit::modal(ui, "accounts::sign-in", &style, !in_progress, |ui| {
+    let response = kit::modal(ui, "accounts::sign-in", &style, !in_progress, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Add a Microsoft account");
         match &prompt {

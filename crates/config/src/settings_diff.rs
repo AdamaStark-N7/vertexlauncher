@@ -153,6 +153,7 @@ impl Config {
             sync_hotbars_enabled,
             sync_servers_to_all_instances_by_default,
             drag_scroll_enabled,
+            follow_console_on_launch,
             frame_limit_fps,
             ui_font_size,
             ui_font_weight,
@@ -279,6 +280,7 @@ impl Config {
         );
         diff.mark(
             *force_java_21_minimum != new.force_java_21_minimum
+                || *follow_console_on_launch != new.follow_console_on_launch
                 || *default_instance_max_memory_mib != new.default_instance_max_memory_mib
                 || *default_instance_cli_args != new.default_instance_cli_args
                 || *java_8_jvm_path != new.java_8_jvm_path

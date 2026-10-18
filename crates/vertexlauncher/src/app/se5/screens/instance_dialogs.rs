@@ -80,7 +80,7 @@ pub fn settings(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, id: &str) 
     }
     let controls = api::settings::version_controls(&mut session.state);
     let mut pick_thumbnail = false;
-    let response = ui_kit::modal(ui, "instance-settings", &style, true, |ui| {
+    let response = kit::modal(ui, "instance-settings", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Instance Settings");
         kit.text(ui, TextRole::Muted, "Manage this profile's metadata, version stack, runtime overrides, and maintenance actions.");
@@ -686,7 +686,7 @@ pub fn export_pack(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, id: &st
         vertex_shell::wake_after(wake);
     }
     let in_flight = session.state.export_vtmpack_in_flight;
-    let response = ui_kit::modal(ui, "export-vtmpack", &style, !in_flight, |ui| {
+    let response = kit::modal(ui, "export-vtmpack", &style, !in_flight, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         if in_flight {
             let progress = session.state.export_vtmpack_latest_progress.as_ref();
@@ -925,7 +925,7 @@ pub fn export_server(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, id: &
         vertex_shell::wake_after(wake);
     }
     let in_flight = session.state.export_server_in_flight;
-    let response = ui_kit::modal(ui, "export-server", &style, !in_flight, |ui| {
+    let response = kit::modal(ui, "export-server", &style, !in_flight, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         if in_flight {
             let progress = session.state.export_server_latest_progress.as_ref();
@@ -1074,7 +1074,7 @@ pub fn move_instance(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, id: &
     let in_flight = session.state.move_instance_in_flight;
     let completion = session.state.move_instance_completion_message.clone();
     let failed = session.state.move_instance_completion_failed;
-    let response = ui_kit::modal(ui, "move-instance", &style, !in_flight, |ui| {
+    let response = kit::modal(ui, "move-instance", &style, !in_flight, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(
             ui,
@@ -1259,7 +1259,7 @@ pub fn screenshot(
     let mut cancel_confirm = false;
     let controller = (state.gamepad.viewer_pan, state.gamepad.viewer_zoom);
     let viewer = &mut state.viewer;
-    let response = ui_kit::modal(ui, "instance-screenshot", &style, !deleting, |ui| {
+    let response = kit::modal(ui, "instance-screenshot", &style, !deleting, |ui| {
         let _column = ui.element(
             &ElementDesc::new()
                 .width(Sizing::Fit)
@@ -1383,11 +1383,19 @@ pub fn screenshot(
     }
     if delete && let Some(session) = state.sessions.get_mut(id) {
         api::request_screenshot_delete(&mut session.state, &api::key_of(path));
+        state.screenshot_delete_requested = true;
     }
     // Once the delete finishes the file is gone from the session's list; close with it.
-    let gone = state.sessions.get(id).is_some_and(|session| {
-        !session.state.delete_screenshot_in_flight && !path.exists() && confirming
-    });
+    // The file is probed once, when the delete finishes, rather than every frame.
+    let finished = state.screenshot_delete_requested
+        && state
+            .sessions
+            .get(id)
+            .is_some_and(|session| !session.state.delete_screenshot_in_flight);
+    if finished {
+        state.screenshot_delete_requested = false;
+    }
+    let gone = finished && confirming && !path.exists();
     if close || gone || ((response.dismissed || kit.back_pressed()) && !deleting) {
         state.confirming_screenshot_delete = None;
         return false;

@@ -8,7 +8,7 @@ use vertex_shell::sturdy::ui::{
     Sizing, TextStyle, TextWrap, Ui,
 };
 
-use super::super::icons::Icon;
+use super::super::icons::{self, Icon};
 use super::super::kit::{self, Kit, TextRole};
 
 /// One notice as shown: the projects it covers and the licence text they share.
@@ -98,7 +98,9 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit) {
     }
     for (index, notice) in notices().iter().enumerate() {
         let open = OPEN.lock().is_ok_and(|open| open.contains(&index));
-        let _card = kit.card(ui, &format!("legal::notice::{index}"), kit::SPACE_SM);
+        let card_id = format!("legal::notice::{index}");
+        let _card = kit.card(ui, &card_id, kit::SPACE_SM);
+        let (progress, eased) = kit.animate_collapse(&card_id, open);
         let header_id = format!("legal::notice::{index}::header");
         {
             let hovered = ui.hovered(&header_id);
@@ -119,15 +121,16 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit) {
                     .corner_radius(CornerRadius::all(8.0))
                     .cursor(Cursor::Pointer),
             );
-            kit.icon(
+            // Right when closed, a clockwise quarter-turn to down when open (the down chevron turned 270 degrees points
+            // right), so both resting states are the plain chevrons.
+            icons::warm_turns(Icon::ChevronDown, 270.0, 360.0);
+            icons::draw_turned(
                 ui,
-                if open {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronRight
-                },
+                Icon::ChevronDown,
+                270.0 + 90.0 * eased,
                 16.0,
                 kit.palette.text,
+                kit.svg_supersample,
             );
             kit::label(
                 ui,
@@ -145,7 +148,7 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit) {
                 open.insert(index);
             }
         }
-        if open {
+        kit.collapse_body(ui, &card_id, progress, eased, kit::SPACE_SM, |ui, kit| {
             kit::label(
                 ui,
                 &notice.source,
@@ -180,6 +183,6 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit) {
                     },
                 );
             }
-        }
+        });
     }
 }

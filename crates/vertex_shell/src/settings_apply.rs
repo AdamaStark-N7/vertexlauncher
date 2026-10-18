@@ -210,20 +210,24 @@ impl Appliers {
 
     fn window_effect(&mut self, engine: &mut Engine<'_>, config: &Config) -> Applied {
         let translucent = config.window_transparency().is_translucent();
-        // Windows 11 rounds window frames itself. A translucent window draws its own (configurable) corners, so
-        // switch the OS rounding off for it or the two would fight; an opaque one keeps the OS's own look.
+        // The window draws its own (configurable) corners whenever it is translucent, or opaque with a corner radius
+        // set; either way it needs an alpha-capable surface for the area outside the corners. A radius of 0 on an
+        // opaque window keeps the OS's own look.
+        let own_corners = translucent || config.window_corner_radius() > 0;
+        // Windows 11 rounds window frames itself, so switch the OS rounding off when the window draws its own or the
+        // two would fight.
         if cfg!(windows) {
             use sturdy::render::{WindowCornerPreference, WindowEffectOptions};
             let mut params = WindowEffectParams::default();
             params.options = WindowEffectOptions {
-                corner_preference: if translucent { WindowCornerPreference::DoNotRound } else { WindowCornerPreference::Default },
+                corner_preference: if own_corners { WindowCornerPreference::DoNotRound } else { WindowCornerPreference::Default },
                 ..WindowEffectOptions::default()
             };
             engine.set_window_effect_with(self.surface, WindowEffectKind::CornerPreference, true, &params);
         }
-        engine.set_transparent(self.surface, translucent);
+        engine.set_transparent(self.surface, own_corners);
         // Start from the window's live settings so only composition changes.
-        let presentation = PresentationSettings { transparent_composition: translucent, ..engine.presentation_settings(self.surface) };
+        let presentation = PresentationSettings { transparent_composition: own_corners, ..engine.presentation_settings(self.surface) };
         if let Err(err) = engine.set_presentation_settings(self.surface, presentation) {
             return Applied::Failed(err.to_string());
         }

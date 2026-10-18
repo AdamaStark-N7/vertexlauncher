@@ -2,7 +2,9 @@
 //! by multiplying, so each icon is written once to the cache folder with `currentColor` set to white; drawing
 //! passes the theme colour as the element's tint.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use launcher_ui::assets;
 use vertex_shell::sturdy::glam::Vec4;
@@ -73,22 +75,95 @@ fn icon_dir() -> PathBuf {
 
 /// Writes the white-on-transparent copy of `icon` if it is not there yet (or the bundled icon changed) and
 /// returns its path.
-fn ensure_file(icon: Icon) -> Option<PathBuf> {
-    let path = icon_dir().join(format!("{}.svg", icon.file()));
-    let white = String::from_utf8_lossy(icon.svg())
-        .replace("currentColor", "#ffffff")
-        .into_bytes();
-    if std::fs::read(&path).ok().as_deref() != Some(white.as_slice()) {
-        std::fs::create_dir_all(icon_dir()).ok()?;
-        std::fs::write(&path, &white).ok()?;
+///
+/// The check and the write run once per icon on the launcher runtime, never on the UI thread; until the file is ready
+/// this returns `None` and the icon is skipped for a frame.
+fn ensure_file(icon: Icon, turn: u8) -> Option<PathBuf> {
+    enum State {
+        Pending,
+        Ready(PathBuf),
+        Failed,
     }
-    Some(path)
+    static STATES: OnceLock<Mutex<HashMap<(Icon, u8), State>>> = OnceLock::new();
+    let mut states = STATES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match states.get(&(icon, turn)) {
+        Some(State::Ready(path)) => return Some(path.clone()),
+        Some(State::Pending | State::Failed) => return None,
+        None => {}
+    }
+    states.insert((icon, turn), State::Pending);
+    drop(states);
+    launcher_runtime::spawn_blocking_detached(move || {
+        let path = if turn == 0 {
+            icon_dir().join(format!("{}.svg", icon.file()))
+        } else {
+            icon_dir().join(format!("{}-t{turn}.svg", icon.file()))
+        };
+        let mut white = String::from_utf8_lossy(icon.svg()).replace("currentColor", "#ffffff");
+        if turn != 0
+            && let (Some(open_end), Some(close)) = (white.find('>'), white.rfind("</svg>"))
+        {
+            // The viewBox is 24 wide, so the icon turns about (12, 12).
+            let degrees = f32::from(turn) * TURN_STEP_DEGREES;
+            white.insert_str(close, "</g>");
+            white.insert_str(open_end + 1, &format!("<g transform=\"rotate({degrees} 12 12)\">"));
+        }
+        let white = white.into_bytes();
+        let written = if std::fs::read(&path).ok().as_deref() == Some(white.as_slice()) {
+            true
+        } else {
+            std::fs::create_dir_all(icon_dir()).is_ok() && std::fs::write(&path, &white).is_ok()
+        };
+        let state = if written {
+            State::Ready(path)
+        } else {
+            State::Failed
+        };
+        STATES
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .insert((icon, turn), state);
+        vertex_shell::wake();
+    });
+    None
 }
 
 /// Draws `icon` `size` pixels square in `color`. `supersample` renders it larger and scales it down, which is what
 /// the "Icon anti-aliasing" setting controls.
 pub fn draw(ui: &mut Ui<'_>, icon: Icon, size: f32, color: Vec4, supersample: u32) {
-    let Some(path) = ensure_file(icon) else {
+    draw_turned(ui, icon, 0.0, size, color, supersample);
+}
+
+/// Starts writing the rotated copies of `icon` between `from` and `to` degrees, so an animation through that range does
+/// not skip frames while their files are made. Cheap to call every frame.
+pub fn warm_turns(icon: Icon, from: f32, to: f32) {
+    let (low, high) = (from.min(to), from.max(to));
+    let first = (low / TURN_STEP_DEGREES).floor() as u32;
+    let last = (high / TURN_STEP_DEGREES).ceil() as u32;
+    for step in first..=last {
+        let _ = ensure_file(icon, (step % 48) as u8);
+    }
+}
+
+/// Degrees between the pre-rotated copies of an icon that [`draw_turned`] picks from.
+const TURN_STEP_DEGREES: f32 = 7.5;
+
+/// Like [`draw`], rotated clockwise by `degrees` (0..360). The engine cannot rotate an element, so each rotation is
+/// its own SVG file, rounded to the nearest 7.5 degrees.
+pub fn draw_turned(
+    ui: &mut Ui<'_>,
+    icon: Icon,
+    degrees: f32,
+    size: f32,
+    color: Vec4,
+    supersample: u32,
+) {
+    let turn = ((degrees.rem_euclid(360.0) / TURN_STEP_DEGREES).round() as u32 % 48) as u8;
+    let Some(path) = ensure_file(icon, turn) else {
         return;
     };
     // Rounded up to a multiple of 4: the engine block-compresses these textures, and WebGPU rejects a BC7 texture

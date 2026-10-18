@@ -111,7 +111,7 @@ pub fn server_dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> bo
     let style = modal_style(kit, ui, 620.0);
     let mut save = false;
     let mut cancel = false;
-    let response = ui_kit::modal(ui, "server-sync", &style, true, |ui| {
+    let response = kit::modal(ui, "server-sync", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Server sync options");
         kit.text(
@@ -301,7 +301,7 @@ pub fn world_dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> boo
     let mut request: Option<WorldSyncRequest> = None;
     let mut close = false;
     let style = modal_style(kit, ui, 640.0);
-    let response = ui_kit::modal(ui, "world-sync", &style, !busy, |ui| {
+    let response = kit::modal(ui, "world-sync", &style, !busy, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Sync world");
         kit.text(ui, TextRole::Strong, &sync.world_name);

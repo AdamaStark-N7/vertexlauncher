@@ -153,6 +153,10 @@ const fn default_drag_scroll_enabled() -> bool {
     true
 }
 
+const fn default_follow_console_on_launch() -> bool {
+    true
+}
+
 const fn default_obs_detection_enabled() -> bool {
     true
 }
@@ -330,6 +334,8 @@ pub struct Config {
     sync_servers_to_all_instances_by_default: bool,
     #[serde(default = "default_drag_scroll_enabled")]
     drag_scroll_enabled: bool,
+    #[serde(default = "default_follow_console_on_launch")]
+    follow_console_on_launch: bool,
     frame_limit_fps: i32,
     ui_font_size: f32,
     ui_font_weight: i32,
@@ -451,6 +457,11 @@ impl Config {
     /// Whether multiplayer servers are copied between instances.
     pub fn sync_servers_enabled(&self) -> bool {
         self.sync_servers_enabled
+    }
+
+    /// Whether launching a game switches to that instance's console.
+    pub fn follow_console_on_launch(&self) -> bool {
+        self.follow_console_on_launch
     }
 
     /// Whether click-dragging scrollable content scrolls it.
@@ -1227,6 +1238,10 @@ impl Config {
             ToggleSettingId::DragScrollEnabled.spec(),
             b.drag_scroll_enabled,
         );
+        visit(
+            ToggleSettingId::FollowConsoleOnLaunch.spec(),
+            b.follow_console_on_launch,
+        );
     }
 
     /// Visits each dropdown setting with mutable access to its backing value.
@@ -1354,6 +1369,7 @@ impl Default for Config {
             sync_hotbars_enabled: false,
             sync_servers_to_all_instances_by_default: false,
             drag_scroll_enabled: true,
+            follow_console_on_launch: true,
             frame_limit_fps: 120,
             ui_font_size: 18.0,
             ui_font_weight: 400,

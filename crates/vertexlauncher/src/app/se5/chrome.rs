@@ -21,14 +21,22 @@ const MAXIMIZE_ID: &str = "chrome::maximize";
 const CLOSE_ID: &str = "chrome::close";
 const ACCOUNT_ID: &str = "chrome::account";
 /// Title-bar elements that must stay clickable instead of dragging the window.
-pub const TITLE_BAR_CONTROLS: [&str; 4] = [MINIMIZE_ID, MAXIMIZE_ID, CLOSE_ID, ACCOUNT_ID];
+pub const TITLE_BAR_CONTROLS: [&str; 5] = [
+    MINIMIZE_ID,
+    MAXIMIZE_ID,
+    CLOSE_ID,
+    ACCOUNT_ID,
+    ACTIVE_USER_ID,
+];
 const TITLE_BAR_HEIGHT: f32 = 42.0;
 pub const SIDEBAR_WIDTH: f32 = 68.0;
 
 /// The whole window: title bar on top, sidebar and the active screen below.
 pub fn window(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bool) {
     // Rounded corners need a see-through window; an opaque one would show square corners behind them.
-    let rounded = !maximized && state.config.window_transparency().is_translucent();
+    let rounded = !maximized
+        && (state.config.window_transparency().is_translucent()
+            || state.config.window_corner_radius() > 0);
     let radius = if rounded {
         f32::from(state.config.window_corner_radius())
     } else {
@@ -40,6 +48,9 @@ pub fn window(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: b
             .width(Sizing::Grow)
             .height(Sizing::Grow)
             .direction(Direction::TopToBottom)
+            // Inside the border, which is drawn over the element's edge, so children (the close button's hover fill)
+            // cannot cover it.
+            .padding(Padding::all(if maximized { 0 } else { 1 }))
             .background(kit.palette.bg)
             .corner_radius(CornerRadius::all(radius))
             .border(Border::all(
@@ -95,15 +106,16 @@ fn title_bar(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bo
         kit.fill(ui);
         active_user_button(ui, kit, state);
         account_button(ui, kit, state);
-        window_button(ui, kit, MINIMIZE_ID, Some(Icon::Minus), false);
+        window_button(ui, kit, MINIMIZE_ID, Some(Icon::Minus), false, 0.0);
         window_button(
             ui,
             kit,
             MAXIMIZE_ID,
             maximized.then_some(Icon::Restore),
             false,
+            0.0,
         );
-        window_button(ui, kit, CLOSE_ID, Some(Icon::Close), true);
+        window_button(ui, kit, CLOSE_ID, Some(Icon::Close), true, radius);
     }
     for id in [MINIMIZE_ID, MAXIMIZE_ID, CLOSE_ID] {
         if !kit.clicked(ui, id) {
@@ -148,9 +160,9 @@ fn active_user_button(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     else {
         return;
     };
-    if installation::running_instance_for_account(&account).is_none() {
+    let Some(instance_root) = installation::running_instance_for_account(&account) else {
         return;
-    }
+    };
     let hovered = ui.hovered(ACTIVE_USER_ID);
     {
         let _button = ui.element(
@@ -181,8 +193,10 @@ fn active_user_button(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     );
     if kit.clicked(ui, ACTIVE_USER_ID) {
         state.open(AppScreen::Console);
-        let name = state.auth.display_name().map(str::to_owned);
-        let _ = launcher_ui::console::activate_tab_for_user(Some(&account), name.as_deref());
+        if !launcher_ui::console::activate_tab_for_instance_root(&instance_root) {
+            let name = state.auth.display_name().map(str::to_owned);
+            let _ = launcher_ui::console::activate_tab_for_user(Some(&account), name.as_deref());
+        }
     }
 }
 
@@ -209,7 +223,16 @@ fn selected_name(state: &AppState) -> Option<String> {
 }
 
 /// `None` draws the plain square of a maximize button.
-fn window_button(ui: &mut Ui<'_>, kit: &Kit, id: &str, icon: Option<Icon>, danger: bool) {
+///
+/// `top_right_radius` rounds the button's top-right corner to follow the window's, so its hover fill stays inside it.
+fn window_button(
+    ui: &mut Ui<'_>,
+    kit: &Kit,
+    id: &str,
+    icon: Option<Icon>,
+    danger: bool,
+    top_right_radius: f32,
+) {
     let hovered = ui.hovered(id);
     let background = match (hovered, danger) {
         (true, true) => kit.palette.danger,
@@ -223,6 +246,10 @@ fn window_button(ui: &mut Ui<'_>, kit: &Kit, id: &str, icon: Option<Icon>, dange
             .height(Sizing::Grow)
             .align(ChildAlignment::center())
             .background(background)
+            .corner_radius(CornerRadius {
+                top_right: (top_right_radius - 1.0).max(0.0),
+                ..CornerRadius::default()
+            })
             .cursor(Cursor::Pointer),
     );
     let color = if hovered && danger {
@@ -385,6 +412,7 @@ fn profile_actions_menu(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         border: kit.palette.border_muted,
         corner_radius: 10.0,
         padding: Padding::all(kit::SPACE_SM),
+        z_index: kit::Z_POPUP,
         ..PopupStyle::default()
     };
     let mut menu = std::mem::take(&mut state.profile_menu);

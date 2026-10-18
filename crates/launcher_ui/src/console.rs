@@ -48,6 +48,8 @@ struct ConsoleState {
     tabs: Vec<ConsoleTab>,
     active_tab_id: String,
     text_redraw_generation: u64,
+    /// A launch asked the UI to show this tab's console.
+    focus_request: Option<String>,
 }
 
 static CONSOLE_STATE: OnceLock<Mutex<ConsoleState>> = OnceLock::new();
@@ -68,8 +70,21 @@ fn store() -> &'static Mutex<ConsoleState> {
             }],
             active_tab_id: DEFAULT_TAB_ID.to_owned(),
             text_redraw_generation: 0,
+            focus_request: None,
         })
     })
+}
+
+/// Asks the UI to show the console on `tab_id` (a game is launching). Whether it does is the user's setting.
+pub fn request_focus(tab_id: &str) {
+    if let Ok(mut state) = store().lock() {
+        state.focus_request = Some(tab_id.to_owned());
+    }
+}
+
+/// The tab a launch asked to show, once.
+pub fn take_focus_request() -> Option<String> {
+    store().lock().ok()?.focus_request.take()
 }
 
 pub fn mark_text_for_redraw() {
@@ -380,6 +395,36 @@ pub fn activate_tab_for_user(user_key: Option<&str>, username: Option<&str>) -> 
     }
 
     false
+}
+
+/// Selects the console tab of the game running from `instance_root`. Matching on the instance is exact, unlike a
+/// user lookup, which depends on the tab having been labelled with the same account identity.
+pub fn activate_tab_for_instance_root(instance_root: &str) -> bool {
+    let Some(normalized) = normalize_instance_root_key(instance_root) else {
+        return false;
+    };
+    let Ok(mut state) = store().lock() else {
+        return false;
+    };
+    let tab_id = state
+        .tabs
+        .iter()
+        .rev()
+        .find(|tab| {
+            tab.instance_root
+                .as_deref()
+                .and_then(normalize_instance_root_key)
+                .as_deref()
+                == Some(normalized.as_str())
+        })
+        .map(|tab| tab.id.clone());
+    match tab_id {
+        Some(tab_id) => {
+            state.active_tab_id = tab_id;
+            true
+        }
+        None => false,
+    }
 }
 
 pub fn is_default_tab(tab_id: &str) -> bool {

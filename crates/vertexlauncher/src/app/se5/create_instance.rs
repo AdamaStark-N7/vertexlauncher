@@ -117,7 +117,7 @@ pub fn dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) -> bool {
     let mut create = None;
     let mut refresh = false;
     let busy = state.create.create_in_flight;
-    let response = ui_kit::modal(ui, "create-instance", &style, !busy, |ui| {
+    let response = kit::modal(ui, "create-instance", &style, !busy, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Create instance");
         kit.text(

@@ -186,10 +186,14 @@ fn preview(
     );
 
     // Camera: drag to turn the model; it keeps turning with the drag's speed and eases to a stop.
-    let pointer_down = ui.pointer_down();
+    // The engine only learns of a release that happens over the window, so a button let go elsewhere would leave the
+    // drag running. Treat the cursor leaving the window as the end of the drag.
+    let pointer_down = ui.pointer_down() && !(view.dragging && cursor_outside_window(ui));
     let pointer_x = ui.pointer_position().x;
     let over_controls = ui.hovered("skins::motion") || ui.hovered("skins::elytra");
-    if pointer_down && !view.pointer_was_down && ui.hovered(CANVAS_ID) && !over_controls {
+    // A press also counts when the engine never saw the previous release (it was outside the window).
+    let pressed = !view.pointer_was_down || ui.pointer_state().pressed_this_frame;
+    if pointer_down && pressed && ui.hovered(CANVAS_ID) && !over_controls {
         view.dragging = true;
         skins.drag_started(now);
     }
@@ -201,7 +205,8 @@ fn preview(
             skins.drag_stopped(now);
         }
     }
-    view.pointer_was_down = pointer_down;
+    // The raw state, so a release the engine missed does not look like a fresh press when the cursor comes back.
+    view.pointer_was_down = ui.pointer_down();
     view.last_pointer_x = pointer_x;
 
     let frame = skins.render_preview(frame_w, frame_h, now, settings);
@@ -258,7 +263,9 @@ fn preview(
                 parent_attach_point: AttachPoint::LeftBottom,
                 offset: Vec2::new(14.0, -14.0),
                 z_index: 10,
-                capture_pointer: true,
+                // Not capturing: a capturing float swallows the mouse wheel, so scrolling stuck while the cursor was
+                // over a button. The canvas ignores presses that start on these buttons (`over_controls`).
+                capture_pointer: false,
                 ..Floating::new(FloatTarget::Element(CANVAS_ID.to_owned()))
             })),
     );
@@ -291,6 +298,23 @@ fn preview(
     ) {
         skins.toggle_elytra();
     }
+}
+
+/// Whether the cursor is outside the window. False when the platform cannot say.
+fn cursor_outside_window(ui: &mut Ui<'_>) -> bool {
+    let mut engine = ui.engine();
+    let Some(mut window) = engine.primary_window_control() else {
+        return false;
+    };
+    let (Some(origin), Some(size), Some(cursor)) = (
+        window.position(),
+        window.size(),
+        window.global_cursor_position(),
+    ) else {
+        return false;
+    };
+    let local = cursor - origin;
+    local.x < 0 || local.y < 0 || local.x >= size.x as i32 || local.y >= size.y as i32
 }
 
 /// Puts `frame` on the preview texture, creating it (or replacing it when the size changed) as needed.

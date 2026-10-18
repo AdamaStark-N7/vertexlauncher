@@ -464,24 +464,27 @@ pub(super) fn infer_modrinth_game_version_from_filenames(path: &Path) -> Option<
 pub(super) fn find_minecraft_version_in_text(text: &str) -> Option<String> {
     let chars = text.chars().collect::<Vec<_>>();
     for start in 0..chars.len() {
-        if !chars[start].is_ascii_digit() {
+        // Only at the start of a number: a version found by starting mid-number ("16.10.2" out of a "0.16.10.2" loader
+        // version) is a different, wrong version.
+        if !chars[start].is_ascii_digit()
+            || start > 0 && (chars[start - 1].is_ascii_digit() || chars[start - 1] == '.')
+        {
             continue;
         }
         let mut end = start;
-        let mut dot_count = 0usize;
         while end < chars.len() && (chars[end].is_ascii_digit() || chars[end] == '.') {
-            if chars[end] == '.' {
-                dot_count += 1;
-            }
             end += 1;
         }
-        if dot_count >= 2 {
-            let candidate = chars[start..end].iter().collect::<String>();
-            if candidate.split('.').all(|segment| !segment.is_empty())
-                && let Some(normalized) = normalize_minecraft_game_version(&candidate)
-            {
-                return Some(normalized);
-            }
+        // A sentence-ending or file-extension dot ("26.3.jar") is not part of the version.
+        let candidate = chars[start..end]
+            .iter()
+            .collect::<String>()
+            .trim_end_matches('.')
+            .to_owned();
+        if candidate.split('.').all(|segment| !segment.is_empty())
+            && let Some(normalized) = normalize_minecraft_game_version(&candidate)
+        {
+            return Some(normalized);
         }
     }
     None
@@ -933,19 +936,20 @@ pub(super) fn parse_prism_versions(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned();
-            if uid.contains("minecraft") && game_version == "latest" && !version.trim().is_empty() {
+            // Exact component ids: "contains" also matched net.minecraftforge for the game, and the Fabric
+            // intermediary mappings (whose version is the game version) for the loader.
+            if uid == "net.minecraft" && !version.trim().is_empty() {
                 game_version = version.clone();
-            }
-            if uid.contains("fabric") {
+            } else if uid == "net.fabricmc.fabric-loader" {
                 loader = "Fabric".to_owned();
                 loader_version = version;
-            } else if uid.contains("neoforge") {
+            } else if uid == "net.neoforged" {
                 loader = "NeoForge".to_owned();
                 loader_version = version;
-            } else if uid.contains("forge") {
+            } else if uid == "net.minecraftforge" {
                 loader = "Forge".to_owned();
                 loader_version = version;
-            } else if uid.contains("quilt") {
+            } else if uid == "org.quiltmc.quilt-loader" {
                 loader = "Quilt".to_owned();
                 loader_version = version;
             }

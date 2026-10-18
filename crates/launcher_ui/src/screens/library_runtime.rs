@@ -144,6 +144,7 @@ pub fn request_runtime_launch(
         instance_root_display.as_str(),
         tab_user_key.as_deref(),
     );
+    console::request_focus(tab_id.as_str());
     console::set_instance_tab_loading(
         instance_root_display.as_str(),
         tab_user_key.as_deref(),

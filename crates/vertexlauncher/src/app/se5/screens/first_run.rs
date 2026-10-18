@@ -24,7 +24,7 @@ pub fn config_format(
     };
     let mut choice = selected;
     let mut create = false;
-    let response = ui_kit::modal(ui, "first-run::format", &style, true, |ui| {
+    let response = kit::modal(ui, "first-run::format", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, "Welcome to Vertex");
         kit::label(

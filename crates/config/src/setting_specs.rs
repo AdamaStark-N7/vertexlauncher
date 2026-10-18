@@ -31,6 +31,7 @@ pub enum ToggleSettingId {
     SyncHotbarsEnabled,
     SyncServersToAllInstancesByDefault,
     DragScrollEnabled,
+    FollowConsoleOnLaunch,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -169,6 +170,13 @@ impl ToggleSettingId {
                 label: "Click and Drag Scrolling",
                 info_tooltip: Some(
                     "Lets you scroll lists and pages by clicking and dragging their contents. Turn off if dragging keeps scrolling when you meant to select text or drag something. The mouse wheel and scroll bars always work. Default: On.",
+                ),
+            },
+            ToggleSettingId::FollowConsoleOnLaunch => ToggleSettingSpec {
+                id: ToggleSettingId::FollowConsoleOnLaunch,
+                label: "Open Console When Launching",
+                info_tooltip: Some(
+                    "Switches to the instance's console as soon as you launch it, so you can watch the game start. Turn off to stay on the page you launched from. Default: On.",
                 ),
             },
         }

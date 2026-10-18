@@ -80,7 +80,7 @@ pub fn dialog(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, id: &str) ->
     let mut close = false;
     // Escape cancels a key capture rather than closing the dialog.
     let was_capturing = gs.capturing.is_some();
-    let response = ui_kit::modal(ui, "game-settings", &style, true, |ui| {
+    let response = kit::modal(ui, "game-settings", &style, true, |ui| {
         let _column = kit.column(ui, kit::SPACE_MD);
         kit.text(ui, TextRole::Heading, &header.title);
         kit::label(

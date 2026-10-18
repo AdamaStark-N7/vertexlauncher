@@ -206,6 +206,21 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     section(
         ui,
         kit,
+        "launching",
+        "Launching",
+        "What the launcher does when you start a game.",
+        |ui, kit| {
+            toggles(
+                ui,
+                kit,
+                &mut state.config,
+                &[ToggleSettingId::FollowConsoleOnLaunch],
+            );
+        },
+    );
+    section(
+        ui,
+        kit,
         "java",
         "Java",
         "Shared Java behavior for launches that use managed runtime selection.",
@@ -423,12 +438,12 @@ fn appearance(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         ui,
         "settings::corner-radius",
         "Window Corner Radius",
-        Some("How round the window's corners are, in pixels (0 is square). Only active when Window Transparency is Transparent or Blurred; an opaque window keeps your OS's own corners. Default: 12."),
+        Some("How round the window's corners are, in pixels (0 is square). Works with every Window Transparency mode; set it to 0 on an Opaque window to keep your OS's own corners. Default: 12."),
         f64::from(state.config.window_corner_radius()),
         f64::from(config::WINDOW_CORNER_RADIUS_MIN),
         f64::from(config::WINDOW_CORNER_RADIUS_MAX),
         1.0,
-        translucent,
+        true,
         |value| format!("{value:.0} px"),
     ) {
         state.config.set_window_corner_radius(value.round() as u8);
@@ -621,7 +636,12 @@ fn text(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
 }
 
 fn typography(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
-    kit.text(ui, TextRole::Heading, "Text styles");
+    kit.collapsible(ui, "settings::text-styles", "Text styles", |ui, kit| {
+        typography_body(ui, kit, state)
+    });
+}
+
+fn typography_body(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     kit.text(ui, TextRole::Muted, "Size, weight, and font for each kind of text. These stack with the UI font size and weight above.");
     let options = state.font_options.clone();
     let mut font_labels = vec!["Launcher UI font (default)".to_owned()];
@@ -1149,12 +1169,8 @@ fn downloads(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
 // -- Java -----------------------------------------------------------------------------------------------------------
 
 fn java_paths(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
-    kit.text(ui, TextRole::Heading, "Java JVM Paths (Optional)");
-    kit.text(
-        ui,
-        TextRole::Muted,
-        "Leave blank for None. Configure only versions you actually use.",
-    );
+    // Finished downloads are applied even while the section is closed.
+    let mut views = Vec::new();
     for runtime in JavaRuntimeVersion::ALL {
         let (view, downloaded) = java_actions::poll(runtime);
         if let Some(path) = downloaded {
@@ -1165,6 +1181,28 @@ fn java_paths(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         if view.in_flight.is_some() {
             kit.keep_awake_for(std::time::Duration::from_millis(100));
         }
+        views.push((runtime, view));
+    }
+    kit.collapsible(
+        ui,
+        "settings::java-paths",
+        "Java JVM Paths (Optional)",
+        |ui, kit| java_paths_body(ui, kit, state, views),
+    );
+}
+
+fn java_paths_body(
+    ui: &mut Ui<'_>,
+    kit: &mut Kit,
+    state: &mut AppState,
+    views: Vec<(JavaRuntimeVersion, java_actions::JavaActionView)>,
+) {
+    kit.text(
+        ui,
+        TextRole::Muted,
+        "Leave blank for None. Configure only versions you actually use.",
+    );
+    for (runtime, view) in views {
         let mut path = state
             .config
             .java_runtime_path(runtime)
@@ -1539,7 +1577,7 @@ pub fn confirm_insecure_storage(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppS
     };
     let mut confirmed = false;
     let mut cancelled = false;
-    let response = vertex_shell::sturdy::ui_kit::modal(
+    let response = kit::modal(
         ui,
         "settings-insecure-confirm",
         &style,
