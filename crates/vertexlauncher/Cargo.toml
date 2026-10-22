@@ -44,6 +44,8 @@ discord-rich-presence = "1.1.0"
 gilrs.workspace = true
 vertex_shell.workspace = true
 vertex_theme.workspace = true
+# The binary forwards the engine's native link directives to Cargo so they reach the final link.
+sturdy-sys = { git = "https://github.com/sturdyfool10/sturdyengine5", rev = "4ceef169b590c911cf6cf320b5a11d6436a10a88" }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 rfd = "0.11"

@@ -6,6 +6,7 @@ use std::{
 
 fn main() {
     emit_version_metadata();
+    emit_sturdy_link_directives();
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         println!("cargo:rerun-if-changed=../../Vertex.webp");
@@ -13,6 +14,71 @@ fn main() {
             println!("cargo:warning=failed to configure Windows resources: {error}");
         }
     }
+}
+
+fn emit_sturdy_link_directives() {
+    let Ok(path) = env::var("DEP_STURDY_LINK_DIRECTIVES_FILE") else {
+        return;
+    };
+    let path = PathBuf::from(path);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(error) => {
+            println!("cargo:warning=failed to read SturdyEngine link directives: {error}");
+            return;
+        }
+    };
+    let mut search_dirs = Vec::new();
+    for directive in contents.lines() {
+        if let Some(search) = directive.strip_prefix("cargo:rustc-link-search=native=") {
+            let directory = PathBuf::from(search);
+            if !search_dirs.contains(&directory) {
+                println!("cargo:rustc-link-search=native={}", directory.display());
+                search_dirs.push(directory);
+            }
+            continue;
+        }
+        let Some(link) = directive.strip_prefix("cargo:rustc-link-lib=") else {
+            continue;
+        };
+        if let Some(name) = link.strip_prefix("static=") {
+            let archive = native_archive_path(name, &search_dirs);
+            if let Some(archive) = archive {
+                // Put static archives after Rust objects. This preserves the CMake probe's link
+                // order and lets one-pass linkers resolve symbols introduced by the Rust rlibs.
+                if cfg!(target_os = "windows")
+                    && matches!(name, "slang-compiler" | "compiler-core" | "core")
+                {
+                    // Rust's native libraries are passed to MSVC before Rust rlibs. Slang's
+                    // archives satisfy references introduced by those rlibs, so force their
+                    // members into the link after the objects have been considered.
+                    println!("cargo:rustc-link-arg=/WHOLEARCHIVE:{}", archive.display());
+                } else {
+                    println!("cargo:rustc-link-arg={}", archive.display());
+                }
+            }
+        } else if let Some(framework) = link.strip_prefix("framework=") {
+            println!("cargo:rustc-link-arg=-framework");
+            println!("cargo:rustc-link-arg={framework}");
+        } else if cfg!(target_os = "windows") {
+            println!("cargo:rustc-link-arg={link}.lib");
+        } else {
+            println!("cargo:rustc-link-arg=-l{link}");
+        }
+    }
+}
+
+fn native_archive_path(name: &str, search_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let names = if cfg!(target_os = "windows") {
+        vec![format!("{name}.lib")]
+    } else {
+        vec![format!("lib{name}.a"), format!("lib{name}.so"), format!("lib{name}.dylib")]
+    };
+    search_dirs
+        .iter()
+        .flat_map(|directory| names.iter().map(|name| directory.join(name)))
+        .find(|path| path.is_file())
 }
 
 fn emit_version_metadata() {
