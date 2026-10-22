@@ -18,6 +18,7 @@ pub mod geom;
 pub mod install_activity;
 pub mod java_actions;
 pub mod launch_settings;
+pub mod log_collapse;
 pub mod log_format;
 pub mod notification;
 pub mod privacy;

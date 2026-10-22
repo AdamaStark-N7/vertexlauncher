@@ -4,7 +4,7 @@
 use installation::{VersionCatalog, VersionCatalogFilter, fetch_version_catalog_with_refresh};
 use instances::{InstanceRecord, InstanceStore, NewInstanceSpec, create_instance};
 use vertex_shell::sturdy::ui::{Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::startup::start_initial_instance_install_with;
 use super::AppState;

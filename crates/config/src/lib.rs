@@ -19,6 +19,7 @@ mod svg_aa_mode;
 mod text_rendering_path;
 mod typography;
 mod ui_fonts;
+mod fullscreen_style;
 mod window_transparency;
 mod windows_backdrop_type;
 mod windows_transparency_level;
@@ -48,6 +49,7 @@ pub use typography::{
     RoleOverride, TextRole, TypographySettings,
 };
 pub use ui_fonts::{UiCjkFontFamily, UiEmojiFontFamily, UiFontFamily};
+pub use fullscreen_style::FullscreenStyle;
 pub use window_transparency::WindowTransparency;
 pub use windows_backdrop_type::WindowsBackdropType;
 pub use windows_transparency_level::WindowsTransparencyLevel;
@@ -101,6 +103,10 @@ pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MIN: i32 = 2;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_MAX: i32 = 16;
 pub const SKIN_PREVIEW_MOTION_BLUR_SAMPLE_COUNT_STEP: i32 = 1;
 
+const fn default_fullscreen_style() -> FullscreenStyle {
+    FullscreenStyle::Borderless
+}
+
 const fn default_window_transparency() -> WindowTransparency {
     WindowTransparency::Opaque
 }
@@ -151,6 +157,20 @@ const fn default_notification_easing() -> NotificationEasing {
 
 const fn default_drag_scroll_enabled() -> bool {
     true
+}
+
+/// Whether this is a Steam Deck (or SteamOS), where a game launched from Vertex needs Vertex's window out of the way
+/// before the game can take the screen.
+pub fn running_on_steam_deck() -> bool {
+    if std::env::var_os("SteamDeck").is_some() || std::env::var_os("SteamGamepadUI").is_some() {
+        return true;
+    }
+    std::fs::read_to_string("/etc/os-release")
+        .is_ok_and(|text| text.lines().any(|line| line.trim() == "ID=steamos"))
+}
+
+fn default_steam_deck_handoff() -> bool {
+    running_on_steam_deck()
 }
 
 const fn default_follow_console_on_launch() -> bool {
@@ -267,6 +287,8 @@ pub struct Config {
     insecure_file_account_storage: bool,
     #[serde(default = "default_window_transparency")]
     window_transparency: WindowTransparency,
+    #[serde(default = "default_fullscreen_style")]
+    fullscreen_style: FullscreenStyle,
     #[serde(default, rename = "window_blur_enabled", skip_serializing)]
     legacy_window_blur_enabled: Option<bool>,
     #[serde(default = "default_windows_backdrop_type")]
@@ -336,6 +358,13 @@ pub struct Config {
     drag_scroll_enabled: bool,
     #[serde(default = "default_follow_console_on_launch")]
     follow_console_on_launch: bool,
+    /// Open the launcher fullscreen. Off by default.
+    #[serde(default)]
+    start_fullscreen: bool,
+    /// Hide the launcher's window while a game runs so the game can take the screen (Steam Deck game mode). On by
+    /// default on a Steam Deck.
+    #[serde(default = "default_steam_deck_handoff")]
+    steam_deck_handoff: bool,
     frame_limit_fps: i32,
     ui_font_size: f32,
     ui_font_weight: i32,
@@ -462,6 +491,20 @@ impl Config {
     /// Whether launching a game switches to that instance's console.
     pub fn follow_console_on_launch(&self) -> bool {
         self.follow_console_on_launch
+    }
+
+    /// Whether the launcher opens fullscreen.
+    pub fn start_fullscreen(&self) -> bool {
+        self.start_fullscreen
+    }
+
+    /// Whether the launcher's window is hidden while a game runs.
+    pub fn steam_deck_handoff(&self) -> bool {
+        self.steam_deck_handoff
+    }
+
+    pub fn set_steam_deck_handoff(&mut self, value: bool) {
+        self.steam_deck_handoff = value;
     }
 
     /// Whether click-dragging scrollable content scrolls it.
@@ -635,6 +678,15 @@ impl Config {
     /// Sets configured FPS cap used by frame limiter.
     pub fn set_frame_limit_fps(&mut self, fps: i32) {
         self.frame_limit_fps = fps.clamp(FRAME_LIMIT_FPS_MIN, FRAME_LIMIT_FPS_MAX);
+    }
+
+    /// How F11 and the title bar's fullscreen button take the window fullscreen.
+    pub fn fullscreen_style(&self) -> FullscreenStyle {
+        self.fullscreen_style
+    }
+
+    pub fn set_fullscreen_style(&mut self, value: FullscreenStyle) {
+        self.fullscreen_style = value;
     }
 
     /// Returns the app-wide window transparency mode.
@@ -1242,6 +1294,8 @@ impl Config {
             ToggleSettingId::FollowConsoleOnLaunch.spec(),
             b.follow_console_on_launch,
         );
+        visit(ToggleSettingId::StartFullscreen.spec(), b.start_fullscreen);
+        visit(ToggleSettingId::SteamDeckHandoff.spec(), b.steam_deck_handoff);
     }
 
     /// Visits each dropdown setting with mutable access to its backing value.
@@ -1325,6 +1379,7 @@ impl Default for Config {
             obs_detection_enabled: default_obs_detection_enabled(),
             insecure_file_account_storage: false,
             window_transparency: default_window_transparency(),
+            fullscreen_style: default_fullscreen_style(),
             legacy_window_blur_enabled: None,
             windows_backdrop_type: default_windows_backdrop_type(),
             linux_blur_protocol: default_linux_blur_protocol(),
@@ -1370,6 +1425,9 @@ impl Default for Config {
             sync_servers_to_all_instances_by_default: false,
             drag_scroll_enabled: true,
             follow_console_on_launch: true,
+            start_fullscreen: false,
+            // Off here; a first run (and a saved config that predates the setting) turns it on for a Steam Deck.
+            steam_deck_handoff: false,
             frame_limit_fps: 120,
             ui_font_size: 18.0,
             ui_font_weight: 400,

@@ -308,12 +308,6 @@ pub(super) fn request_search(state: &mut ContentBrowserState, request: BrowserSe
     state.results = BrowserSearchSnapshot::default();
     state.search_in_flight = true;
     state.search_notification_active = true;
-    notification::progress!(
-        notification::Severity::Info,
-        "content-browser/search",
-        0.1f32,
-        "Searching content..."
-    );
     let request_for_failure = request.clone();
     let _ = tokio_runtime::spawn_detached(async move {
         let worker_tx = tx.clone();
@@ -868,26 +862,6 @@ pub(super) fn poll_search(state: &mut ContentBrowserState) {
                     }
                     state.search_cache.insert(request, snapshot);
                     trim_content_browser_search_cache(state);
-                    notification::progress!(
-                        notification::Severity::Info,
-                        "content-browser/search",
-                        1.0f32,
-                        "Content search complete."
-                    );
-                } else {
-                    let progress = if total_tasks == 0 {
-                        0.5
-                    } else {
-                        0.1f32 + (0.8f32 * (completed_tasks as f32 / total_tasks as f32))
-                    };
-                    notification::progress!(
-                        notification::Severity::Info,
-                        "content-browser/search",
-                        progress.min(0.95),
-                        "Searching content... ({}/{})",
-                        completed_tasks,
-                        total_tasks
-                    );
                 }
             }
             SearchUpdate::Failed { request, error } => {

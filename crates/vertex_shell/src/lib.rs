@@ -92,6 +92,80 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The mouse cursor the UI wants over the window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PointerCursor {
+    /// The ordinary arrow.
+    Arrow = 0,
+    /// The pointing hand.
+    Hand = 1,
+    /// The text-editing I-beam.
+    Text = 2,
+}
+
+/// Whether the window fills the screen, and how.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fullscreen {
+    Off = 0,
+    Borderless = 1,
+    Exclusive = 2,
+}
+
+const NO_REQUEST: u8 = u8::MAX;
+static WANTED_FULLSCREEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(NO_REQUEST);
+static CURRENT_FULLSCREEN: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Asks for the window to go fullscreen, or back to a window; the shell does it on the next frame.
+pub fn request_fullscreen(mode: Fullscreen) {
+    WANTED_FULLSCREEN.store(mode as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// What the window is now, as of the last frame.
+pub fn fullscreen() -> Fullscreen {
+    match CURRENT_FULLSCREEN.load(std::sync::atomic::Ordering::Relaxed) {
+        1 => Fullscreen::Borderless,
+        2 => Fullscreen::Exclusive,
+        _ => Fullscreen::Off,
+    }
+}
+
+static F11_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static ESCAPE_PRESSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether F11 was pressed since this was last asked. Read in the shell's own frame, which runs every engine tick; the
+/// UI is only drawn when it has something to show, and a key pressed in a tick it skips would be missed there.
+pub fn take_fullscreen_key() -> bool {
+    F11_PRESSED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether Escape was pressed since this was last asked (see [`take_fullscreen_key`]).
+pub fn take_escape_key() -> bool {
+    ESCAPE_PRESSED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
+static HANDOFF_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static GAME_RUNNING: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+/// Installs the question "is a game running?" that the hand-off (see [`set_handoff`]) asks every frame.
+pub fn install_game_probe(game_running: fn() -> bool) {
+    let _ = GAME_RUNNING.set(game_running);
+}
+
+/// Turns the hand-off on or off. While it is on, the window is hidden whenever a game is running and shown again when
+/// none is, so the game can take the screen (a Steam Deck's game mode keeps the first window in front until it is gone).
+/// It is decided in the shell's own frame, which keeps running while the window is hidden.
+pub fn set_handoff(enabled: bool) {
+    HANDOFF_ENABLED.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+static WANTED_CURSOR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Sets the cursor the window should show. The UI engine only works out what it would like; nothing applies that to
+/// the window, so the shell does it from here once a frame (the engine skips the call when it is unchanged).
+pub fn set_cursor(cursor: PointerCursor) {
+    WANTED_CURSOR.store(cursor as u8, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct Shell<F> {
     draw: Option<F>,
     bridge: Arc<SettingsBridge>,
@@ -99,6 +173,8 @@ struct Shell<F> {
     applied: Option<Config>,
     appliers: Option<Appliers>,
     effect_polls_left: u8,
+    /// The window is hidden because a game is running.
+    handed_off: bool,
 }
 
 impl<F> Shell<F> {
@@ -151,6 +227,62 @@ where
 
     fn frame(&mut self, engine: &mut Engine<'_>, frame: &Frame) -> Option<FrameDescription> {
         self.apply_pending(engine, frame.window_id);
+        let icon = match WANTED_CURSOR.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => sturdy::render::CursorIcon::Pointer,
+            2 => sturdy::render::CursorIcon::Text,
+            _ => sturdy::render::CursorIcon::Default,
+        };
+        {
+            let input = engine.input();
+            let mut pressed = false;
+            if input.key_just_pressed(sturdy::Key::F11) {
+                F11_PRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
+                pressed = true;
+            }
+            if input.key_just_pressed(sturdy::Key::Escape) {
+                ESCAPE_PRESSED.store(true, std::sync::atomic::Ordering::Relaxed);
+                pressed = true;
+            }
+            if pressed {
+                // Make sure the UI is drawn to act on it.
+                wake();
+            }
+        }
+        let surface = sturdy::render::SurfaceHandle::from_window_id(frame.window_id);
+        engine.set_cursor_icon(surface, icon);
+        let wanted = WANTED_FULLSCREEN.swap(NO_REQUEST, std::sync::atomic::Ordering::Relaxed);
+        if wanted != NO_REQUEST {
+            engine.set_window_mode(
+                surface,
+                match wanted {
+                    1 => sturdy::WindowMode::BorderlessFullscreen,
+                    2 => sturdy::WindowMode::ExclusiveFullscreen,
+                    _ => sturdy::WindowMode::Windowed,
+                },
+            );
+        }
+        let game_running = GAME_RUNNING.get().is_some_and(|probe| probe())
+            && HANDOFF_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+        if game_running != self.handed_off {
+            if let Some(mut window) = engine.primary_window_control() {
+                if game_running {
+                    let _ = window.hide();
+                } else {
+                    let _ = window.show();
+                    let _ = window.raise();
+                    let _ = window.focus();
+                }
+                self.handed_off = game_running;
+            }
+        }
+        if let Some(mut window) = engine.primary_window_control() {
+            let now = match window.fullscreen_mode() {
+                sturdy::WindowMode::BorderlessFullscreen => 1,
+                sturdy::WindowMode::ExclusiveFullscreen => 2,
+                _ => 0,
+            };
+            CURRENT_FULLSCREEN.store(now, std::sync::atomic::Ordering::Relaxed);
+        }
         Some(FrameDescription::ui_only())
     }
 }
@@ -173,5 +305,5 @@ where
         // The window is created able to become translucent; the applier then sets the real state live.
         .transparent(config.transparent || translucent)
         .transparent_composition(config.transparent || translucent);
-    sturdy::run(runtime, Shell { draw: Some(draw), bridge, applied: None, appliers: None, effect_polls_left: 0 })
+    sturdy::run(runtime, Shell { draw: Some(draw), bridge, applied: None, appliers: None, effect_polls_left: 0, handed_off: false })
 }

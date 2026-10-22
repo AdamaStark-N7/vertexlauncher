@@ -6,6 +6,7 @@
 //! functions over app state.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::icons::{self, Icon};
@@ -13,7 +14,7 @@ use super::images::{ImageCache, ImageSource, Picture};
 use vertex_shell::palette::Palette;
 use vertex_shell::sturdy::glam::{Vec2, Vec4};
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, AttachPoint, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction,
+    AlignX, AlignY, AttachPoint, Border, ChildAlignment, Clip, CornerRadius, Direction,
     ElementDesc, ElementScope, FloatTarget, Floating, Padding, Sizing, TextStyle, TextWrap, Ui,
 };
 use vertex_shell::sturdy::ui_kit::{
@@ -49,6 +50,36 @@ struct Collapse {
     /// The content's height when last laid out, which the animation is a fraction of.
     height: f32,
     last_frame: f64,
+}
+
+/// `text` reduced to what a number can contain: digits, at most one `.` when `decimals`, and a leading `-` when
+/// `negative`. At most 12 characters.
+fn filter_number_text(text: &str, decimals: bool, negative: bool) -> String {
+    let mut out = String::new();
+    let mut dot = false;
+    for ch in text.chars() {
+        let keep = match ch {
+            '0'..='9' => true,
+            '.' if decimals && !dot => {
+                dot = true;
+                true
+            }
+            '-' if negative && out.is_empty() => true,
+            _ => false,
+        };
+        if keep && out.len() < 12 {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// A formatted value split into its leading number and what follows ("100%" into "100" and "%").
+fn split_number(text: &str) -> (String, String) {
+    let end = text
+        .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+        .unwrap_or(text.len());
+    (text[..end].to_owned(), text[end..].to_owned())
 }
 
 pub fn uptime() -> f64 {
@@ -93,7 +124,165 @@ pub fn wrapped_label(ui: &mut Ui<'_>, text: &str, style: &TextStyle, max_width: 
     ui.text(&out, &style);
 }
 
+/// One account name as it shows in streamer mode: the redaction label, on its account's colour when it has one.
+fn account_chip(ui: &mut Ui<'_>, shown: &str, id: Option<&str>, style: &TextStyle) {
+    let highlight = id.and_then(launcher_ui::account_colors::color_for);
+    let Some(color) = highlight else {
+        ui.text(shown, style);
+        return;
+    };
+    let channel = |value: u8| f32::from(value) / 255.0;
+    let background = Vec4::new(
+        channel(color.r()),
+        channel(color.g()),
+        channel(color.b()),
+        1.0,
+    );
+    let ink = launcher_ui::account_colors::contrasting_color(color);
+    let _chip = ui.element(
+        &ElementDesc::new()
+            .width(Sizing::Fit)
+            .height(Sizing::Fit)
+            .padding(Padding::symmetric(3, 1))
+            .background(background)
+            .corner_radius(CornerRadius::all(4.0)),
+    );
+    ui.text(
+        shown,
+        &TextStyle {
+            color: Vec4::new(channel(ink.r()), channel(ink.g()), channel(ink.b()), 1.0),
+            ..style.clone()
+        },
+    );
+}
+
+/// Draws `pieces` (text and hidden accounts) as wrapped lines no wider than `width`: words are placed left to right and
+/// a new line starts when the next one does not fit, so an account's coloured name flows with the text around it.
+fn draw_flow(
+    ui: &mut Ui<'_>,
+    pieces: &[launcher_ui::privacy::ScrubPiece],
+    style: &TextStyle,
+    width: f32,
+) {
+    use launcher_ui::privacy::{REDACTED_ACCOUNT_LABEL, ScrubPiece};
+    enum Token<'a> {
+        Word(&'a str),
+        Account(Option<&'a str>),
+        Break,
+    }
+    let plain = TextStyle {
+        wrap: TextWrap::None,
+        ..style.clone()
+    };
+    // Words keep the space after them, so they measure and draw the way they read.
+    let mut tokens = Vec::new();
+    for piece in pieces {
+        match piece {
+            ScrubPiece::Account { id } => tokens.push(Token::Account(id.as_deref())),
+            ScrubPiece::Text(text) => {
+                for (index, line) in text.split('\n').enumerate() {
+                    if index > 0 {
+                        tokens.push(Token::Break);
+                    }
+                    let mut rest = line;
+                    while !rest.is_empty() {
+                        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+                        let gap_end = rest[word_end..]
+                            .find(|c: char| !c.is_whitespace())
+                            .map_or(rest.len(), |gap| word_end + gap);
+                        tokens.push(Token::Word(&rest[..gap_end]));
+                        rest = &rest[gap_end..];
+                    }
+                }
+            }
+        }
+    }
+    let width_of = |ui: &Ui<'_>, token: &Token<'_>| match token {
+        Token::Word(word) => ui.measure_text(&plain, word).x,
+        // The chip's padding is 3 px on each side.
+        Token::Account(_) => ui.measure_text(&plain, REDACTED_ACCOUNT_LABEL).x + 6.0,
+        Token::Break => 0.0,
+    };
+    let mut lines: Vec<Vec<&Token<'_>>> = vec![Vec::new()];
+    let mut used = 0.0;
+    for token in &tokens {
+        if matches!(token, Token::Break) {
+            lines.push(Vec::new());
+            used = 0.0;
+            continue;
+        }
+        let needed = width_of(ui, token);
+        if used + needed > width && used > 0.0 {
+            lines.push(Vec::new());
+            used = 0.0;
+        }
+        used += needed;
+        if let Some(line) = lines.last_mut() {
+            line.push(token);
+        }
+    }
+    let _column = ui.element(
+        &ElementDesc::new()
+            .width(Sizing::Fixed(width))
+            .height(Sizing::Fit)
+            .direction(Direction::TopToBottom),
+    );
+    for line in lines {
+        let _row = ui.element(
+            &ElementDesc::new()
+                .width(Sizing::Fit)
+                .height(Sizing::Fit)
+                .direction(Direction::LeftToRight)
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+        );
+        for token in line {
+            match token {
+                Token::Word(word) => ui.text(word, &plain),
+                Token::Account(id) => account_chip(ui, REDACTED_ACCOUNT_LABEL, *id, &plain),
+                Token::Break => {}
+            }
+        }
+    }
+}
+
 fn label_text(ui: &mut Ui<'_>, text: &str, style: &TextStyle) {
+    // In streamer mode an account name is drawn as the redaction label on that account's colour. Wrapping text with a
+    // known width (a toast, a dialog) flows word by word around the name; unwrapped short text is one row.
+    let known_width = TEXT_WIDTH.get().or(MODAL_WIDTH.get());
+    if style.wrap != TextWrap::None
+        && let Some(width) = known_width
+        && let Some(pieces) = launcher_ui::privacy::scrub_pieces(text)
+    {
+        draw_flow(ui, &pieces, style, width);
+        return;
+    }
+    if text.chars().count() <= 80
+        && let Some(pieces) = launcher_ui::privacy::scrub_pieces(text)
+    {
+        let plain = TextStyle {
+            wrap: TextWrap::None,
+            ..style.clone()
+        };
+        let _row = ui.element(
+            &ElementDesc::new()
+                .width(Sizing::Fit)
+                .height(Sizing::Fit)
+                .direction(Direction::LeftToRight)
+                .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
+        );
+        for piece in pieces {
+            match piece {
+                launcher_ui::privacy::ScrubPiece::Text(part) => ui.text(&part, &plain),
+                launcher_ui::privacy::ScrubPiece::Account { id } => account_chip(
+                    ui,
+                    launcher_ui::privacy::REDACTED_ACCOUNT_LABEL,
+                    id.as_deref(),
+                    &plain,
+                ),
+            }
+        }
+        return;
+    }
     let text = launcher_ui::privacy::scrub(text);
     match MODAL_WIDTH.get() {
         Some(width) if style.wrap != TextWrap::None => {
@@ -105,7 +294,7 @@ fn label_text(ui: &mut Ui<'_>, text: &str, style: &TextStyle) {
 
 /// The z-index for a floating piece of a widget (scrollbar thumb, focus ring) that normally sits just above the page.
 /// Inside a dialog, which is itself a high layer, it has to sit above the dialog instead.
-fn in_modal_layer(z: i16) -> i16 {
+pub fn in_modal_layer(z: i16) -> i16 {
     if MODAL_WIDTH.get().is_some() {
         MODAL_LAYER + z
     } else {
@@ -119,6 +308,16 @@ const MODAL_LAYER: i16 = 2200;
 thread_local! {
     /// The inner width of the modal being built, if any. Text inside a dialog may not be wider than it.
     static MODAL_WIDTH: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+    /// The width text has where it is drawn, when something other than a dialog sets one (a toast).
+    static TEXT_WIDTH: std::cell::Cell<Option<f32>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `draw` with `width` as the width wrapping text has, so text that mixes in account names can wrap around them.
+pub fn with_text_width<R>(width: f32, draw: impl FnOnce() -> R) -> R {
+    let previous = TEXT_WIDTH.replace(Some(width));
+    let result = draw();
+    TEXT_WIDTH.set(previous);
+    result
 }
 
 /// `text` with any run of non-space characters wider than `max_width` (a long path or URL, which word wrapping cannot
@@ -213,6 +412,15 @@ pub fn modal(
     })
 }
 
+/// The mouse cursor shown over an element; the later variant wins where two overlap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CursorKind {
+    /// The pointing hand: it does something when clicked.
+    Pointer,
+    /// The text cursor: an editable text box.
+    Text,
+}
+
 /// Text roles, sized relative to the user's UI font size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextRole {
@@ -230,12 +438,22 @@ pub enum TextRole {
     Code,
 }
 
-/// A line-range selection in a log viewer, with its right-click menu.
+/// What [`Kit::scroll`] returns: the page's scroll area and the column inside it that holds the page. Dropping it closes
+/// both (the column first).
+pub struct ScrollScope {
+    _content: ElementScope,
+    _scroll: ElementScope,
+}
+
+/// A position in a log: a line, and a byte offset into that line's text (ANSI codes removed).
+pub type LogPoint = (usize, usize);
+
+/// A text selection in a log viewer, from one point to another, with its right-click menu.
 #[derive(Default)]
 pub struct LogSelection {
-    /// The line the drag started on and the line it is on now.
-    pub anchor: Option<usize>,
-    pub head: Option<usize>,
+    /// Where the drag started and where it is now.
+    pub anchor: Option<LogPoint>,
+    pub head: Option<LogPoint>,
     pub dragging: bool,
     /// The selection moved while the button was down (a plain click clears it instead).
     pub moved: bool,
@@ -244,13 +462,17 @@ pub struct LogSelection {
     pub menu_line: usize,
     /// Frames the view has stayed off the bottom while following.
     pub away_frames: u32,
+    /// A jump to the newest line was asked for but the log element did not exist yet to receive it.
+    pub pending_scroll: bool,
+    /// Frames left in which the view is still catching up with a jump, so it is not mistaken for the user leaving.
+    pub settle_frames: u8,
 }
 
 impl LogSelection {
-    /// The selected lines as an inclusive, ordered range.
-    pub fn range(&self) -> Option<(usize, usize)> {
+    /// The selection as an ordered (start, end) pair; `None` while nothing is selected between the two points.
+    pub fn range(&self) -> Option<(LogPoint, LogPoint)> {
         let (anchor, head) = (self.anchor?, self.head?);
-        Some((anchor.min(head), anchor.max(head)))
+        (anchor != head).then(|| (anchor.min(head), anchor.max(head)))
     }
 
     /// A selection exists, or one is being made.
@@ -269,7 +491,8 @@ impl LogSelection {
 /// Width a full-screen scroll page has for its content, from the window rather than from the scroll area (which
 /// grows to hold its widest row, so it would keep a layout sized for a bigger window after the window shrinks).
 pub fn content_width(ui: &Ui<'_>) -> f32 {
-    ui.viewport_size().x - super::chrome::SIDEBAR_WIDTH - 2.0 * f32::from(SPACE_XL) - 12.0
+    // Less the window border on both sides.
+    ui.viewport_size().x - super::chrome::SIDEBAR_WIDTH - 2.0 - 2.0 * f32::from(SPACE_XL) - 12.0
 }
 
 /// [`content_width`], but never wider than what the scroll area `scroll_id` actually measured last frame (minus its
@@ -374,6 +597,8 @@ pub struct Kit {
     levels: HashMap<String, (usize, usize, Vec<Option<launcher_ui::log_format::LogLevel>>)>,
     /// The selected lines of each log viewer, by viewer id.
     pub log_selections: HashMap<String, LogSelection>,
+    /// The merge of each console's lines, by viewer id, carried from frame to frame.
+    mergers: HashMap<String, launcher_ui::log_collapse::Merger>,
     tooltips: HashMap<String, f32>,
     /// Open/closed state and search text of each searchable dropdown.
     searches: HashMap<String, (ui_kit::PopupState, String)>,
@@ -381,6 +606,10 @@ pub struct Kit {
     menu_anim: HashMap<String, MenuAnim>,
     /// Open/close progress of every collapsible section, by id.
     collapsibles: HashMap<String, Collapse>,
+    /// What the pointer shows over each interactive element declared this frame (see [`CursorKind`]).
+    cursor_targets: Vec<(String, CursorKind)>,
+    /// Number fields that were being edited last frame, to notice when editing ends.
+    numbers_editing: std::collections::HashSet<String>,
     /// Keyboard and gamepad focus: widgets declare themselves focusable as they are drawn.
     pub focus: FocusNavigator,
     /// Gamepad steps for the focused slider this frame.
@@ -417,9 +646,12 @@ impl Kit {
             scroll_drag: None,
             menu_anim: HashMap::new(),
             collapsibles: HashMap::new(),
+            cursor_targets: Vec::new(),
+            numbers_editing: std::collections::HashSet::new(),
             icon_after: false,
             levels: HashMap::new(),
             log_selections: HashMap::new(),
+            mergers: HashMap::new(),
             tooltips: HashMap::new(),
             searches: HashMap::new(),
             focus: FocusNavigator::default(),
@@ -511,10 +743,23 @@ impl Kit {
             .is_some_and(|id| self.sliders.contains_key(id))
     }
 
-    /// Declares `id` focusable and returns whether it has focus now.
+    /// Declares `id` focusable and returns whether it has focus now. Anything the user can act on is focusable, so this
+    /// is also what gives it the pointing-hand cursor.
     pub fn focusable(&mut self, id: &str) -> bool {
+        self.cursor_target(id, CursorKind::Pointer);
+        self.focusable_without_cursor(id)
+    }
+
+    fn focusable_without_cursor(&mut self, id: &str) -> bool {
         let container = self.scroll_container.clone();
         self.focus.focusable(id, container.as_deref())
+    }
+
+    /// Whether the scrollbar thumb of the scroll area `id` is being dragged.
+    pub fn scrollbar_dragging(&self, id: &str) -> bool {
+        self.scroll_drag
+            .as_ref()
+            .is_some_and(|(dragging, _)| dragging == id)
     }
 
     /// A click on `id` or its activation from the keyboard or controller. Also declares it focusable.
@@ -523,6 +768,51 @@ impl Kit {
             self.focus_ring(ui, id);
         }
         ui.clicked(id) || self.focus.activated(id)
+    }
+
+    /// [`Kit::clicked`] for an element that is not part of keyboard navigation (a close button inside a card that is
+    /// itself focusable, say): a plain click, with the pointing-hand cursor.
+    pub fn clicked_plain(&mut self, ui: &mut Ui<'_>, id: &str) -> bool {
+        self.cursor_target(id, CursorKind::Pointer);
+        ui.clicked(id)
+    }
+
+    /// [`Kit::clicked`] for the window's own controls (minimize, maximize, close), which keep the ordinary cursor.
+    pub fn clicked_with_default_cursor(&mut self, ui: &mut Ui<'_>, id: &str) -> bool {
+        if self.focusable_without_cursor(id) {
+            self.focus_ring(ui, id);
+        }
+        ui.clicked(id) || self.focus.activated(id)
+    }
+
+    // -- Mouse cursor -----------------------------------------------------------------------------------------------
+    //
+    // One rule for the whole UI. Interactive elements register themselves while they are built (`focusable` and
+    // `clicked_plain` for things to click, the text fields for things to type in); `resolve_cursor`, run once at the
+    // end of the frame, picks the cursor from whichever of them the pointer is over: the text cursor over an editable
+    // text box, the pointing hand over anything that does something when clicked, the ordinary arrow everywhere else.
+    // Nothing sets a cursor on an element directly.
+
+    /// Registers `id` as an element the pointer should show `kind` over.
+    pub fn cursor_target(&mut self, id: &str, kind: CursorKind) {
+        self.cursor_targets.push((id.to_owned(), kind));
+    }
+
+    /// Chooses the cursor for this frame from the elements registered during it. Call once, after the UI is built.
+    pub fn resolve_cursor(&mut self, ui: &mut Ui<'_>) {
+        // The text cursor wins over the hand where a field sits inside something clickable.
+        let kind = self
+            .cursor_targets
+            .iter()
+            .filter(|(id, _)| ui.hovered(id))
+            .map(|(_, kind)| *kind)
+            .max();
+        self.cursor_targets.clear();
+        vertex_shell::set_cursor(match kind {
+            Some(CursorKind::Text) => vertex_shell::PointerCursor::Text,
+            Some(CursorKind::Pointer) => vertex_shell::PointerCursor::Hand,
+            None => vertex_shell::PointerCursor::Arrow,
+        });
     }
 
     /// Outlines the element `id` (drawn on top of it, from its last known size) while it has keyboard or controller
@@ -665,37 +955,7 @@ impl Kit {
                         .then(|| launcher_ui::account_colors::color_for(id))
                         .flatten();
                     match highlight {
-                        Some(color) => {
-                            let background = Vec4::new(
-                                f32::from(color.r()) / 255.0,
-                                f32::from(color.g()) / 255.0,
-                                f32::from(color.b()) / 255.0,
-                                1.0,
-                            );
-                            let ink = launcher_ui::account_colors::contrasting_color(color);
-                            let ink = Vec4::new(
-                                f32::from(ink.r()) / 255.0,
-                                f32::from(ink.g()) / 255.0,
-                                f32::from(ink.b()) / 255.0,
-                                1.0,
-                            );
-                            let _chip = ui.element(
-                                &ElementDesc::new()
-                                    .width(Sizing::Fit)
-                                    .height(Sizing::Fit)
-                                    .padding(Padding::symmetric(3, 1))
-                                    .background(background)
-                                    .corner_radius(CornerRadius::all(4.0)),
-                            );
-                            label_text(
-                                ui,
-                                shown,
-                                &TextStyle {
-                                    color: ink,
-                                    ..style
-                                },
-                            );
-                        }
+                        Some(_) => account_chip(ui, shown, Some(id), &style),
                         None => label_text(ui, shown, &style),
                     }
                 }
@@ -719,6 +979,16 @@ impl Kit {
     /// A themed icon `size` pixels square.
     pub fn icon(&self, ui: &mut Ui<'_>, icon: Icon, size: f32, color: Vec4) {
         icons::draw(ui, icon, size, color, self.svg_supersample);
+    }
+
+    /// What the console `id` shows: its lines with repeats merged (`launcher_ui::log_collapse`). Each frame only the
+    /// lines new since the last are taken in, merged into what the console already holds, so a pattern spread over many
+    /// frames merges just the same. `first_index` is the position of `lines[0]` among every line the console has had.
+    pub fn merged_log(&mut self, id: &str, lines: &[String], first_index: u64) -> Arc<Vec<String>> {
+        self.mergers
+            .entry(id.to_owned())
+            .or_default()
+            .update(lines, first_index)
     }
 
     /// Severity of each line of a log, recomputed only when the lines change (same buffer, same length = same levels).
@@ -816,20 +1086,34 @@ impl Kit {
     }
 
     /// A vertical scroll container that fills its parent, with a draggable scrollbar on its right edge.
-    pub fn scroll(&mut self, ui: &mut Ui<'_>, id: &str, gap: u16, padding: u16) -> ElementScope {
+    pub fn scroll(&mut self, ui: &mut Ui<'_>, id: &str, gap: u16, padding: u16) -> ScrollScope {
         self.scroll_container = Some(id.to_owned());
-        let scope = ui.element(
+        // The scroll area has exactly one child, and no child gap of its own. The layout engine leaves a scroll
+        // container's children out of its minimum size, except for the gaps between them (a known quirk of its sizing),
+        // so with the page's rows as direct children, 16 px each, the area's minimum height grew with the number of
+        // rows, could not be shrunk to the window, and ran past the bottom of it. The gapped column is that one child.
+        let scroll = ui.element(
             &ElementDesc::new()
                 .id(id.into())
                 .width(Sizing::Grow)
                 .height(Sizing::Grow)
                 .direction(Direction::TopToBottom)
-                .child_gap(gap)
                 .padding(Padding::all(padding))
                 .clip(Clip::vertical()),
         );
         self.scrollbar(ui, id);
-        scope
+        let content = ui.element(
+            &ElementDesc::new()
+                .id(format!("{id}::content"))
+                .width(Sizing::Grow)
+                .height(Sizing::Fit)
+                .direction(Direction::TopToBottom)
+                .child_gap(gap),
+        );
+        ScrollScope {
+            _content: content,
+            _scroll: scroll,
+        }
     }
 
     /// The scrollbar for the clipped element `id`, drawn from last frame's scroll metrics and dragged by grabbing its
@@ -885,7 +1169,6 @@ impl Kit {
                 .height(Sizing::Fixed(thumb_height))
                 .background(self.palette.text_muted.with_w(alpha))
                 .corner_radius(CornerRadius::all(3.0))
-                .cursor(Cursor::Pointer)
                 .floating(Some(Floating {
                     element_attach_point: AttachPoint::RightTop,
                     parent_attach_point: AttachPoint::RightTop,
@@ -1033,11 +1316,6 @@ impl Kit {
                 .direction(Direction::LeftToRight)
                 .child_gap(SPACE_SM)
                 .align(ChildAlignment::center())
-                .cursor(if enabled {
-                    Cursor::Pointer
-                } else {
-                    Cursor::NotAllowed
-                })
                 .border(ring),
             state,
             &style,
@@ -1075,8 +1353,7 @@ impl Kit {
                         Vec4::ZERO
                     })
                     .corner_radius(CornerRadius::all(8.0))
-                    .border(ring)
-                    .cursor(Cursor::Pointer),
+                    .border(ring),
             );
             self.icon(ui, icon, size * 0.55, self.palette.text);
         }
@@ -1135,12 +1412,7 @@ impl Kit {
                             top_right: 0.0,
                             bottom_right: 0.0,
                         })
-                        .border(self.focus_border(main_focused))
-                        .cursor(if main_enabled {
-                            Cursor::Pointer
-                        } else {
-                            Cursor::NotAllowed
-                        }),
+                        .border(self.focus_border(main_focused)),
                 );
                 label_text(
                     ui,
@@ -1167,8 +1439,7 @@ impl Kit {
                             top_right: radius,
                             bottom_right: radius,
                         })
-                        .border(self.focus_border(menu_focused))
-                        .cursor(Cursor::Pointer),
+                        .border(self.focus_border(menu_focused)),
                 );
                 self.icon(ui, Icon::Plus, 16.0, ink);
                 self.icon(ui, Icon::ChevronDown, 12.0, ink);
@@ -1222,8 +1493,7 @@ impl Kit {
                     .align(ChildAlignment::center())
                     .background(background)
                     .corner_radius(CornerRadius::all(12.0))
-                    .border(ring)
-                    .cursor(Cursor::Pointer),
+                    .border(ring),
             );
             content(ui, self);
         }
@@ -1273,8 +1543,7 @@ impl Kit {
                     .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
                     .background(background)
                     .corner_radius(CornerRadius::all(10.0))
-                    .border(ring)
-                    .cursor(Cursor::Pointer),
+                    .border(ring),
             );
             if let Some(icon) = icon {
                 self.icon(
@@ -1427,6 +1696,7 @@ impl Kit {
                     );
                 }
                 let row_id = format!("{id}::{index}");
+                self.cursor_target(&row_id, CursorKind::Pointer);
                 let hovered = open && ui.hovered(&row_id);
                 let ink = if item.danger {
                     self.palette.danger
@@ -1450,8 +1720,7 @@ impl Kit {
                             .child_gap(SPACE_MD)
                             .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
                             .background(fill)
-                            .corner_radius(CornerRadius::all(6.0))
-                            .cursor(Cursor::Pointer),
+                            .corner_radius(CornerRadius::all(6.0)),
                     );
                     self::label(
                         ui,
@@ -1518,8 +1787,7 @@ impl Kit {
                     .align(ChildAlignment::center())
                     .background(background)
                     .corner_radius(CornerRadius::all(10.0))
-                    .border(ring)
-                    .cursor(Cursor::Pointer),
+                    .border(ring),
             );
             self.text(ui, TextRole::Body, label);
         }
@@ -1643,9 +1911,42 @@ impl Kit {
         options: &[String],
         width: f32,
     ) -> Option<usize> {
+        self.dropdown_sized(ui, id, selected, options, Sizing::Fixed(width))
+    }
+
+    /// A dropdown that takes its share of a row: with `Sizing::Grow`, dropdowns side by side split the row equally.
+    pub fn dropdown_grow(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        selected: usize,
+        options: &[String],
+    ) -> Option<usize> {
+        if options.is_empty() {
+            return None;
+        }
+        self.dropdown_sized(ui, id, selected, options, Sizing::Grow)
+    }
+
+    fn dropdown_sized(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        selected: usize,
+        options: &[String],
+        sizing: Sizing,
+    ) -> Option<usize> {
         const ROW_HEIGHT: f32 = 30.0;
         const LIST_HEIGHT: f32 = 300.0;
         let trigger = format!("{id}::trigger");
+        // A growing trigger's width is last frame's; its text is cut to that, so the text never decides the width and
+        // siblings keep splitting the row equally.
+        let width = match sizing {
+            Sizing::Fixed(width) => width,
+            _ => ui
+                .element_bounds(&trigger)
+                .map_or(160.0, |(_, size)| size.x),
+        };
         let focused = self.focusable(&trigger);
         let activated = self.focus.activated(&trigger);
         let ring = self.focus_border(focused);
@@ -1658,7 +1959,7 @@ impl Kit {
             let _button = ui.element(
                 &ElementDesc::new()
                     .id(trigger.clone())
-                    .width(Sizing::Fixed(width))
+                    .width(sizing)
                     .height(Sizing::Fixed(CONTROL_HEIGHT))
                     .padding(Padding::symmetric(SPACE_MD, 0))
                     .child_gap(SPACE_SM)
@@ -1673,8 +1974,7 @@ impl Kit {
                         ring
                     } else {
                         Border::all(self.palette.border_muted, 1)
-                    })
-                    .cursor(Cursor::Pointer),
+                    }),
             );
             let text = TextStyle {
                 wrap: TextWrap::None,
@@ -1796,6 +2096,69 @@ impl Kit {
             .map(|index| all[index])
     }
 
+    /// A text field for a number: it refuses every character that no valid value contains, as it is typed or pasted
+    /// (digits; one `.` when `decimals`; a leading `-` when `negative`). Otherwise it is [`Kit::text_field_ex`].
+    pub fn number_text_field(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        value: &mut String,
+        width: f32,
+        decimals: bool,
+        negative: bool,
+    ) -> vertex_shell::sturdy::widgets::TextInputResult {
+        let result = self.text_field_ex(ui, id, value, "", false, Sizing::Fixed(width));
+        if result.changed {
+            let filtered = filter_number_text(value, decimals, negative);
+            if filtered != *value {
+                if let Some(state) = self.texts.get_mut(id) {
+                    state.set_text(&filtered);
+                }
+                *value = filtered;
+            }
+        }
+        result
+    }
+
+    /// Removes from the field `id` (and from `value`) every character `allowed` rejects, so a text box for a value
+    /// with a known alphabet never holds a symbol that value cannot contain. Call it right after the field.
+    pub fn restrict_text(&mut self, id: &str, value: &mut String, allowed: impl Fn(char) -> bool) {
+        if value.chars().all(&allowed) {
+            return;
+        }
+        let filtered: String = value.chars().filter(|ch| allowed(*ch)).collect();
+        if let Some(state) = self.texts.get_mut(id) {
+            state.set_text(&filtered);
+        }
+        *value = filtered;
+    }
+
+    /// A number box showing `shown`. Returns the number typed once the user finishes (Enter, or leaving the box);
+    /// until then the box holds what they are typing, and afterwards it shows `shown` again.
+    pub fn number_field(
+        &mut self,
+        ui: &mut Ui<'_>,
+        id: &str,
+        shown: &str,
+        width: f32,
+        decimals: bool,
+        negative: bool,
+    ) -> Option<f64> {
+        let mut text = shown.to_owned();
+        let result = self.number_text_field(ui, id, &mut text, width, decimals, negative);
+        let editing = result.focused || ui.has_focus(id);
+        let was_editing = if editing {
+            !self.numbers_editing.insert(id.to_owned())
+        } else {
+            self.numbers_editing.remove(id)
+        };
+        if result.submitted || (was_editing && !editing) {
+            let typed = self.texts.get(id).map(TextEditState::text)?;
+            return typed.trim().parse::<f64>().ok().filter(|n| n.is_finite());
+        }
+        None
+    }
+
     /// A single-line text field bound to `value`. Returns true when the text changed (and `value` was updated).
     /// The field keeps its own edit state; it re-reads `value` whenever it is not focused, so outside changes show.
     pub fn text_field(
@@ -1831,6 +2194,7 @@ impl Kit {
         );
         style.mask_characters = masked;
         let nav_focused = self.focusable(id);
+        self.cursor_target(id, CursorKind::Text);
         let activated = self.focus.activated(id);
         let state = self
             .texts
@@ -1911,8 +2275,7 @@ impl Kit {
                     .height(Sizing::Fixed(30.0))
                     .direction(Direction::LeftToRight)
                     .child_gap(SPACE_XS)
-                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center))
-                    .cursor(Cursor::Pointer),
+                    .align(ChildAlignment::new(AlignX::Left, AlignY::Center)),
             );
             self.text(ui, TextRole::Heading, label);
             self.gap(ui, f32::from(SPACE_XS));
@@ -2031,6 +2394,7 @@ impl Kit {
     /// A removable chip (a search tag). Returns true when its close button was clicked.
     pub fn chip(&mut self, ui: &mut Ui<'_>, id: &str, label: &str) -> bool {
         let close = format!("{id}::close");
+        self.cursor_target(&close, CursorKind::Pointer);
         {
             let _chip = ui.element(
                 &ElementDesc::new()
@@ -2050,8 +2414,7 @@ impl Kit {
                         .id(close.clone())
                         .width(Sizing::Fixed(16.0))
                         .height(Sizing::Fixed(16.0))
-                        .align(ChildAlignment::center())
-                        .cursor(Cursor::Pointer),
+                        .align(ChildAlignment::center()),
                 );
                 self.icon(ui, Icon::Close, 12.0, self.palette.text_muted);
             }
@@ -2134,6 +2497,7 @@ impl Kit {
             thumb_color: self.palette.text_muted.with_w(0.35),
             ..ScrollbarStyle::default()
         };
+        self.cursor_target(id, CursorKind::Text);
         let state = self
             .texts
             .entry(id.to_owned())
@@ -2387,8 +2751,7 @@ impl Kit {
                         .id(label_id.clone())
                         .width(Sizing::Grow)
                         .height(Sizing::Fit)
-                        .direction(Direction::TopToBottom)
-                        .cursor(Cursor::Default),
+                        .direction(Direction::TopToBottom),
                 );
                 self.text(ui, TextRole::Body, label);
             }
@@ -2398,8 +2761,7 @@ impl Kit {
                         .id(info_id.clone())
                         .width(Sizing::Fixed(16.0))
                         .height(Sizing::Fixed(16.0))
-                        .align(ChildAlignment::new(AlignX::Center, AlignY::Center))
-                        .cursor(Cursor::Default),
+                        .align(ChildAlignment::new(AlignX::Center, AlignY::Center)),
                 );
                 self.icon(ui, Icon::Info, 14.0, self.palette.text_muted);
             }
@@ -2474,22 +2836,54 @@ impl Kit {
         format: impl Fn(f64) -> String,
     ) -> Option<f64> {
         let mut out = None;
-        let step = (step > 0.0).then_some(step);
-        // A dialog is too narrow for label, value and a 260px track side by side: the label would be squeezed to a
-        // sliver. There the track gets its own full-width line under the label and value.
+        let (number, suffix) = split_number(&format(value));
+        // What the box shows against what the slider holds: a percentage shows 50 for 0.5. The scale is read off the
+        // formatter at the top of the range.
+        let scale = split_number(&format(max))
+            .0
+            .parse::<f64>()
+            .ok()
+            .filter(|shown| max != 0.0 && shown.is_finite() && *shown != 0.0)
+            .map_or(1.0, |shown| shown / max);
+        let decimals = step <= 0.0 || step.fract() != 0.0 || number.contains('.');
+        let negative = min < 0.0;
+        let step_opt = (step > 0.0).then_some(step);
+        let mut typed = None;
+        let mut field = |kit: &mut Self, ui: &mut Ui<'_>| {
+            if enabled {
+                typed = kit.number_field(ui, &format!("{id}::value"), &number, 84.0, decimals, negative);
+            } else {
+                kit.text(ui, TextRole::Muted, &number);
+            }
+            if !suffix.is_empty() {
+                kit.text(ui, TextRole::Muted, suffix.trim());
+            }
+        };
+        // A dialog is too narrow for label, number box and a 260px track side by side: the label would be squeezed
+        // to a sliver. There the track gets its own full-width line under the label and number.
         if let Some(width) = MODAL_WIDTH.get() {
-            self.setting_row(ui, id, label, info, |kit, ui| {
-                kit.text(ui, TextRole::Muted, &format(value));
-            });
+            self.setting_row(ui, id, label, info, &mut field);
             // Inset by the thumb's radius so it is not cut off at the ends.
-            out = self.slider_sized(ui, id, value, min, max, step, enabled, (width - 12.0).max(120.0));
-            return out;
+            out = self.slider_sized(ui, id, value, min, max, step_opt, enabled, (width - 12.0).max(120.0));
+        } else {
+            let mut dragged = None;
+            self.setting_row(ui, id, label, info, |kit, ui| {
+                field(kit, ui);
+                dragged = kit.slider(ui, id, value, min, max, step_opt, enabled);
+            });
+            out = dragged;
         }
-        self.setting_row(ui, id, label, info, |kit, ui| {
-            let shown = format(value);
-            kit.text(ui, TextRole::Muted, &shown);
-            out = kit.slider(ui, id, value, min, max, step, enabled);
-        });
+        if out.is_none()
+            && let Some(entered) = typed
+        {
+            let mut next = (entered / scale).clamp(min, max);
+            if let Some(step) = step_opt {
+                next = (((next - min) / step).round() * step + min).clamp(min, max);
+            }
+            if (next - value).abs() > f64::EPSILON {
+                out = Some(next);
+            }
+        }
         out
     }
 
@@ -2582,10 +2976,18 @@ mod tests {
         let mut selection = LogSelection::default();
         assert_eq!(selection.range(), None);
         assert!(!selection.active());
-        selection.anchor = Some(9);
-        selection.head = Some(4);
-        assert_eq!(selection.range(), Some((4, 9)));
+        selection.anchor = Some((9, 2));
+        selection.head = Some((4, 7));
+        assert_eq!(selection.range(), Some(((4, 7), (9, 2))));
         assert!(selection.active());
+        // Within one line the order is by position in the text.
+        selection.anchor = Some((3, 10));
+        selection.head = Some((3, 4));
+        assert_eq!(selection.range(), Some(((3, 4), (3, 10))));
+        // The same point twice selects nothing.
+        selection.head = Some((3, 10));
+        assert_eq!(selection.range(), None);
+        selection.head = Some((4, 7));
         selection.clear();
         assert_eq!(selection.range(), None);
         assert!(!selection.active());

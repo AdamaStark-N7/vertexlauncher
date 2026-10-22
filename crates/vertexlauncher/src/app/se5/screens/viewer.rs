@@ -3,7 +3,7 @@
 
 use vertex_shell::sturdy::glam::Vec2;
 use vertex_shell::sturdy::ui::{
-    AttachPoint, Clip, CornerRadius, Cursor, ElementDesc, FloatTarget, Floating, Sizing, Ui,
+    AttachPoint, Clip, CornerRadius, ElementDesc, FloatTarget, Floating, Sizing, Ui,
 };
 
 use super::super::images::Picture;
@@ -112,11 +112,6 @@ pub fn picture(
             .width(Sizing::Fixed(size.x))
             .height(Sizing::Fixed(size.y))
             .corner_radius(CornerRadius::all(8.0))
-            .cursor(if view.zoom > MIN_ZOOM {
-                Cursor::Pointer
-            } else {
-                Cursor::Default
-            })
             .clip(Clip::both()),
     );
     let zoomed = size * view.zoom;
@@ -172,7 +167,13 @@ pub fn tile_actions(ui: &mut Ui<'_>, kit: &mut Kit, tile_id: &str) -> Option<Til
                     parent_attach_point: AttachPoint::RightTop,
                     offset: Vec2::new(-8.0, 8.0),
                     z_index: 5,
+                    // Not capturing: a capturing float swallows the mouse wheel, so the gallery stopped scrolling
+                    // while the pointer was over a button. A press on a button is not also a press on its tile
+                    // because the callers act on the button's result and only look at the tile when there was none.
                     capture_pointer: false,
+                    // Clipped like the tile: when the tile is partly scrolled out of the gallery, the buttons are cut
+                    // off with it instead of drawing over what is around the gallery.
+                    clip_to_target: true,
                     ..Floating::new(vertex_shell::sturdy::ui::FloatTarget::Element(
                         tile_id.to_owned(),
                     ))
@@ -192,8 +193,7 @@ pub fn tile_actions(ui: &mut Ui<'_>, kit: &mut Kit, tile_id: &str) -> Option<Til
                         } else {
                             kit.palette.bg_dark.with_w(0.85)
                         })
-                        .corner_radius(CornerRadius::all(8.0))
-                        .cursor(Cursor::Pointer),
+                        .corner_radius(CornerRadius::all(8.0)),
                 );
                 kit.icon(
                     ui,
@@ -211,9 +211,9 @@ pub fn tile_actions(ui: &mut Ui<'_>, kit: &mut Kit, tile_id: &str) -> Option<Til
     kit.tooltip(ui, &copy_id, "Copy image to clipboard");
     kit.tooltip(ui, &delete_id, "Delete screenshot");
     let _ = TextRole::Small;
-    if ui.clicked(&copy_id) {
+    if kit.clicked_plain(ui, &copy_id) {
         Some(TileAction::Copy)
-    } else if ui.clicked(&delete_id) {
+    } else if kit.clicked_plain(ui, &delete_id) {
         Some(TileAction::Delete)
     } else {
         None

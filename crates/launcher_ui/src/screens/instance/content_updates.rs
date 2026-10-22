@@ -98,6 +98,7 @@ pub(super) fn update_all_installed_content(
     progress: Option<&InstallProgressCallback>,
 ) -> Result<String, String> {
     let mut updated_count = 0usize;
+    let mut failed: Vec<String> = Vec::new();
     let mut pass = 0usize;
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
@@ -174,8 +175,11 @@ pub(super) fn update_all_installed_content(
                     resolution.entry.name,
                     update.latest_version_id,
                 );
-                remove_stale_duplicate_content_path(file.file_path.as_path())?;
-                cleaned_stale_duplicates += 1;
+                // A copy that cannot be removed is left where it is; it is not a reason to stop updating.
+                match remove_stale_duplicate_content_path(file.file_path.as_path()) {
+                    Ok(()) => cleaned_stale_duplicates += 1,
+                    Err(err) => tracing::warn!(target: CONTENT_UPDATE_LOG_TARGET, "{err}"),
+                }
                 continue;
             }
             updates.push(crate::screens::content_browser::BulkContentUpdate {
@@ -216,7 +220,7 @@ pub(super) fn update_all_installed_content(
             queued_updates = updates.len(),
             "applying queued bulk content updates"
         );
-        let applied = crate::screens::content_browser::bulk_update_installed_content(
+        let outcome = crate::screens::content_browser::bulk_update_installed_content(
             instance_root,
             updates.as_slice(),
             game_version,
@@ -224,6 +228,12 @@ pub(super) fn update_all_installed_content(
             download_policy,
             progress,
         )?;
+        let applied = outcome.applied;
+        for failure in outcome.failed {
+            if !failed.contains(&failure) {
+                failed.push(failure);
+            }
+        }
         if applied == 0 {
             tracing::warn!(
                 target: CONTENT_UPDATE_LOG_TARGET,
@@ -263,6 +273,20 @@ pub(super) fn update_all_installed_content(
     } else {
         format!("Updated {updated_count} {kind_label}.")
     };
+    if !failed.is_empty() {
+        // What could not be updated does not stop the rest; the first few are named so they can be looked at.
+        let shown: Vec<&str> = failed.iter().take(3).map(String::as_str).collect();
+        message.push_str(&format!(
+            " Could not update {}: {}{}",
+            failed.len(),
+            shown.join("; "),
+            if failed.len() > shown.len() {
+                format!("; and {} more (see the log)", failed.len() - shown.len())
+            } else {
+                String::new()
+            }
+        ));
+    }
     if removed_duplicates > 0 {
         message.push_str(&format!(" Removed {removed_duplicates} duplicate file(s)."));
     }

@@ -9,7 +9,7 @@ use launcher_ui::account_text::mention;
 use launcher_ui::geom::Color32;
 use vertex_shell::sturdy::glam::Vec4;
 use vertex_shell::sturdy::ui::{
-    Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc,
+    Border, ChildAlignment, CornerRadius, Direction, ElementDesc,
 };
 
 use super::AppState;
@@ -197,8 +197,7 @@ pub fn account_menu(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, anchor
                                         Border::all(ink, 2)
                                     } else {
                                         Border::default()
-                                    })
-                                    .cursor(Cursor::Pointer),
+                                    }),
                             );
                             kit.text_colored(ui, &label, ink, 1.0);
                         } else if kit.nav_item_ex(
@@ -521,8 +520,7 @@ fn swatch(
                 .align(ChildAlignment::center())
                 .background(fill)
                 .corner_radius(CornerRadius::all(4.0))
-                .border(Border::all(kit.palette.border_muted, 1))
-                .cursor(Cursor::Pointer),
+                .border(Border::all(kit.palette.border_muted, 1)),
         );
         if selected {
             let ink = color.map_or(kit.palette.text, |color| {

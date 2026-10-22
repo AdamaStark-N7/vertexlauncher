@@ -10,10 +10,10 @@ use launcher_ui::screens::{
     QuickLaunchCommandMode, build_quick_launch_command, build_quick_launch_steam_options,
 };
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
-use vertex_shell::sturdy::ui_kit::{self, MenuItem, PopupStyle};
+use vertex_shell::sturdy::ui_kit::{self};
 
 use super::super::icons::Icon;
 use super::super::images::ImageSource;
@@ -220,8 +220,7 @@ fn usage(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
                     } else {
                         kit.palette.bg
                     })
-                    .corner_radius(CornerRadius::all(12.0))
-                    .cursor(Cursor::Pointer),
+                    .corner_radius(CornerRadius::all(12.0)),
             );
             library::thumbnail(ui, kit, instance, &format!("{id}::thumb"), 40.0);
             kit.text_clipped(ui, TextRole::Body, &instance.name, 420.0);
@@ -299,8 +298,7 @@ fn entry_row(
                     kit.palette.bg
                 })
                 .corner_radius(CornerRadius::all(12.0))
-                .border(Border::all(kit.palette.border_muted, 1))
-                .cursor(Cursor::Pointer),
+                .border(Border::all(kit.palette.border_muted, 1)),
         );
         {
             let _top = ui.element(
@@ -324,8 +322,7 @@ fn entry_row(
                         } else {
                             vertex_shell::sturdy::glam::Vec4::ZERO
                         })
-                        .corner_radius(CornerRadius::all(8.0))
-                        .cursor(Cursor::Pointer),
+                        .corner_radius(CornerRadius::all(8.0)),
                 );
                 kit.icon(
                     ui,
@@ -430,7 +427,7 @@ fn entry_row(
     if result.is_some() {
         return result;
     }
-    if ui.clicked(&star_id) {
+    if kit.clicked_plain(ui, &star_id) {
         return Some(EntryAction::Favorite);
     }
     if entry.targets.len() == 1 && kit.clicked(ui, &id) {

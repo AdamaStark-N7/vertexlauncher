@@ -34,6 +34,8 @@ icons! {
     Antenna3 => ("antenna-bars-3", assets::ANTENNA_BARS_3_SVG),
     Antenna4 => ("antenna-bars-4", assets::ANTENNA_BARS_4_SVG),
     Antenna5 => ("antenna-bars-5", assets::ANTENNA_BARS_5_SVG),
+    ArrowsMaximize => ("arrows-maximize", assets::ARROWS_MAXIMIZE_SVG),
+    ArrowsMinimize => ("arrows-minimize", assets::ARROWS_MINIMIZE_SVG),
     Check => ("check", assets::CHECK_SVG),
     ChevronDown => ("chevron-down", assets::CHEVRON_DOWN_SVG),
     ChevronRight => ("chevron-right", assets::CHEVRON_RIGHT_SVG),

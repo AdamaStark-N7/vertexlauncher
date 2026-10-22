@@ -19,6 +19,12 @@ const FORBIDDEN: &[&str] = &[
     "ui.text_area(",
     "ui.checkbox(",
     "ui.radio_button(",
+    // The mouse cursor is one system in the kit (`Kit::resolve_cursor`): elements register through `Kit::focusable`,
+    // `Kit::clicked_plain` or the text fields, and nothing sets a cursor directly.
+    ".cursor(",
+    "ui.clicked(",
+    "ui.force_cursor(",
+    "set_cursor_icon(",
 ];
 
 fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {

@@ -32,6 +32,8 @@ pub enum ToggleSettingId {
     SyncServersToAllInstancesByDefault,
     DragScrollEnabled,
     FollowConsoleOnLaunch,
+    StartFullscreen,
+    SteamDeckHandoff,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -170,6 +172,20 @@ impl ToggleSettingId {
                 label: "Click and Drag Scrolling",
                 info_tooltip: Some(
                     "Lets you scroll lists and pages by clicking and dragging their contents. Turn off if dragging keeps scrolling when you meant to select text or drag something. The mouse wheel and scroll bars always work. Default: On.",
+                ),
+            },
+            ToggleSettingId::StartFullscreen => ToggleSettingSpec {
+                id: ToggleSettingId::StartFullscreen,
+                label: "Start Vertex in Fullscreen",
+                info_tooltip: Some(
+                    "Opens the launcher fullscreen, in the style chosen under Fullscreen Style. Press Escape or F11 to leave fullscreen. Default: Off.",
+                ),
+            },
+            ToggleSettingId::SteamDeckHandoff => ToggleSettingSpec {
+                id: ToggleSettingId::SteamDeckHandoff,
+                label: "Hand Off to Minecraft (Steam Deck)",
+                info_tooltip: Some(
+                    "Hides Vertex's window while Minecraft runs, so the game takes the screen instead of Vertex staying in front of it in Steam Deck game mode, and brings Vertex back when the game closes. Turned on automatically on a Steam Deck. Default: Off.",
                 ),
             },
             ToggleSettingId::FollowConsoleOnLaunch => ToggleSettingSpec {

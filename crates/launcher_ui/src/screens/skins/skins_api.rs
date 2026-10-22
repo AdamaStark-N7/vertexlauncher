@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use super::skins_raster::{RasterSettings, render_scenes};
+use super::skins_raster::{RasterSettings, render_scenes_async};
 use super::*;
 
 pub use auth::MinecraftSkinVariant as SkinVariant;
@@ -55,25 +55,52 @@ struct RasterJob {
     settings: RasterSettings,
 }
 
-/// Draws the preview on the calling thread, once per `exchange` (so once per UI frame), so every frame shows the pose
-/// of that frame. The drawing itself is split across all cores by row bands.
+/// Draws the preview on the compute backend (the UI engine's task scheduler), one frame at a time, and hands the UI
+/// each finished frame once.
+///
+/// The UI thread only advances the camera and the animation (every frame, by the real time since the last one) and
+/// builds the scene; the rasteriser, whose cost varies with the window size, anti-aliasing and motion blur, runs beside
+/// it, split into bands across every core. So a slow frame makes the preview update less often but never stalls the
+/// rest of the UI, and the poses it draws are still spaced by real time. While a frame is being drawn the UI keeps
+/// showing the last finished one and does not queue another, so there is no backlog and the preview never falls behind
+/// the animation.
 struct RasterPipe {
     last: Option<Arc<RgbaImage>>,
-    /// Bumped for every frame drawn, so the UI uploads each one once.
+    /// Bumped for every finished frame, so the UI uploads each one once.
     generation: u64,
+    pending: Option<launcher_runtime::ComputeHandle<RgbaImage>>,
 }
 
 impl RasterPipe {
     fn new() -> Self {
-        Self { last: None, generation: 0 }
+        Self { last: None, generation: 0, pending: None }
     }
 
-    fn exchange(&mut self, next: impl FnOnce() -> RasterJob) -> Option<Arc<RgbaImage>> {
-        let job = next();
-        let scenes: Vec<(f32, &[RenderTriangle])> = job.scenes.iter().map(|(w, t)| (*w, t.as_slice())).collect();
-        self.last = Some(Arc::new(render_scenes(&scenes, &job.skin, job.cape.as_deref(), job.settings)));
-        self.generation += 1;
-        self.last.clone()
+    /// Takes the frame being drawn if it has finished. True when nothing is being drawn, so the next can start.
+    fn poll(&mut self) -> bool {
+        let Some(pending) = self.pending.as_mut() else {
+            return true;
+        };
+        match pending.try_take() {
+            None => false,
+            Some(Ok(image)) => {
+                self.pending = None;
+                self.last = Some(Arc::new(image));
+                self.generation += 1;
+                true
+            }
+            Some(Err(err)) => {
+                tracing::error!(target: "vertexlauncher/skins", "The skin preview frame failed: {err}");
+                self.pending = None;
+                true
+            }
+        }
+    }
+
+    /// Starts drawing `job`; the result shows up through a later `poll`.
+    fn submit(&mut self, job: RasterJob) {
+        let RasterJob { scenes, skin, cape, settings } = job;
+        self.pending = Some(launcher_runtime::spawn_compute(render_scenes_async(Arc::new(scenes), skin, cape, settings)));
     }
 }
 
@@ -263,6 +290,7 @@ impl SkinsSession {
     pub fn render_preview(&mut self, width: u32, height: u32, now: f64, settings: &PreviewSettings) -> Option<Arc<RgbaImage>> {
         let dt = self.state.consume_frame_dt(now);
         self.advance_camera(now, dt);
+        let worker_free = self.raster.poll();
         let state = &mut self.state;
 
         let blend_target = match state.preview_motion_mode {
@@ -284,6 +312,11 @@ impl SkinsSession {
         state.refresh_expression_layout_cache();
 
         let skin = state.skin_sample.clone()?;
+        if !worker_free {
+            // The previous frame is still being drawn: the animation above has advanced, and the next frame
+            // is built from it as soon as the worker is free.
+            return self.raster.last.clone();
+        }
         let orbit_time = state.effective_orbit_time(now);
         let yaw = ((orbit_time / PREVIEW_ORBIT_SECONDS) as f32) * std::f32::consts::TAU + state.camera_yaw_offset;
         let yaw_velocity = if state.camera_drag_active {
@@ -343,7 +376,8 @@ impl SkinsSession {
             )
             .cape_render_sample;
             let scenes = blur.into_iter().map(|s| (s.weight, s.triangles)).collect();
-            return self.raster.exchange(|| RasterJob { scenes, skin, cape, settings: raster });
+            self.raster.submit(RasterJob { scenes, skin, cape, settings: raster });
+            return self.raster.last.clone();
         }
         let scene = build_character_scene(
             rect,
@@ -361,7 +395,8 @@ impl SkinsSession {
         );
         let scenes = vec![(1.0, scene.triangles)];
         let cape = scene.cape_render_sample;
-        self.raster.exchange(|| RasterJob { scenes, skin, cape, settings: raster })
+        self.raster.submit(RasterJob { scenes, skin, cape, settings: raster });
+        self.raster.last.clone()
     }
 
     /// Changes whenever `render_preview` has a new frame to show.
@@ -374,8 +409,23 @@ impl SkinsSession {
         if state.camera_drag_active {
             let yaw_step = std::mem::take(&mut self.drag_dx) * CAMERA_DRAG_SENSITIVITY_RAD_PER_POINT;
             state.camera_yaw_offset += yaw_step;
-            if dt > 0.000_1 && yaw_step.abs() > 0.0 {
-                state.camera_drag_velocity = yaw_step / dt;
+            // The speed the model is being turned at, which is what it keeps turning at once let go. While the pointer
+            // moves it follows the speed of each step, lightly smoothed (a single step is noisy: the pointer moves in
+            // whole pixels and frames are uneven) but quick enough that a flick is thrown at the strength it was made
+            // with. Frames where the pointer did not move do not pull the speed down, since a hand often stops
+            // reporting for a frame as it lets go; only a pointer held still for a moment lets the speed die away,
+            // so letting go after a pause does not fling the model with a stale one.
+            if dt > 0.000_1 {
+                if yaw_step.abs() > 0.0 {
+                    state.camera_drag_idle_secs = 0.0;
+                    let blend = 1.0 - (-dt / 0.02).exp();
+                    state.camera_drag_velocity += (yaw_step / dt - state.camera_drag_velocity) * blend;
+                } else {
+                    state.camera_drag_idle_secs += dt;
+                    if state.camera_drag_idle_secs > 0.12 {
+                        state.camera_drag_velocity *= (-dt / 0.05).exp();
+                    }
+                }
             }
         }
         if !state.camera_drag_active && state.orbit_pause_started_at.is_some() {
@@ -447,7 +497,16 @@ mod tests {
         let mut session = SkinsSession::new();
         session.state.skin_sample = Some(Arc::new(RgbaImage::from_pixel(64, 64, image::Rgba([200, 120, 80, 255]))));
         session.state.ensure_default_elytra_texture();
-        let frame = session.render_preview(240, 280, 1.0, &settings()).expect("a skin is loaded");
+        // The frame is drawn on a worker thread, so it arrives on a later call.
+        let mut frame = None;
+        for step in 0..500 {
+            frame = session.render_preview(240, 280, 1.0 + f64::from(step) * 0.016, &settings());
+            if frame.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let frame = frame.expect("a skin is loaded");
         assert_eq!((frame.width(), frame.height()), (240, 280));
         assert!(frame.get_pixel(120, 140).0[3] > 0, "the body is opaque in the middle");
         assert_eq!(frame.get_pixel(2, 2).0[3], 0, "the corner is empty");
@@ -470,7 +529,7 @@ mod tests {
             let raster = RasterSettings::for_modes(1000, 460, preview.aa_mode, preview.msaa_samples, preview.texel_aa_mode);
             let started = std::time::Instant::now();
             let skin = session.state.skin_sample.clone().unwrap();
-            let _ = render_scenes(&[(1.0, scene.triangles.as_slice())], &skin, None, raster);
+            let _ = super::super::skins_raster::render_scenes(&[(1.0, scene.triangles.as_slice())], &skin, None, raster);
             println!("msaa {samples}: {} tris, scene {built:?}, raster {:?}", scene.triangles.len(), started.elapsed());
         }
     }

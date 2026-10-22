@@ -6,7 +6,7 @@ use std::time::Duration;
 use launcher_ui::screens::AppScreen;
 use launcher_ui::screens::content_browser_api as api;
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, Border, ChildAlignment, Clip, CornerRadius, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -90,10 +90,16 @@ fn browse(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, instance_root: &
     controls(ui, kit, state);
     if let Some(progress) = api::searching(&state.content) {
         kit.text(ui, TextRole::Muted, &progress);
+        kit.progress(
+            ui,
+            "content::search-progress",
+            api::search_fraction(&state.content),
+            kit::uptime(),
+        );
     }
     let groups = api::results(&mut state.content, instance_root);
-    if groups.is_empty() {
-        kit.text(ui, TextRole::Muted, api::empty_message(&state.content));
+    if groups.is_empty() && api::searching(&state.content).is_none() {
+        kit.text_wrapped(ui, TextRole::Muted, api::empty_message(&state.content));
     }
     let mut open = None;
     let mut install = None;
@@ -154,21 +160,18 @@ fn controls(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     let (mut version, mut scope, mut sort, mut loader) =
         (current.version, current.scope, current.sort, current.loader);
     {
+        // One line: the four dropdowns split its width equally.
         let _row = kit.row(ui, kit::SPACE_MD);
-        if let Some(index) = kit.dropdown(ui, "content::version", version, &current.versions, 220.0)
-        {
+        if let Some(index) = kit.dropdown_grow(ui, "content::version", version, &current.versions) {
             version = index;
         }
-        if let Some(index) = kit.dropdown(ui, "content::scope", scope, &current.scopes, 170.0) {
+        if let Some(index) = kit.dropdown_grow(ui, "content::scope", scope, &current.scopes) {
             scope = index;
         }
-    }
-    {
-        let _row = kit.row(ui, kit::SPACE_MD);
-        if let Some(index) = kit.dropdown(ui, "content::sort", sort, &current.sorts, 170.0) {
+        if let Some(index) = kit.dropdown_grow(ui, "content::sort", sort, &current.sorts) {
             sort = index;
         }
-        if let Some(index) = kit.dropdown(ui, "content::loader", loader, &current.loaders, 150.0) {
+        if let Some(index) = kit.dropdown_grow(ui, "content::loader", loader, &current.loaders) {
             loader = index;
         }
     }
@@ -204,8 +207,7 @@ fn result_tile(ui: &mut Ui<'_>, kit: &mut Kit, tile: &api::TileView) -> (bool, b
                         kit.palette.border_muted
                     },
                     1,
-                ))
-                .cursor(Cursor::Pointer),
+                )),
         );
         content_icon(ui, kit, &format!("{id}::icon"), tile, 56.0, SCROLL_ID);
         {
@@ -317,12 +319,7 @@ fn icon_button(ui: &mut Ui<'_>, kit: &Kit, id: &str, icon: Icon, enabled: bool) 
             } else {
                 kit.palette.bg_light
             })
-            .corner_radius(CornerRadius::all(8.0))
-            .cursor(if enabled {
-                Cursor::Pointer
-            } else {
-                Cursor::NotAllowed
-            }),
+            .corner_radius(CornerRadius::all(8.0)),
     );
     kit.icon(
         ui,
@@ -382,14 +379,7 @@ fn pagination(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     }
     kit.text(ui, TextRole::Muted, "Page");
     let mut text = page.to_string();
-    kit.text_field(
-        ui,
-        "content::page",
-        &mut text,
-        "1",
-        false,
-        Sizing::Fixed(72.0),
-    );
+    kit.number_text_field(ui, "content::page", &mut text, 72.0, false, false);
     let typed = text.trim().parse::<u32>().ok();
     if kit.button(
         ui,
@@ -400,7 +390,13 @@ fn pagination(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     ) {
         target = typed;
     }
-    if kit.button(ui, "content::next", "Next", ButtonKind::Neutral, !searching) {
+    if kit.button(
+        ui,
+        "content::next",
+        "Next",
+        ButtonKind::Neutral,
+        !searching && api::has_next_page(&state.content),
+    ) {
         target = Some(page + 1);
     }
     kit.text(ui, TextRole::Muted, &format!("Current: {page}"));

@@ -10,7 +10,7 @@ use vertex_shell::sturdy::assets::{
 };
 use vertex_shell::sturdy::glam::Vec2;
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, AttachPoint, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction,
+    AlignX, AlignY, AttachPoint, Border, ChildAlignment, Clip, CornerRadius, Direction,
     ElementDesc, FloatTarget, Floating, Padding, Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -44,6 +44,11 @@ pub struct SkinsView {
     last_pointer_x: f32,
     /// The preview generation last uploaded.
     uploaded: u64,
+    /// Preview textures replaced by one of a new size that the engine would not release yet (a frame still using
+    /// them), to be released later rather than forgotten.
+    retired: Vec<Asset>,
+    /// How many preview textures have been created, so each has its own name.
+    created: u64,
 }
 
 impl SkinsView {
@@ -52,8 +57,9 @@ impl SkinsView {
         if self.shown {
             self.shown = false;
             self.dragging = false;
-            if let Some(texture) = self.texture.take() {
-                let _ = ui.engine().assets().unload(texture.asset);
+            let assets = self.texture.take().map(|texture| texture.asset);
+            for asset in assets.into_iter().chain(std::mem::take(&mut self.retired)) {
+                let _ = ui.engine().assets().unload(asset);
             }
         }
     }
@@ -228,7 +234,6 @@ fn preview(
             .background(kit.palette.bg_light)
             .corner_radius(CornerRadius::all(8.0))
             .border(Border::all(kit.palette.border_muted, 1))
-            .cursor(Cursor::Default)
             .clip(Clip::both()),
     );
     match (&frame, &view.texture) {
@@ -266,6 +271,9 @@ fn preview(
                 // Not capturing: a capturing float swallows the mouse wheel, so scrolling stuck while the cursor was
                 // over a button. The canvas ignores presses that start on these buttons (`over_controls`).
                 capture_pointer: false,
+                // Clipped by the page like everything else, so the buttons do not draw over the window's edge or the
+                // title bar when the page is scrolled.
+                clip_to_target: true,
                 ..Floating::new(FloatTarget::Element(CANVAS_ID.to_owned()))
             })),
     );
@@ -334,9 +342,19 @@ fn upload(ui: &mut Ui<'_>, view: &mut SkinsView, frame: &image::RgbaImage) {
         return;
     }
     let mut assets = engine.assets();
-    if let Some(old) = view.texture.take() {
-        let _ = assets.unload(old.asset);
+    // Release what could not be released earlier, then the texture being replaced; whatever the engine still holds
+    // is kept and tried again on the next upload.
+    let mut pending = std::mem::take(&mut view.retired);
+    pending.extend(view.texture.take().map(|old| old.asset));
+    for asset in pending {
+        if assets.unload(asset).is_err() && assets.contains(asset) {
+            view.retired.push(asset);
+        }
     }
+    // A name of its own: resizing quickly replaces the texture again and again, and a new texture with the name of
+    // one the engine has not finished releasing can be refused, which left the canvas without a picture.
+    view.created += 1;
+    let label = format!("skins/preview/{}", view.created);
     // Per-frame textures are created uncompressed and without mips, as `update_texture` requires.
     let created = assets
         .create_texture_sampled(
@@ -346,7 +364,7 @@ fn upload(ui: &mut Ui<'_>, view: &mut SkinsView, frame: &image::RgbaImage) {
             TexturePixelFormat::Rgba8,
             TextureColorSpace::Srgb,
             TextureKind::ColorAlpha,
-            "skins/preview",
+            &label,
             false,
             false,
             true,
@@ -399,8 +417,7 @@ fn drop_zone(
                         kit.palette.border_muted
                     },
                     2,
-                ))
-                .cursor(Cursor::Pointer),
+                )),
         );
         kit.text(ui, TextRole::Heading, "Drag Skin Image here");
         kit.text(ui, TextRole::Muted, "or");
@@ -416,7 +433,7 @@ fn drop_zone(
             open_picker(file_dialogs);
         }
     }
-    if ui.clicked(zone_id) && !ui.hovered("skins::choose") && !skins.picking() {
+    if kit.clicked_plain(ui, zone_id) && !ui.hovered("skins::choose") && !skins.picking() {
         open_picker(file_dialogs);
     }
     if skins.picking() {
@@ -560,8 +577,7 @@ fn cape_tile(
                         kit.palette.border_muted
                     },
                     if selected { 2 } else { 1 },
-                ))
-                .cursor(Cursor::Pointer),
+                )),
         );
         {
             // The picture box; "No Cape" is an empty outlined box, a cape shows its outer face.

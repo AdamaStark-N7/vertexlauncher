@@ -5,10 +5,10 @@ use instances::InstanceRecord;
 use launcher_ui::screens::AppScreen;
 use vertex_shell::sturdy::glam::Vec4;
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc, Padding,
-    Sizing, TextStyle, TextWrap, Ui,
+    AlignX, AlignY, AttachPoint, Border, ChildAlignment, CornerRadius, Direction, ElementDesc,
+    FloatTarget, Floating, Padding, Sizing, Ui,
 };
-use vertex_shell::sturdy::ui_kit::{self, MenuItem, PopupStyle};
+use vertex_shell::sturdy::ui_kit::{self, PopupStyle};
 
 use super::icons::Icon;
 use super::images::ImageSource;
@@ -18,10 +18,12 @@ use super::{AppState, Dialog, accounts, screens};
 pub const TITLE_BAR_ID: &str = "chrome::title-bar";
 const MINIMIZE_ID: &str = "chrome::minimize";
 const MAXIMIZE_ID: &str = "chrome::maximize";
+const FULLSCREEN_ID: &str = "chrome::fullscreen";
 const CLOSE_ID: &str = "chrome::close";
 const ACCOUNT_ID: &str = "chrome::account";
 /// Title-bar elements that must stay clickable instead of dragging the window.
-pub const TITLE_BAR_CONTROLS: [&str; 5] = [
+pub const TITLE_BAR_CONTROLS: [&str; 6] = [
+    FULLSCREEN_ID,
     MINIMIZE_ID,
     MAXIMIZE_ID,
     CLOSE_ID,
@@ -31,10 +33,42 @@ pub const TITLE_BAR_CONTROLS: [&str; 5] = [
 const TITLE_BAR_HEIGHT: f32 = 42.0;
 pub const SIDEBAR_WIDTH: f32 = 68.0;
 
+/// The height below the title bar, inside the window's border: what the sidebar and the page area have.
+fn body_height(ui: &Ui<'_>, border: f32) -> f32 {
+    (ui.viewport_size().y - TITLE_BAR_HEIGHT - 2.0 * border).max(0.0)
+}
+
+/// Goes fullscreen in the chosen style, or back to a window when already fullscreen.
+pub fn toggle_fullscreen(style: config::FullscreenStyle) {
+    use vertex_shell::Fullscreen;
+    if vertex_shell::fullscreen() != Fullscreen::Off {
+        vertex_shell::request_fullscreen(Fullscreen::Off);
+        return;
+    }
+    enter_fullscreen(style);
+    // Fullscreen hides the window's controls, so say how to leave it. (Not when it was the "start in fullscreen"
+    // setting that did it: that is a choice made in advance.)
+    launcher_ui::notification::info!(
+        "fullscreen",
+        "Vertex is fullscreen. Press Escape (or F11) to leave fullscreen."
+    );
+}
+
+/// Takes the window fullscreen in `style`.
+pub fn enter_fullscreen(style: config::FullscreenStyle) {
+    use vertex_shell::Fullscreen;
+    vertex_shell::request_fullscreen(match style {
+        config::FullscreenStyle::Borderless => Fullscreen::Borderless,
+        config::FullscreenStyle::Exclusive => Fullscreen::Exclusive,
+    });
+}
+
 /// The whole window: title bar on top, sidebar and the active screen below.
 pub fn window(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bool) {
     // Rounded corners need a see-through window; an opaque one would show square corners behind them.
-    let rounded = !maximized
+    // A fullscreen window fills the screen exactly, like a maximized one: no rounded corners, no border.
+    let maximized_or_fullscreen = maximized || vertex_shell::fullscreen() != vertex_shell::Fullscreen::Off;
+    let rounded = !maximized_or_fullscreen
         && (state.config.window_transparency().is_translucent()
             || state.config.window_corner_radius() > 0);
     let radius = if rounded {
@@ -42,6 +76,9 @@ pub fn window(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: b
     } else {
         0.0
     };
+    // The window's border is the same 1 px on every side. It is drawn over the edge of the root, so everything inside
+    // is inset by it, and the widths below, which come from the window's width, leave room for it on both sides.
+    let border = if maximized_or_fullscreen { 0.0 } else { 1.0 };
     let _root = ui.element(
         &ElementDesc::new()
             .id("chrome::root".into())
@@ -50,26 +87,26 @@ pub fn window(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: b
             .direction(Direction::TopToBottom)
             // Inside the border, which is drawn over the element's edge, so children (the close button's hover fill)
             // cannot cover it.
-            .padding(Padding::all(if maximized { 0 } else { 1 }))
+            .padding(Padding::all(border as u16))
             .background(kit.palette.bg)
             .corner_radius(CornerRadius::all(radius))
-            .border(Border::all(
-                kit.palette.border_muted,
-                if maximized { 0 } else { 1 },
-            )),
+            .border(Border::all(kit.palette.border_muted, border as u16)),
     );
     title_bar(ui, kit, state, maximized, radius);
     // Fixed to the window's width rather than growing: a fixed size caps the minimum size Clay passes up, so a screen
     // with something too wide cannot stretch the layout (and the title bar's buttons) past the window edge. (Clipping
     // would do that too, but a clipped axis is a scroll container, which stops squeezing its children at all.)
+    // The height is fixed to the window's too, for the same reason as the width: a page that is taller than its space
+    // (a long list of mods) must scroll inside it, never stretch the layout, and with it the page's scroll area, past
+    // the bottom of the window.
     let _body = ui.element(
         &ElementDesc::new()
-            .width(Sizing::Fixed(ui.viewport_size().x))
-            .height(Sizing::Grow)
+            .width(Sizing::Fixed((ui.viewport_size().x - 2.0 * border).max(0.0)))
+            .height(Sizing::Fixed(body_height(ui, border)))
             .direction(Direction::LeftToRight),
     );
     sidebar(ui, kit, state, radius);
-    content(ui, kit, state, radius);
+    content(ui, kit, state, border);
 }
 
 fn title_bar(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bool, radius: f32) {
@@ -106,19 +143,29 @@ fn title_bar(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bo
         kit.fill(ui);
         active_user_button(ui, kit, state);
         account_button(ui, kit, state);
-        window_button(ui, kit, MINIMIZE_ID, Some(Icon::Minus), false, 0.0);
-        window_button(
-            ui,
-            kit,
-            MAXIMIZE_ID,
-            maximized.then_some(Icon::Restore),
-            false,
-            0.0,
-        );
-        window_button(ui, kit, CLOSE_ID, Some(Icon::Close), true, radius);
+        // Fullscreen, the window's own controls are hidden (F11 leaves fullscreen).
+        if vertex_shell::fullscreen() == vertex_shell::Fullscreen::Off {
+            window_button(ui, kit, FULLSCREEN_ID, Some(Icon::ArrowsMaximize), false, 0.0);
+            window_button(ui, kit, MINIMIZE_ID, Some(Icon::Minus), false, 0.0);
+            window_button(
+                ui,
+                kit,
+                MAXIMIZE_ID,
+                maximized.then_some(Icon::Restore),
+                false,
+                0.0,
+            );
+            window_button(ui, kit, CLOSE_ID, Some(Icon::Close), true, radius);
+        }
+    }
+    // The controls only exist outside fullscreen; asking about them there would put invisible buttons in the keyboard
+    // focus order.
+    let controls_shown = vertex_shell::fullscreen() == vertex_shell::Fullscreen::Off;
+    if controls_shown && kit.clicked_with_default_cursor(ui, FULLSCREEN_ID) {
+        toggle_fullscreen(state.config.fullscreen_style());
     }
     for id in [MINIMIZE_ID, MAXIMIZE_ID, CLOSE_ID] {
-        if !kit.clicked(ui, id) {
+        if !controls_shown || !kit.clicked_with_default_cursor(ui, id) {
             continue;
         }
         let mut engine = ui.engine();
@@ -134,6 +181,15 @@ fn title_bar(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, maximized: bo
             }
         }
     }
+    kit.tooltip(
+        ui,
+        FULLSCREEN_ID,
+        if vertex_shell::fullscreen() == vertex_shell::Fullscreen::Off {
+            "Fullscreen (F11)"
+        } else {
+            "Exit fullscreen (F11)"
+        },
+    );
     kit.tooltip(ui, MINIMIZE_ID, "Minimize");
     kit.tooltip(
         ui,
@@ -178,8 +234,7 @@ fn active_user_button(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
                 } else {
                     kit.palette.bg_light
                 })
-                .corner_radius(CornerRadius::all(8.0))
-                .cursor(Cursor::Pointer),
+                .corner_radius(CornerRadius::all(8.0)),
         );
         kit.icon(ui, Icon::Terminal2, 16.0, kit.palette.text);
         launcher_ui::privacy::without_name_scrubbing(|| {
@@ -249,8 +304,7 @@ fn window_button(
             .corner_radius(CornerRadius {
                 top_right: (top_right_radius - 1.0).max(0.0),
                 ..CornerRadius::default()
-            })
-            .cursor(Cursor::Pointer),
+            }),
     );
     let color = if hovered && danger {
         kit.palette.on_primary
@@ -287,8 +341,7 @@ fn account_button(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
                 } else {
                     kit.palette.bg_light
                 })
-                .corner_radius(CornerRadius::all(10.0))
-                .cursor(Cursor::Pointer),
+                .corner_radius(CornerRadius::all(10.0)),
         );
         if let Some(avatar) = state
             .auth
@@ -334,10 +387,9 @@ fn sidebar(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, radius: f32) {
                     bottom_left: radius,
                     ..CornerRadius::all(0.0)
                 })
-                .border(Border {
-                    right: 1,
-                    ..Border::all(kit.palette.border_muted, 0)
-                }),
+                // No border of its own: the line between the sidebar and the page is drawn by `page_edge`, which
+                // bends it round the page's rounded corner instead of running it straight up past the curve.
+                .border(Border::default()),
         );
         for screen in AppScreen::FIXED_NAV {
             let selected = state.screen == screen
@@ -503,22 +555,114 @@ fn instance_context_menu(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
 
 // -- Content ------------------------------------------------------------------------------------------------------
 
-fn content(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, radius: f32) {
-    // Clipping is rectangular, so scrolled content would poke out past the window's rounded bottom corners; stop it
-    // above the corner band instead.
+/// Radius of the rounded inside corner where the title bar meets the sidebar.
+const INNER_CORNER: f32 = 14.0;
+
+/// The line that frames the page: down the sidebar's right side, round the page's rounded corner, and along the title
+/// bar's bottom edge to the window's right side, hugging the outside of the page's outline the whole way.
+fn page_edge(ui: &mut Ui<'_>, kit: &Kit, border: f32) {
+    use vertex_shell::sturdy::glam::Vec2;
+    let r = INNER_CORNER;
+    let page_width = (ui.viewport_size().x - 2.0 * border - SIDEBAR_WIDTH).max(r);
+    let page_height = (ui.viewport_size().y - TITLE_BAR_HEIGHT - 2.0 * border).max(r);
+    // The box starts one pixel above and to the left of the page, so the one-pixel line sits just outside it. The page's
+    // corner is a circle of radius `r` centred at (r + 1, r + 1) here; the line is half a pixel outside that.
+    let (width, height) = (page_width + 1.0, page_height + 1.0);
+    let centre = Vec2::splat(r + 1.0);
+    let mut points = vec![Vec2::new(0.5, height), Vec2::new(0.5, centre.y)];
+    const STEPS: usize = 32;
+    for step in 1..STEPS {
+        let angle = std::f32::consts::FRAC_PI_2 * step as f32 / STEPS as f32;
+        points.push(centre - Vec2::new(angle.cos(), angle.sin()) * (r + 0.5));
+    }
+    points.push(Vec2::new(centre.x, 0.5));
+    points.push(Vec2::new(width, 0.5));
+    // A floating box that holds the line, rather than the line's own leaf element being the floating one.
+    let _box = ui.element(
+        &ElementDesc::new()
+            .id("chrome::page-edge".into())
+            .width(Sizing::Fixed(width))
+            .height(Sizing::Fixed(height))
+            .floating(Some(Floating {
+                element_attach_point: AttachPoint::LeftTop,
+                parent_attach_point: AttachPoint::LeftTop,
+                offset: Vec2::new(-1.0, -1.0),
+                z_index: 1,
+                capture_pointer: false,
+                ..Floating::new(FloatTarget::Parent)
+            })),
+    );
+    ui.stroke_polyline(
+        &ElementDesc::new()
+            .id("chrome::page-edge::line".into())
+            .width(Sizing::Fixed(width))
+            .height(Sizing::Fixed(height)),
+        &points,
+        vertex_shell::sturdy::ui::StrokeStyle {
+            color: kit.palette.border_muted,
+            width: 1.0,
+            // Soft edges: the default is none, which draws the curve jagged.
+            feather_px: 1.0,
+            ..Default::default()
+        },
+    );
+}
+
+/// Rounds the corner of the page area where the title bar and the sidebar meet: the two dark bars form an L around the
+/// page, and its inside corner is filled in the bars' colour with a quarter circle cut out, so the page looks rounded
+/// there. Call it inside the page area's element.
+fn inner_corner(ui: &mut Ui<'_>, kit: &Kit, border: f32) {
+    use std::f32::consts::PI;
+    let r = INNER_CORNER;
+    page_edge(ui, kit, border);
+    let _square = ui.element(
+        &ElementDesc::new()
+            .id("chrome::inner-corner".into())
+            .width(Sizing::Fixed(r))
+            .height(Sizing::Fixed(r))
+            // The ring segment reaches past the square; clipping to it keeps it to the corner's own area.
+            .clip(vertex_shell::sturdy::ui::Clip::both())
+            .floating(Some(Floating {
+                element_attach_point: AttachPoint::LeftTop,
+                parent_attach_point: AttachPoint::LeftTop,
+                z_index: 1,
+                capture_pointer: false,
+                ..Floating::new(FloatTarget::Parent)
+            })),
+    );
+    ui.fill_sectors(
+        &ElementDesc::new()
+            .id("chrome::inner-corner::fill".into())
+            .width(Sizing::Fixed(r))
+            .height(Sizing::Fixed(r)),
+        &[vertex_shell::sturdy::ui::Sector {
+            center: vertex_shell::sturdy::glam::Vec2::new(r, r),
+            inner_radius: r,
+            outer_radius: r * 1.5,
+            start_angle: PI,
+            end_angle: PI * 1.5,
+            // The same colour the title bar and the sidebar are drawn in.
+            color: kit.palette.bg_dark.with_w(kit.palette.bg.w),
+            feather_px: 1.0,
+        }],
+    );
+}
+
+fn content(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, border: f32) {
+    // Pages run to the very bottom of the window and are clipped there. Clipping is rectangular, so it cannot follow
+    // the window's rounded bottom-right corner, but nothing needs it to: a page keeps SPACE_XL (24 px) clear of the
+    // right edge, and a corner of the largest radius (28 px) is still clear of anything that far in. (The bottom-left
+    // corner belongs to the sidebar.) The corner therefore never changes a page's layout.
     let _content = ui.element(
         &ElementDesc::new()
             .id("chrome::content".into())
             .width(Sizing::Fixed(
-                (ui.viewport_size().x - SIDEBAR_WIDTH).max(0.0),
+                (ui.viewport_size().x - 2.0 * border - SIDEBAR_WIDTH).max(0.0),
             ))
-            .height(Sizing::Grow)
-            .padding(Padding {
-                bottom: radius as u16,
-                ..Padding::default()
-            })
+            .height(Sizing::Fixed(body_height(ui, border)))
             .direction(Direction::TopToBottom),
     );
+    inner_corner(ui, kit, border);
     if state.screen != AppScreen::Skins {
         // The preview texture is only kept while the screen is showing.
         state.skins_view.hidden(ui);

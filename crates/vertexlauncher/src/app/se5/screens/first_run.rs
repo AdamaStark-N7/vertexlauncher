@@ -2,7 +2,7 @@
 
 use config::{ConfigFormat, create_default_config};
 use vertex_shell::sturdy::ui::{Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::kit::{self, ButtonKind, Kit, TextRole};
 use super::super::{AppState, Dialog};

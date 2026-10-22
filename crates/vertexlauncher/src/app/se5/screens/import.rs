@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use launcher_ui::file_dialog::{Dialog as PickerDialog, Pick};
 use vertex_shell::sturdy::ui::{Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::super::import_flow::ManualDownloadContinuation;
 use super::super::super::import_instance_modal::{

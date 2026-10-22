@@ -259,9 +259,24 @@ pub fn searching(state: &ContentBrowserState) -> Option<String> {
 pub fn empty_message(state: &ContentBrowserState) -> &'static str {
     if state.search_in_flight {
         "Searching content..."
+    } else if state.active_search_request.is_some() {
+        "No content was found for this search. Try different words, another version or loader, or another content type."
     } else {
         "No results yet. Search to browse installable content."
     }
+}
+
+/// Whether a further page can have content: the search is done and this page came back full. (Providers do not say
+/// how many results exist in total, so a short page is the sign of the last one.)
+pub fn has_next_page(state: &ContentBrowserState) -> bool {
+    !state.search_in_flight
+        && state.results.entries.len() as u32 >= super::CONTENT_SEARCH_PER_PROVIDER_LIMIT
+}
+
+/// Fraction of the search that has finished, if one is running.
+pub fn search_fraction(state: &ContentBrowserState) -> Option<f32> {
+    (state.search_in_flight && state.search_total_tasks > 0)
+        .then(|| (state.search_completed_tasks as f32 / state.search_total_tasks as f32).clamp(0.0, 1.0))
 }
 
 /// Results grouped by content type, with "installed" and "downloading" marks.

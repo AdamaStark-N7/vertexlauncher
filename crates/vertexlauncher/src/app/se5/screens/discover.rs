@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use launcher_ui::screens::{AppScreen, discover_api as api};
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -151,28 +151,18 @@ fn filters(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     );
     {
         let _row = kit.row(ui, kit::SPACE_MD);
-        if let Some(index) = kit.dropdown(
-            ui,
-            "discover::provider",
-            provider,
-            &current.providers,
-            190.0,
-        ) {
+        if let Some(index) = kit.dropdown_grow(ui, "discover::provider", provider, &current.providers) {
             provider = index;
         }
-        if let Some(index) = kit.dropdown(ui, "discover::loader", loader, &current.loaders, 190.0) {
+        if let Some(index) = kit.dropdown_grow(ui, "discover::loader", loader, &current.loaders) {
             loader = index;
         }
-        if let Some(index) = kit.dropdown(ui, "discover::sort", sort, &current.sorts, 190.0) {
+        if let Some(index) = kit.dropdown_grow(ui, "discover::sort", sort, &current.sorts) {
             sort = index;
         }
-        if let Some(index) = kit.dropdown(
-            ui,
-            "discover::game-version",
-            game_version,
-            &current.game_versions,
-            220.0,
-        ) {
+        if let Some(index) =
+            kit.dropdown_grow(ui, "discover::game-version", game_version, &current.game_versions)
+        {
             game_version = index;
         }
     }
@@ -209,8 +199,7 @@ fn tile(ui: &mut Ui<'_>, kit: &mut Kit, entry: &api::EntryView, column: usize, w
                         kit.palette.border_muted
                     },
                     1,
-                ))
-                .cursor(Cursor::Pointer),
+                )),
         );
         {
             let _head = kit.row(ui, kit::SPACE_MD);

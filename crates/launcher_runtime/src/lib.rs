@@ -7,8 +7,12 @@ use std::{
     task::{Context, Poll},
 };
 
+mod compute;
 mod memory;
 mod worker_channel;
+pub use compute::{
+    ComputeBackend, ComputeFuture, ComputeHandle, compute_workers, install_compute_backend, spawn_compute,
+};
 pub use memory::{BlockingGate, BlockingGatePermit, release_memory_to_os};
 pub use worker_channel::{Drained, WorkerChannel};
 

@@ -11,10 +11,10 @@ use installation::{
 use instances::{InstanceRecord, instance_root_path};
 use launcher_ui::{desktop, notification};
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, Border, ChildAlignment, CornerRadius, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::icons::Icon;
 use super::super::kit::{self, ButtonKind, Kit, TextRole};
@@ -329,8 +329,7 @@ fn card(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState, instance: &Instanc
                     kit.palette.bg
                 })
                 .corner_radius(CornerRadius::all(kit::CORNER))
-                .border(Border::all(border, 1))
-                .cursor(Cursor::Pointer),
+                .border(Border::all(border, 1)),
         );
         {
             let _head = kit.row(ui, kit::SPACE_MD);

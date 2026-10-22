@@ -52,6 +52,8 @@ pub(super) struct SkinManagerState {
     pub(super) camera_yaw_offset: f32,
     pub(super) camera_inertial_velocity: f32,
     pub(super) camera_drag_velocity: f32,
+    /// Seconds the pointer has been still during the current drag.
+    pub(super) camera_drag_idle_secs: f32,
     pub(super) camera_drag_active: bool,
     pub(super) orbit_pause_started_at: Option<f64>,
     pub(super) orbit_pause_accumulated_secs: f64,
@@ -111,6 +113,7 @@ impl Default for SkinManagerState {
             camera_yaw_offset: 0.0,
             camera_inertial_velocity: 0.0,
             camera_drag_velocity: 0.0,
+            camera_drag_idle_secs: 0.0,
             camera_drag_active: false,
             orbit_pause_started_at: None,
             orbit_pause_accumulated_secs: 0.0,
@@ -180,6 +183,7 @@ impl SkinManagerState {
         self.camera_yaw_offset = 0.0;
         self.camera_inertial_velocity = 0.0;
         self.camera_drag_velocity = 0.0;
+        self.camera_drag_idle_secs = 0.0;
         self.camera_drag_active = false;
         self.orbit_pause_started_at = None;
         self.orbit_pause_accumulated_secs = 0.0;
@@ -302,7 +306,10 @@ impl SkinManagerState {
                             notification::error!("skin_manager", "{err}");
                         }
                     }
+                    // The worker is done and its sender gone: stop here, or the next read finds the channel closed and
+                    // reports that as a failure.
                     keep_rx = false;
+                    break;
                 }
                 Ok(WorkerEvent::Saved(result)) => {
                     tracing::info!(
@@ -334,6 +341,7 @@ impl SkinManagerState {
                         }
                     }
                     keep_rx = false;
+                    break;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {

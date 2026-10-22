@@ -57,6 +57,7 @@ pub fn frame(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         skins,
         dialog,
         calibration,
+        console,
         ..
     } = state;
     let Some(navigator) = gamepad.navigator.as_mut() else {
@@ -74,13 +75,11 @@ pub fn frame(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     };
     if *screen == AppScreen::Console {
         // The right stick always drives the console log, whatever has focus.
+        let lines_id = console.active_lines_id().to_owned();
         if poll.scroll.y != 0.0
-            && let Some(metrics) = ui.scroll_metrics(super::screens::console::LINES_ID)
+            && let Some(metrics) = ui.scroll_metrics(&lines_id)
         {
-            ui.set_scroll_offset(
-                super::screens::console::LINES_ID,
-                metrics.offset + Vec2::new(0.0, poll.scroll.y),
-            );
+            ui.set_scroll_offset(&lines_id, metrics.offset + Vec2::new(0.0, poll.scroll.y));
         }
     } else {
         input.scroll = Vec2::new(poll.scroll.x, poll.scroll.y);

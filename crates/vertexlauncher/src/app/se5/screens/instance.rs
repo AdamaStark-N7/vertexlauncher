@@ -11,7 +11,7 @@ use launcher_ui::screens::AppScreen;
 use launcher_ui::screens::instance_api::{self as api, InstanceScreenTab};
 use vertex_shell::sturdy::glam::Vec4;
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, Border, ChildAlignment, Clip, CornerRadius, Cursor, Direction, ElementDesc,
+    AlignX, AlignY, Border, ChildAlignment, Clip, CornerRadius, Direction, ElementDesc,
     Padding, Sizing, TextStyle, TextWrap, Ui,
 };
 use vertex_shell::sturdy::ui_kit::{self, PopupStyle};
@@ -545,8 +545,7 @@ fn content_row(
                     kit.palette.bg
                 })
                 .corner_radius(CornerRadius::all(kit::CORNER))
-                .border(Border::all(kit.palette.border_muted, 1))
-                .cursor(Cursor::Pointer),
+                .border(Border::all(kit.palette.border_muted, 1)),
         );
         match row.icon_url.clone().filter(|url| !url.trim().is_empty()) {
             Some(url) if !kit.images.failed(&format!("remote::{url}")) => {
@@ -612,12 +611,7 @@ fn content_row(
                                 } else {
                                     0.28
                                 }))
-                                .corner_radius(CornerRadius::all(7.0))
-                                .cursor(if apply_busy {
-                                    Cursor::NotAllowed
-                                } else {
-                                    Cursor::Pointer
-                                }),
+                                .corner_radius(CornerRadius::all(7.0)),
                         );
                         kit.text(ui, TextRole::Small, update);
                     }
@@ -669,8 +663,7 @@ fn content_row(
                     } else {
                         kit.palette.bg_light
                     })
-                    .corner_radius(CornerRadius::all(8.0))
-                    .cursor(Cursor::Pointer),
+                    .corner_radius(CornerRadius::all(8.0)),
             );
             kit.icon(ui, Icon::Trash, 16.0, kit.palette.danger);
         }
@@ -692,9 +685,9 @@ fn content_row(
     }
     if toggled {
         RowAction::Toggle
-    } else if ui.clicked(&delete_id) && !apply_busy {
+    } else if !apply_busy && kit.clicked_plain(ui, &delete_id) {
         RowAction::Delete
-    } else if row.update_label.is_some() && ui.clicked(&update_id) && !apply_busy {
+    } else if row.update_label.is_some() && !apply_busy && kit.clicked_plain(ui, &update_id) {
         RowAction::Update
     } else if kit.clicked(ui, &id)
         && !ui.hovered(&delete_id)

@@ -2,7 +2,7 @@
 //! the thresholds so navigation matches this particular controller.
 
 use vertex_shell::sturdy::ui::{Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::super::gamepad_calibration_modal::ModalAction;
 use super::super::AppState;

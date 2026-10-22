@@ -214,7 +214,10 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
                 ui,
                 kit,
                 &mut state.config,
-                &[ToggleSettingId::FollowConsoleOnLaunch],
+                &[
+                    ToggleSettingId::FollowConsoleOnLaunch,
+                    ToggleSettingId::SteamDeckHandoff,
+                ],
             );
         },
     );
@@ -419,6 +422,30 @@ fn appearance(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
     ) {
         state.config.set_window_transparency(value);
     }
+    if let Some(style) = kit.choice_setting(
+        ui,
+        "settings::fullscreen-style",
+        "Fullscreen Style",
+        Some("How F11 and the title bar's fullscreen button take the window fullscreen. Borderless covers the screen without changing the display mode, so it switches instantly. Exclusive takes over the display and its video mode where the system supports it. Default: Borderless."),
+        state.config.fullscreen_style(),
+        &config::FullscreenStyle::ALL,
+        |style| style.label().to_owned(),
+    ) {
+        state.config.set_fullscreen_style(style);
+        // Already fullscreen: switch to the new style right away.
+        if vertex_shell::fullscreen() != vertex_shell::Fullscreen::Off {
+            vertex_shell::request_fullscreen(match style {
+                config::FullscreenStyle::Borderless => vertex_shell::Fullscreen::Borderless,
+                config::FullscreenStyle::Exclusive => vertex_shell::Fullscreen::Exclusive,
+            });
+        }
+    }
+    toggles(
+        ui,
+        kit,
+        &mut state.config,
+        &[ToggleSettingId::StartFullscreen],
+    );
     let translucent = state.config.window_transparency().is_translucent();
     if let Some(value) = kit.slider_setting_ex(
         ui,
@@ -1141,6 +1168,10 @@ fn downloads(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
             "250Mbps",
             false,
         ) {
+            // Digits, a decimal point, the unit's letters and its "/" ("30MB/s"): nothing else can be part of a speed.
+            kit.restrict_text("settings::speed-limit", &mut speed, |ch| {
+                ch.is_ascii_alphanumeric() || matches!(ch, '.' | '/' | ' ')
+            });
             *state.config.download_speed_limit_mut() = speed;
         }
         let value = state.config.download_speed_limit().trim().to_owned();

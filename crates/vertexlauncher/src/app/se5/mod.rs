@@ -61,7 +61,12 @@ use self::kit::Kit;
 pub(super) fn run(config_state: LoadConfigResult) -> ExitCode {
     let (mut config, first_run_format) = match config_state {
         LoadConfigResult::Loaded(config) => (config, None),
-        LoadConfigResult::Missing { default_format } => (Config::default(), Some(default_format)),
+        LoadConfigResult::Missing { default_format } => {
+            let mut config = Config::default();
+            // A Steam Deck's game mode needs the window out of the game's way, so a first run there has it on.
+            config.set_steam_deck_handoff(config::running_on_steam_deck());
+            (config, Some(default_format))
+        }
     };
     config.normalize();
     // Read by account loading, so it is set before `AuthState::load`.
@@ -77,6 +82,16 @@ pub(super) fn run(config_state: LoadConfigResult) -> ExitCode {
         exit_snapshot.clone(),
     );
     launcher_ui::ui_waker::install(vertex_shell::wake);
+    vertex_shell::install_game_probe(|| !installation::running_instance_roots().is_empty());
+    // CPU-bound work (the skin preview's rasteriser, image decoding) runs on the UI engine's own task scheduler, so it
+    // uses exactly the machine's cores next to the engine's jobs instead of a second set of threads.
+    launcher_runtime::install_compute_backend(launcher_runtime::ComputeBackend {
+        spawn: |task| {
+            // Dropping the handle detaches the task; its result goes through its own channel.
+            drop(vertex_shell::sturdy::task::spawn(task));
+        },
+        workers: || vertex_shell::sturdy::diagnostics::worker_count() as usize,
+    });
     #[cfg(target_os = "macos")]
     super::app_icon::apply_macos_dock_icon();
 
@@ -394,7 +409,7 @@ impl AppState {
         let streamer_mode = self.streamer_mode();
         notification::set_streamer_mode(streamer_mode);
         // Everything the UI draws is filtered through this, so names stay hidden in streamer mode.
-        launcher_ui::privacy::update_hidden_names(streamer_mode, self.auth.account_names());
+        launcher_ui::privacy::update_hidden_accounts(streamer_mode, self.auth.account_identities());
         self.poll_screenshots();
     }
 
@@ -453,6 +468,10 @@ impl AppState {
 
     /// Handles what notification buttons and background code asked the UI to do.
     fn handle_commands(&mut self, ui: &mut Ui<'_>) {
+        // F11 toggles fullscreen, in the style chosen in Settings. (Read by the shell, which sees every tick.)
+        if vertex_shell::take_fullscreen_key() {
+            chrome::toggle_fullscreen(self.config.fullscreen_style());
+        }
         if let Some(tab) = launcher_ui::console::take_focus_request()
             && self.config.follow_console_on_launch()
         {
@@ -638,13 +657,9 @@ impl AppState {
         };
         match result {
             Applied::Ok => {}
+            // A fallback (blur unavailable, say) still leaves a working window; the reason goes to the log only.
             Applied::Degraded(reason) => {
-                notification::warn!(
-                    "settings",
-                    "The {} was applied with a fallback: {}",
-                    what,
-                    reason
-                )
+                tracing::info!(target: "vertexlauncher/se5/settings", "The {what} was applied with a fallback: {reason}");
             }
             Applied::Failed(reason) => {
                 notification::error!(
@@ -696,6 +711,8 @@ struct App {
     bridge: Arc<SettingsBridge>,
     last_frame: Instant,
     window_feedback: WindowFeedback,
+    /// The "start in fullscreen" setting has been acted on.
+    started_fullscreen: bool,
 }
 
 impl App {
@@ -799,6 +816,7 @@ impl App {
             bridge,
             last_frame: Instant::now(),
             window_feedback: WindowFeedback::default(),
+            started_fullscreen: false,
         }
     }
 
@@ -810,9 +828,29 @@ impl App {
         self.state.poll();
         self.state.handle_commands(ui);
         gamepad::frame(ui, &mut self.kit, &mut self.state);
+        let escape_seen = vertex_shell::take_escape_key();
+        let mut closed_a_menu = false;
         if self.kit.back_pressed() && self.state.close_popups(&mut self.kit) {
             self.kit.consume_back();
+            closed_a_menu = true;
         }
+        // Escape leaves fullscreen, but not in the same press that closed a menu, and not while a dialog is open (it
+        // takes Escape itself). The shell's view of the key covers a press in a tick the UI did not see.
+        if !closed_a_menu
+            && (self.kit.back_pressed() || escape_seen)
+            && vertex_shell::fullscreen() != vertex_shell::Fullscreen::Off
+            && self.state.dialog.is_none()
+        {
+            vertex_shell::request_fullscreen(vertex_shell::Fullscreen::Off);
+            self.kit.consume_back();
+        }
+        if !self.started_fullscreen {
+            self.started_fullscreen = true;
+            if self.state.config.start_fullscreen() {
+                chrome::enter_fullscreen(self.state.config.fullscreen_style());
+            }
+        }
+        vertex_shell::set_handoff(self.state.config.steam_deck_handoff());
         self.kit.images.pump(&mut ui.engine());
         self.kit.palette = Palette::new(
             &self.state.theme,
@@ -833,6 +871,7 @@ impl App {
         self.window_feedback.update(ui);
         screens::import::manual_download_dialog(ui, &mut self.kit, &mut self.state);
         update_hit_regions(ui);
+        self.kit.resolve_cursor(ui);
 
         self.state.commit(&self.bridge);
         if self.state.busy() {
@@ -990,7 +1029,8 @@ fn update_hit_regions(ui: &mut Ui<'_>) {
         return;
     };
     let regions = HitTestRegions {
-        enabled: true,
+        // Fullscreen, the title bar neither drags the window nor does its edge resize it.
+        enabled: vertex_shell::fullscreen() == vertex_shell::Fullscreen::Off,
         resize_border: 6,
         drag: vec![rect(bar)],
         no_drag: chrome::TITLE_BAR_CONTROLS

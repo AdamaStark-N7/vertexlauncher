@@ -26,6 +26,63 @@ mod discord_presence_manager;
 use self::desired_presence::DesiredPresence;
 pub use self::discord_presence_manager::DiscordPresenceManager;
 
+/// What the manager asks the task to do.
+enum Command {
+    Set(DesiredPresence),
+    Clear,
+}
+
+/// What the task reports back.
+enum Event {
+    Set {
+        desired: DesiredPresence,
+        result: Result<(), String>,
+    },
+    Cleared,
+}
+
+/// The background task that owns the Discord connection, and the ends of its two channels.
+pub(super) struct PresenceWorker {
+    commands: std::sync::mpsc::Sender<Command>,
+    events: std::sync::mpsc::Receiver<Event>,
+}
+
+impl PresenceWorker {
+    fn start() -> Self {
+        let (commands, command_rx) = std::sync::mpsc::channel();
+        let (event_tx, events) = std::sync::mpsc::channel();
+        // A blocking task, on the launcher runtime's blocking pool: it waits on a socket, which must not hold up the
+        // engine's own workers. It ends when the manager (the sender) is dropped.
+        launcher_runtime::spawn_blocking_detached(move || worker_loop(command_rx, event_tx));
+        Self { commands, events }
+    }
+}
+
+fn worker_loop(commands: std::sync::mpsc::Receiver<Command>, events: std::sync::mpsc::Sender<Event>) {
+    let mut client = PresenceClient::default();
+    while let Ok(mut command) = commands.recv() {
+        // Only the newest request matters; anything that queued up while this one was blocked is skipped.
+        while let Ok(newer) = commands.try_recv() {
+            command = newer;
+        }
+        let event = match command {
+            Command::Set(desired) => {
+                let result = client.set_presence(&desired);
+                Event::Set { desired, result }
+            }
+            Command::Clear => {
+                client.clear_presence();
+                Event::Cleared
+            }
+        };
+        if events.send(event).is_err() {
+            break;
+        }
+        vertex_shell::wake();
+    }
+    client.reset();
+}
+
 impl DiscordPresenceManager {
     pub fn update(
         &mut self,
@@ -35,6 +92,7 @@ impl DiscordPresenceManager {
         menu_context: MenuPresenceContext,
         selected_instance_id: Option<&str>,
     ) {
+        self.take_events();
         let running_roots = running_instance_roots();
         let desired = self.desired_presence(
             config,
@@ -51,27 +109,22 @@ impl DiscordPresenceManager {
         if desired == self.active_presence && !should_resync {
             return;
         }
-
+        // One request at a time, and a failing one (Discord not running) waits out the retry interval.
+        if self.in_flight {
+            return;
+        }
         if desired.is_some()
-            && !self.connected
-            && !self.can_attempt_connect()
             && desired == self.last_desired_presence
+            && self.last_request_failed
+            && self.last_request_at.is_some_and(|at| at.elapsed() < CONNECT_RETRY_INTERVAL)
         {
             return;
         }
 
-        match desired.clone() {
+        match desired {
             Some(next) => {
                 self.last_desired_presence = Some(next.clone());
-                if self.set_presence(&next).is_ok() {
-                    if self.active_presence.is_none() {
-                        tracing::info!(
-                            target: "vertexlauncher/discord_presence",
-                            "Discord Rich Presence started."
-                        );
-                    }
-                    self.active_presence = Some(next);
-                }
+                self.send(Command::Set(next));
             }
             None => {
                 if self.active_presence.is_some() {
@@ -79,10 +132,51 @@ impl DiscordPresenceManager {
                         target: "vertexlauncher/discord_presence",
                         "Discord Rich Presence stopped."
                     );
+                    self.send(Command::Clear);
                 }
-                self.clear_presence();
                 self.active_presence = None;
                 self.last_desired_presence = None;
+                self.last_presence_sync_at = None;
+            }
+        }
+    }
+
+    fn send(&mut self, command: Command) {
+        let worker = self.worker.get_or_insert_with(PresenceWorker::start);
+        if worker.commands.send(command).is_ok() {
+            self.in_flight = true;
+            self.last_request_at = Some(Instant::now());
+        }
+    }
+
+    /// Takes in what the task has finished since the last frame.
+    fn take_events(&mut self) {
+        let Some(worker) = &self.worker else {
+            return;
+        };
+        let events: Vec<Event> = worker.events.try_iter().collect();
+        for event in events {
+            self.in_flight = false;
+            match event {
+                Event::Set { desired, result: Ok(()) } => {
+                    if self.active_presence.is_none() {
+                        tracing::info!(
+                            target: "vertexlauncher/discord_presence",
+                            "Discord Rich Presence started."
+                        );
+                    }
+                    self.active_presence = Some(desired);
+                    self.last_presence_sync_at = Some(Instant::now());
+                    self.last_request_failed = false;
+                }
+                Event::Set { result: Err(error), .. } => {
+                    tracing::debug!(
+                        target: "vertexlauncher/discord_presence",
+                        "Could not update Discord Rich Presence: {error}"
+                    );
+                    self.last_request_failed = true;
+                }
+                Event::Cleared => self.last_request_failed = false,
             }
         }
     }
@@ -150,34 +244,6 @@ impl DiscordPresenceManager {
         Some(self.menu_presence(menu_context, selected_instance_id, instances))
     }
 
-    fn set_presence(&mut self, desired: &DesiredPresence) -> Result<(), String> {
-        let activity = build_activity(desired);
-
-        let initial_attempt = self
-            .ensure_client_connected()?
-            .set_activity(activity.clone())
-            .map_err(|err| format!("failed to set Discord activity: {err}"));
-
-        match initial_attempt {
-            Ok(()) => {
-                self.last_presence_sync_at = Some(Instant::now());
-                Ok(())
-            }
-            Err(initial_err) => {
-                self.reset_client();
-                self.ensure_client_connected()?
-                    .set_activity(activity)
-                    .map_err(|err| {
-                        format!(
-                            "{initial_err}; retry after reconnect also failed to set Discord activity: {err}"
-                        )
-                    })?;
-                self.last_presence_sync_at = Some(Instant::now());
-                Ok(())
-            }
-        }
-    }
-
     fn menu_presence(
         &self,
         menu_context: MenuPresenceContext,
@@ -200,24 +266,53 @@ impl DiscordPresenceManager {
         }
     }
 
-    fn clear_presence(&mut self) {
-        let clear_failed = if let Some(client) = self.client.as_mut() {
-            if client.clear_activity().is_err() {
-                true
-            } else {
-                false
-            }
-        } else {
-            false
-        };
+}
 
-        if clear_failed {
-            self.reset_client();
+/// The Discord connection, used only by the background task (every call here can block on the socket).
+#[derive(Default)]
+struct PresenceClient {
+    client: Option<DiscordIpcClient>,
+    connected: bool,
+    last_connect_attempt_at: Option<Instant>,
+    last_connect_error: Option<String>,
+}
+
+impl PresenceClient {
+    fn set_presence(&mut self, desired: &DesiredPresence) -> Result<(), String> {
+        let activity = build_activity(desired);
+
+        let initial_attempt = self
+            .ensure_connected()?
+            .set_activity(activity.clone())
+            .map_err(|err| format!("failed to set Discord activity: {err}"));
+
+        match initial_attempt {
+            Ok(()) => Ok(()),
+            Err(initial_err) => {
+                self.reset();
+                self.ensure_connected()?
+                    .set_activity(activity)
+                    .map_err(|err| {
+                        format!(
+                            "{initial_err}; retry after reconnect also failed to set Discord activity: {err}"
+                        )
+                    })?;
+                Ok(())
+            }
         }
-        self.last_presence_sync_at = None;
     }
 
-    fn ensure_client_connected(&mut self) -> Result<&mut DiscordIpcClient, String> {
+    fn clear_presence(&mut self) {
+        let clear_failed = self
+            .client
+            .as_mut()
+            .is_some_and(|client| client.clear_activity().is_err());
+        if clear_failed {
+            self.reset();
+        }
+    }
+
+    fn ensure_connected(&mut self) -> Result<&mut DiscordIpcClient, String> {
         if self.client.is_none() {
             prepare_discord_ipc_environment();
             self.client = Some(DiscordIpcClient::new(DISCORD_APPLICATION_ID));
@@ -266,14 +361,13 @@ impl DiscordPresenceManager {
             .ok_or_else(|| "Discord client missing".to_owned())
     }
 
-    fn reset_client(&mut self) {
+    fn reset(&mut self) {
         if let Some(client) = self.client.as_mut() {
             let _ = client.close();
         }
         self.client = None;
         self.connected = false;
         self.last_connect_attempt_at = None;
-        self.last_presence_sync_at = None;
     }
 
     fn can_attempt_connect(&self) -> bool {
@@ -290,8 +384,8 @@ fn prepare_discord_ipc_environment() {
         return;
     };
 
-    // SAFETY: This is called on the UI thread before each Discord IPC client creation.
-    // We only update process env vars used by the `discord-rich-presence` crate's socket lookup.
+    // SAFETY: This is called by the presence task before each Discord IPC client creation. We only update the process
+    // env var the `discord-rich-presence` crate's socket lookup reads, and nothing else in the launcher writes it.
     unsafe {
         env::set_var("TMPDIR", &socket_dir);
     }
@@ -427,4 +521,52 @@ fn current_unix_timestamp_secs() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+    use std::os::unix::net::UnixListener;
+
+    /// A Discord that accepts the connection and then never answers the handshake, as one that is starting up or stuck
+    /// does. Connecting to it blocks for as long as it stays that way, so the UI thread must never be the one doing it.
+    #[test]
+    fn a_discord_that_never_answers_cannot_freeze_the_ui_thread() {
+        let dir = std::env::temp_dir().join(format!("vertex-discord-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let socket = dir.join("discord-ipc-0");
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("fake Discord socket");
+        // Hold every connection open without ever replying.
+        let held = std::thread::spawn(move || {
+            let mut connections = Vec::new();
+            while let Ok((stream, _)) = listener.accept() {
+                connections.push(stream);
+            }
+        });
+        // SAFETY: nothing else in the tests reads or writes this variable.
+        unsafe { env::set_var("XDG_RUNTIME_DIR", &dir) };
+
+        // Rich Presence is on by default.
+        let config = Config::default();
+        assert!(config.discord_rich_presence_enabled());
+        let instances = InstanceStore::default();
+        let mut manager = DiscordPresenceManager::default();
+        let started = Instant::now();
+        for _ in 0..50 {
+            manager.update(
+                &config,
+                &instances,
+                Path::new("/nonexistent"),
+                MenuPresenceContext::Screen(AppScreen::Home),
+                None,
+            );
+        }
+        let spent = started.elapsed();
+        assert!(spent < Duration::from_millis(500), "update blocked the calling thread for {spent:?}");
+        assert!(manager.in_flight, "the request should be with the background task, still unanswered");
+        drop(manager);
+        let _ = std::fs::remove_file(&socket);
+        drop(held);
+    }
 }

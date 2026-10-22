@@ -27,6 +27,9 @@ pub struct ConsoleSnapshot {
     pub tabs: Vec<ConsoleTabSnapshot>,
     pub active_tab_id: String,
     pub active_lines: Arc<[String]>,
+    /// How many lines the active tab has dropped from the front so far: the number of `active_lines[0]` among every
+    /// line the tab has ever had, so a reader can tell which lines are new even though the oldest are trimmed.
+    pub first_line_index: u64,
     pub text_redraw_generation: u64,
 }
 
@@ -39,6 +42,8 @@ struct ConsoleTab {
     keep_alive_while_loading: bool,
     missing_since: Option<Instant>,
     lines: VecDeque<String>,
+    /// Lines dropped from the front to keep the log to `MAX_CONSOLE_LINES`.
+    trimmed_lines: u64,
     lines_generation: u64,
     cached_lines_snapshot: Option<(u64, Arc<[String]>)>,
 }
@@ -65,6 +70,7 @@ fn store() -> &'static Mutex<ConsoleState> {
                 keep_alive_while_loading: false,
                 missing_since: None,
                 lines: VecDeque::new(),
+                trimmed_lines: 0,
                 lines_generation: 0,
                 cached_lines_snapshot: None,
             }],
@@ -115,6 +121,7 @@ pub fn push_line_to_tab(tab_id: &str, line: impl Into<String>) {
         tab.lines.push_back(sanitized);
         while tab.lines.len() > MAX_CONSOLE_LINES {
             let _ = tab.lines.pop_front();
+            tab.trimmed_lines += 1;
         }
         tab.lines_generation = tab.lines_generation.saturating_add(1);
         tab.cached_lines_snapshot = None;
@@ -126,6 +133,7 @@ pub fn push_line_to_tab(tab_id: &str, line: impl Into<String>) {
         default_tab.lines.push_back(sanitized);
         while default_tab.lines.len() > MAX_CONSOLE_LINES {
             let _ = default_tab.lines.pop_front();
+            default_tab.trimmed_lines += 1;
         }
         default_tab.lines_generation = default_tab.lines_generation.saturating_add(1);
         default_tab.cached_lines_snapshot = None;
@@ -227,6 +235,7 @@ pub fn ensure_instance_tab(
         keep_alive_while_loading: false,
         missing_since: None,
         lines: VecDeque::new(),
+                trimmed_lines: 0,
         lines_generation: 0,
         cached_lines_snapshot: None,
     });
@@ -345,6 +354,7 @@ pub fn prune_instance_tabs(active_instance_roots: &[String]) {
             keep_alive_while_loading: false,
             missing_since: None,
             lines: VecDeque::new(),
+                trimmed_lines: 0,
             lines_generation: 0,
             cached_lines_snapshot: None,
         });
@@ -456,6 +466,7 @@ pub fn close_tab(tab_id: &str) -> bool {
             keep_alive_while_loading: false,
             missing_since: None,
             lines: VecDeque::new(),
+                trimmed_lines: 0,
             lines_generation: 0,
             cached_lines_snapshot: None,
         });
@@ -487,6 +498,7 @@ pub fn snapshot() -> ConsoleSnapshot {
             }],
             active_tab_id: DEFAULT_TAB_ID.to_owned(),
             active_lines: Arc::from([]),
+            first_line_index: 0,
             text_redraw_generation: 0,
         };
     };
@@ -508,6 +520,11 @@ pub fn snapshot() -> ConsoleSnapshot {
             snapshot
         })
         .unwrap_or_else(|| Arc::from([]));
+    let first_line_index = state
+        .tabs
+        .iter()
+        .find(|tab| tab.id == active_tab_id)
+        .map_or(0, |tab| tab.trimmed_lines);
     let tabs = state
         .tabs
         .iter()
@@ -522,6 +539,7 @@ pub fn snapshot() -> ConsoleSnapshot {
         tabs,
         active_tab_id,
         active_lines,
+        first_line_index,
         text_redraw_generation: state.text_redraw_generation,
     }
 }

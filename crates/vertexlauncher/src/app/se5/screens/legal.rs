@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::sync::{Mutex, OnceLock};
 
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, ChildAlignment, Clip, CornerRadius, Cursor, Direction, ElementDesc, Padding,
+    AlignX, AlignY, ChildAlignment, Clip, CornerRadius, Direction, ElementDesc, Padding,
     Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -118,8 +118,7 @@ pub fn render(ui: &mut Ui<'_>, kit: &mut Kit) {
                     } else {
                         vertex_shell::sturdy::glam::Vec4::ZERO
                     })
-                    .corner_radius(CornerRadius::all(8.0))
-                    .cursor(Cursor::Pointer),
+                    .corner_radius(CornerRadius::all(8.0)),
             );
             // Right when closed, a clockwise quarter-turn to down when open (the down chevron turned 270 degrees points
             // right), so both resting states are the plain chevrons.

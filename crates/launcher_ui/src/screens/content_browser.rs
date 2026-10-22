@@ -191,6 +191,16 @@ pub(crate) fn update_installed_content_to_version(
     )
 }
 
+/// What a bulk update did: how many projects were updated, and the ones that could not be, with why.
+#[derive(Default)]
+pub(crate) struct BulkUpdateOutcome {
+    pub applied: usize,
+    pub failed: Vec<String>,
+}
+
+/// Updates every project in `updates` to its version. Each is updated on its own: the new file replaces the old one and
+/// nothing else changes (see [`update_installed_file_only`]), so a project that cannot be updated is reported and the
+/// rest still are.
 pub(crate) fn bulk_update_installed_content(
     instance_root: &Path,
     updates: &[BulkContentUpdate],
@@ -198,116 +208,125 @@ pub(crate) fn bulk_update_installed_content(
     loader_label: &str,
     download_policy: &DownloadPolicy,
     progress: Option<&InstallProgressCallback>,
-) -> Result<usize, String> {
+) -> Result<BulkUpdateOutcome, String> {
+    let mut outcome = BulkUpdateOutcome::default();
     if updates.is_empty() {
-        return Ok(0);
+        return Ok(outcome);
     }
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
         instance_root = %instance_root.display(),
-        root_updates = updates.len(),
+        updates = updates.len(),
         game_version = %game_version,
         loader = %loader_label,
-        "planning bulk content update"
+        "starting bulk content update"
     );
 
-    let modrinth = ModrinthClient::default();
-    let curseforge = CurseForgeClient::from_env();
-    let loader = browser_loader_from_modloader(loader_label);
-    let manifest = load_content_manifest(instance_root);
-    let mut planned_versions = HashMap::new();
-    let mut queued_paths = HashSet::new();
-    let mut download_tasks = Vec::new();
-    let mut prefetched_paths = HashMap::new();
-    let mut root_updates = Vec::new();
-
+    // What each update needs, worked out first: the version to install and where its file goes.
+    struct Planned<'a> {
+        update: &'a BulkContentUpdate,
+        browser_entry: BrowserProjectEntry,
+        version: BrowserVersionEntry,
+        target_path: PathBuf,
+        prefetched_path: PathBuf,
+    }
+    let mut planned: Vec<Planned<'_>> = Vec::new();
     for update in updates {
-        let browser_entry = browser_entry_from_unified_content(&update.entry)?;
-        let source = ManagedContentSource::from(update.entry.source);
-        let version =
-            fetch_exact_version_for_entry(&browser_entry, source, update.version_id.as_str())?;
-        let resolved = resolved_download_from_version(version.clone());
-        let should_apply = collect_content_download_tasks_for_request(
-            instance_root,
-            &manifest,
-            &browser_entry,
-            &resolved,
-            game_version,
-            loader,
-            &modrinth,
-            curseforge.as_ref(),
-            &mut planned_versions,
-            &mut queued_paths,
-            &mut download_tasks,
-            &mut prefetched_paths,
-        )?;
-        if should_apply {
-            tracing::debug!(
-                target: CONTENT_UPDATE_LOG_TARGET,
-                instance_root = %instance_root.display(),
-                project = %update.entry.name,
-                version_id = %version.version_id,
-                installed_path = %update.installed_file_path.display(),
-                "queued root content update"
-            );
-            root_updates.push((
-                update.entry.clone(),
-                update.installed_file_path.clone(),
-                version.version_id.clone(),
-            ));
+        let plan = (|| -> Result<Planned<'_>, String> {
+            let browser_entry = browser_entry_from_unified_content(&update.entry)?;
+            let source = ManagedContentSource::from(update.entry.source);
+            let version = fetch_exact_version_for_entry(&browser_entry, source, update.version_id.as_str())?;
+            let target_path = content_target_path(instance_root, &browser_entry, &version);
+            let prefetched_path =
+                prefetched_target_path(instance_root, browser_entry.content_type, target_path.as_path());
+            Ok(Planned { update, browser_entry, version, target_path, prefetched_path })
+        })();
+        match plan {
+            Ok(plan) => planned.push(plan),
+            Err(err) => {
+                tracing::warn!(
+                    target: CONTENT_UPDATE_LOG_TARGET,
+                    project = %update.entry.name,
+                    "could not plan a content update: {err}"
+                );
+                outcome.failed.push(format!("{}: {err}", update.entry.name));
+            }
         }
     }
 
-    if !download_tasks.is_empty() {
-        tracing::info!(
-            target: CONTENT_UPDATE_LOG_TARGET,
-            instance_root = %instance_root.display(),
-            download_tasks = download_tasks.len(),
-            root_updates = root_updates.len(),
-            "downloading prefetched files for bulk content update"
-        );
-        download_batch_with_progress(
-            download_tasks,
+    // All the files are downloaded together. If that fails as a whole, they are tried one at a time so only the
+    // ones that really cannot be downloaded are given up on.
+    let tasks = |planned: &[Planned<'_>]| -> Vec<DownloadBatchTask> {
+        planned
+            .iter()
+            .map(|plan| DownloadBatchTask {
+                url: plan.version.file_url.clone(),
+                destination: plan.prefetched_path.clone(),
+                expected_size: None,
+            })
+            .collect()
+    };
+    if !planned.is_empty()
+        && let Err(batch_err) = download_batch_with_progress(
+            tasks(&planned),
             download_policy,
             InstallStage::DownloadingCore,
             progress,
         )
-        .map_err(|err| format!("failed to download queued content updates: {err}"))?;
+    {
+        tracing::warn!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            "downloading the updates together failed ({batch_err}); trying them one at a time"
+        );
+        let mut kept = Vec::new();
+        for plan in planned {
+            let single = vec![DownloadBatchTask {
+                url: plan.version.file_url.clone(),
+                destination: plan.prefetched_path.clone(),
+                expected_size: None,
+            }];
+            match download_batch_with_progress(single, download_policy, InstallStage::DownloadingCore, progress) {
+                Ok(_) => kept.push(plan),
+                Err(err) => outcome.failed.push(format!("{}: {err}", plan.update.entry.name)),
+            }
+        }
+        planned = kept;
     }
 
-    let apply_result = (|| -> Result<usize, String> {
-        let mut applied = 0usize;
-        for (entry, installed_file_path, version_id) in root_updates {
-            tracing::info!(
-                target: CONTENT_UPDATE_LOG_TARGET,
-                instance_root = %instance_root.display(),
-                project = %entry.name,
-                version_id = %version_id,
-                installed_path = %installed_file_path.display(),
-                "applying prefetched content update"
-            );
-            update_installed_content_to_version_with_prefetched_downloads(
-                instance_root,
-                &entry,
-                installed_file_path.as_path(),
-                version_id.as_str(),
-                game_version,
-                loader_label,
-                &prefetched_paths,
-            )?;
-            applied += 1;
+    let prefetched_paths: HashMap<PathBuf, PathBuf> = planned
+        .iter()
+        .map(|plan| (plan.target_path.clone(), plan.prefetched_path.clone()))
+        .collect();
+    for plan in &planned {
+        match update_installed_file_only(
+            instance_root,
+            &plan.browser_entry,
+            plan.update.installed_file_path.as_path(),
+            plan.version.clone(),
+            &prefetched_paths,
+        ) {
+            Ok(()) => outcome.applied += 1,
+            Err(err) => {
+                tracing::warn!(
+                    target: CONTENT_UPDATE_LOG_TARGET,
+                    project = %plan.update.entry.name,
+                    "content update failed: {err}"
+                );
+                outcome.failed.push(format!("{}: {err}", plan.update.entry.name));
+            }
         }
-        Ok(applied)
-    })();
-    cleanup_prefetched_downloads(instance_root)?;
-    let applied = apply_result?;
+    }
+    if let Err(err) = cleanup_prefetched_downloads(instance_root) {
+        tracing::warn!(target: CONTENT_UPDATE_LOG_TARGET, "could not remove the download folder: {err}");
+    }
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
         instance_root = %instance_root.display(),
-        applied,
-        "finished bulk content update apply pass"
+        applied = outcome.applied,
+        failed = outcome.failed.len(),
+        "finished bulk content update pass"
     );
-    Ok(applied)
+    Ok(outcome)
 }
 
 /// Prefix of the temporary backups made while replacing a file during an update.
@@ -378,8 +397,8 @@ fn update_installed_content_to_version_with_prefetched_downloads(
     entry: &UnifiedContentEntry,
     installed_file_path: &Path,
     version_id: &str,
-    game_version: &str,
-    loader_label: &str,
+    _game_version: &str,
+    _loader_label: &str,
     prefetched_paths: &HashMap<PathBuf, PathBuf>,
 ) -> Result<String, String> {
     tracing::info!(
@@ -388,97 +407,26 @@ fn update_installed_content_to_version_with_prefetched_downloads(
         project = %entry.name,
         version_id = %version_id,
         installed_path = %installed_file_path.display(),
-        prefetched = !prefetched_paths.is_empty(),
         "starting content version update"
     );
     let browser_entry = browser_entry_from_unified_content(entry)?;
     let source = ManagedContentSource::from(entry.source);
     let version = fetch_exact_version_for_entry(&browser_entry, source, version_id)?;
-    let target_path = content_target_path(instance_root, &browser_entry, &version);
-    let manifest = load_content_manifest(instance_root);
-    let (effective_installed_file_path, stale_requested_path) =
-        resolve_installed_file_paths_for_update(
-            instance_root,
-            &manifest,
-            &browser_entry,
-            installed_file_path,
-        );
-    let additional_cleanup_paths = stale_requested_path
-        .as_ref()
-        .filter(|path| !paths_match_for_update(path.as_path(), target_path.as_path()))
-        .cloned()
-        .into_iter()
-        .collect::<Vec<_>>();
-    let staged_existing_path = stage_existing_file_for_update(
-        effective_installed_file_path.as_path(),
-        target_path.as_path(),
-    )?;
-    let mut outcome = match apply_content_install_request_with_prefetched_downloads(
+    update_installed_file_only(
         instance_root,
-        ContentInstallRequest::Exact {
-            entry: browser_entry,
-            version,
-            game_version: game_version.trim().to_owned(),
-            loader: browser_loader_from_modloader(loader_label),
-        },
+        &browser_entry,
+        installed_file_path,
+        version,
         prefetched_paths,
-        additional_cleanup_paths.as_slice(),
-    ) {
-        Ok(outcome) => outcome,
-        Err(err) => {
-            tracing::error!(
-                target: CONTENT_UPDATE_LOG_TARGET,
-                instance_root = %instance_root.display(),
-                project = %entry.name,
-                version_id = %version_id,
-                installed_path = %effective_installed_file_path.display(),
-                target_path = %target_path.display(),
-                "content version update failed before finalize: {err}"
-            );
-            if let Some(staged_path) = staged_existing_path {
-                restore_staged_update_file(
-                    staged_path.as_path(),
-                    effective_installed_file_path.as_path(),
-                )
-                .map_err(|restore_err| {
-                    format!("{err} (also failed to restore original file: {restore_err})")
-                })?;
-            }
-            return Err(err);
-        }
-    };
-    if prefetched_paths.is_empty() {
-        finalize_updated_file_replacement(
-            effective_installed_file_path.as_path(),
-            target_path.as_path(),
-            staged_existing_path.as_deref(),
-            &mut outcome.removed_files,
-            None,
-        )?;
-    } else if let Some(staged_path) = staged_existing_path.as_ref()
-        && staged_path.exists()
-    {
-        remove_content_path(staged_path.as_path())?;
-        outcome
-            .removed_files
-            .push(staged_path.display().to_string());
-    }
+    )?;
     tracing::info!(
         target: CONTENT_UPDATE_LOG_TARGET,
         instance_root = %instance_root.display(),
         project = %entry.name,
         version_id = %version_id,
-        target_path = %target_path.display(),
-        added_files = outcome.added_files.len(),
-        removed_files = outcome.removed_files.len(),
         "completed content version update"
     );
-    Ok(format!(
-        "Updated {}: {} added, {} removed.",
-        outcome.project_name,
-        outcome.added_files.len(),
-        outcome.removed_files.len()
-    ))
+    Ok(format!("Updated {}.", entry.name))
 }
 
 fn resolve_installed_file_paths_for_update(

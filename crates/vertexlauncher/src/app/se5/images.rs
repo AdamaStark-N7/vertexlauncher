@@ -59,12 +59,23 @@ enum Slot {
 struct Entry {
     slot: Slot,
     last_used: u64,
+    /// Loads that have failed so far, and when the next try is allowed. A failure is often temporary (a screenshot the
+    /// game is still writing, a download that timed out), so it is retried with a growing pause instead of for good.
+    failures: u8,
+    retry_at: Option<std::time::Instant>,
 }
+
+/// Tries before a picture is given up on, and the pause after the first failure (doubled after each).
+const MAX_LOAD_ATTEMPTS: u8 = 5;
+const FIRST_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 
 type Decoded = (String, Result<DecodedImage, String>);
 
 pub struct ImageCache {
     entries: HashMap<String, Entry>,
+    /// Textures that could not be released yet because the engine still referenced them; tried again each frame
+    /// rather than forgotten (forgetting them leaks the texture).
+    unload_later: Vec<Asset>,
     tx: mpsc::Sender<Decoded>,
     rx: mpsc::Receiver<Decoded>,
     tick: u64,
@@ -75,6 +86,7 @@ impl Default for ImageCache {
         let (tx, rx) = mpsc::channel();
         Self {
             entries: HashMap::new(),
+            unload_later: Vec::new(),
             tx,
             rx,
             tick: 0,
@@ -92,36 +104,64 @@ impl ImageCache {
         max_dimension: u32,
     ) -> Option<Picture> {
         let tick = self.tick;
+        let mut retrying = None;
         if let Some(entry) = self.entries.get_mut(key) {
             entry.last_used = tick;
-            return match &entry.slot {
-                Slot::Ready { picture, .. } => Some(*picture),
-                Slot::Loading | Slot::Failed => None,
-            };
+            match &entry.slot {
+                Slot::Ready { picture, .. } => return Some(*picture),
+                Slot::Loading => return None,
+                Slot::Failed => {
+                    let due = entry.failures < MAX_LOAD_ATTEMPTS
+                        && entry.retry_at.is_some_and(|at| std::time::Instant::now() >= at);
+                    if !due {
+                        // Look again when the pause ends.
+                        if let Some(at) = entry.retry_at.filter(|_| entry.failures < MAX_LOAD_ATTEMPTS) {
+                            vertex_shell::wake_after(at.saturating_duration_since(std::time::Instant::now()));
+                        }
+                        return None;
+                    }
+                    entry.slot = Slot::Loading;
+                    retrying = Some(());
+                }
+            }
         }
-        self.entries.insert(
-            key.to_owned(),
-            Entry {
-                slot: Slot::Loading,
-                last_used: tick,
-            },
-        );
+        if retrying.is_none() {
+            self.entries.insert(
+                key.to_owned(),
+                Entry {
+                    slot: Slot::Loading,
+                    last_used: tick,
+                    failures: 0,
+                    retry_at: None,
+                },
+            );
+        }
         let source = source();
         let tx = self.tx.clone();
         let key = key.to_owned();
-        launcher_runtime::spawn_blocking_detached(move || {
-            let result = load(&source, &key, max_dimension);
-            let _ = tx.send((key, result));
-            vertex_shell::wake();
-        });
+        // Decoding is CPU work, so it runs on the compute backend (the engine's scheduler). Fetching a URL waits on the
+        // network, which would tie up one of the engine's workers, so that stays on the blocking pool.
+        if matches!(source, ImageSource::Url(_)) {
+            launcher_runtime::spawn_blocking_detached(move || {
+                let result = load(&source, &key, max_dimension);
+                let _ = tx.send((key, result));
+                vertex_shell::wake();
+            });
+        } else {
+            drop(launcher_runtime::spawn_compute(async move {
+                let result = load(&source, &key, max_dimension);
+                let _ = tx.send((key, result));
+                vertex_shell::wake();
+            }));
+        }
         None
     }
 
     /// Whether `key` failed to load (so the caller can draw a placeholder instead of waiting).
     pub fn failed(&self, key: &str) -> bool {
-        self.entries
-            .get(key)
-            .is_some_and(|entry| matches!(entry.slot, Slot::Failed))
+        self.entries.get(key).is_some_and(|entry| {
+            matches!(entry.slot, Slot::Failed) && entry.failures >= MAX_LOAD_ATTEMPTS
+        })
     }
 
     /// Drops `key`, so the next `get` loads it again (the file changed).
@@ -131,13 +171,24 @@ impl ImageCache {
             ..
         }) = self.entries.remove(key)
         {
-            let _ = engine.assets().unload(asset);
+            self.release(engine, asset);
+        }
+    }
+
+    /// Releases a texture, keeping hold of it to try again if the engine still has it in use.
+    fn release(&mut self, engine: &mut Engine<'_>, asset: Asset) {
+        if engine.assets().unload(asset).is_err() && engine.assets().contains(asset) {
+            self.unload_later.push(asset);
         }
     }
 
     /// Uploads freshly decoded images and unloads the least recently used ones. Call once per frame.
     pub fn pump(&mut self, engine: &mut Engine<'_>) {
         self.tick += 1;
+        for asset in std::mem::take(&mut self.unload_later) {
+            self.release(engine, asset);
+        }
+        self.refresh_handles(engine);
         let started = std::time::Instant::now();
         loop {
             if started.elapsed() > UPLOAD_BUDGET {
@@ -152,9 +203,18 @@ impl ImageCache {
                 continue;
             };
             entry.slot = match result.and_then(|image| upload(engine, &key, &image)) {
-                Ok((asset, picture)) => Slot::Ready { asset, picture },
+                Ok((asset, picture)) => {
+                    entry.failures = 0;
+                    entry.retry_at = None;
+                    Slot::Ready { asset, picture }
+                }
                 Err(err) => {
                     tracing::debug!(target: "vertexlauncher/se5/images", "Could not load image {key}: {err}");
+                    entry.failures = entry.failures.saturating_add(1);
+                    // Doubling pause: 1 s, 2 s, 4 s, 8 s, then the picture is given up on.
+                    let pause = FIRST_RETRY_DELAY * (1_u32 << (entry.failures - 1).min(8));
+                    entry.retry_at = Some(std::time::Instant::now() + pause);
+                    vertex_shell::wake_after(pause);
                     Slot::Failed
                 }
             };
@@ -169,6 +229,30 @@ impl ImageCache {
             .any(|entry| matches!(entry.slot, Slot::Loading))
     }
 
+    /// Makes sure every picture drawn recently still points at a live texture. The engine replaces its texture handles
+    /// when the graphics device is switched (a setting change, a lost device), and a stale handle draws as a blank
+    /// white box, so the handle is read again from the asset each frame, and a picture whose asset is gone is dropped
+    /// so it loads again.
+    fn refresh_handles(&mut self, engine: &mut Engine<'_>) {
+        let in_use_since = self.tick.saturating_sub(2);
+        let mut gone = Vec::new();
+        for (key, entry) in &mut self.entries {
+            let Slot::Ready { asset, picture } = &mut entry.slot else {
+                continue;
+            };
+            if entry.last_used < in_use_since {
+                continue;
+            }
+            match engine.assets().texture_handle(*asset) {
+                Ok(handle) => picture.texture = handle,
+                Err(_) => gone.push(key.clone()),
+            }
+        }
+        for key in gone {
+            self.entries.remove(&key);
+        }
+    }
+
     fn trim(&mut self, engine: &mut Engine<'_>) {
         let ready = self
             .entries
@@ -178,10 +262,16 @@ impl ImageCache {
         if ready <= MAX_TEXTURES {
             return;
         }
+        // Only pictures nothing drew last frame can go. A screen showing more than the limit at once would otherwise
+        // have its own pictures unloaded out from under it, drawn blank, and reloaded the next frame, over and over:
+        // the limit is soft, and the cache stays above it while that many are in view.
+        let in_use_since = self.tick.saturating_sub(1);
         let mut by_age: Vec<(u64, String)> = self
             .entries
             .iter()
-            .filter(|(_, entry)| matches!(entry.slot, Slot::Ready { .. }))
+            .filter(|(_, entry)| {
+                matches!(entry.slot, Slot::Ready { .. }) && entry.last_used < in_use_since
+            })
             .map(|(key, entry)| (entry.last_used, key.clone()))
             .collect();
         by_age.sort();
@@ -191,7 +281,7 @@ impl ImageCache {
                 ..
             }) = self.entries.remove(&key)
             {
-                let _ = engine.assets().unload(asset);
+                self.release(engine, asset);
             }
         }
     }
@@ -215,6 +305,11 @@ fn load(source: &ImageSource, key: &str, max_dimension: u32) -> Result<DecodedIm
     let image = decode(&bytes, options, key).map_err(|err| err.to_string())?;
     if image.format != PixelFormat::Rgba8 {
         return Err("unsupported pixel format".to_owned());
+    }
+    // A texture built from fewer pixels than its size says would show garbage or white.
+    let wanted = image.width as usize * image.height as usize * 4;
+    if image.width == 0 || image.height == 0 || image.pixels().len() != wanted {
+        return Err("the decoded picture is empty or incomplete".to_owned());
     }
     Ok(fit_texture(image))
 }

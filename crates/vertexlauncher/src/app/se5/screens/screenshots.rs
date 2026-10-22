@@ -4,7 +4,7 @@ use std::path::Path;
 
 use launcher_ui::app_commands::{self, AppCommand};
 use vertex_shell::sturdy::ui::{Direction, ElementDesc, Sizing, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::AppState;
 use super::super::images::ImageSource;

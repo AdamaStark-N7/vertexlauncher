@@ -105,6 +105,100 @@ pub(crate) fn render_scenes(
     image
 }
 
+/// [`render_scenes`] spread over the compute backend: the image is cut into bands of rows, each band is its own task
+/// (drawing its share of every scene and resolving it), and this future awaits them, so while it waits its worker
+/// is free to run the bands. The result is the same image.
+pub(crate) async fn render_scenes_async(
+    scenes: Arc<Vec<(f32, Vec<RenderTriangle>)>>,
+    skin: Arc<RgbaImage>,
+    cape: Option<Arc<RgbaImage>>,
+    settings: RasterSettings,
+) -> RgbaImage {
+    let ss = settings.supersample.max(1) as usize;
+    let (out_w, out_h) = (settings.width as usize, settings.height as usize);
+    let bands = launcher_runtime::compute_workers().clamp(1, out_h.max(1));
+    let rows = out_h.div_ceil(bands).max(1);
+    let mut handles = Vec::new();
+    let mut y0 = 0;
+    while y0 < out_h {
+        let y1 = (y0 + rows).min(out_h);
+        let (scenes, skin, cape) = (Arc::clone(&scenes), Arc::clone(&skin), cape.clone());
+        handles.push(launcher_runtime::spawn_compute(async move {
+            render_band(&scenes, &skin, cape.as_deref(), settings, ss, y0, y1)
+        }));
+        y0 = y1;
+    }
+    let mut total = Accumulator::new(out_w, out_h);
+    let mut at = 0;
+    for handle in handles {
+        match handle.await {
+            Ok(pixels) => {
+                total.pixels[at..at + pixels.len()].copy_from_slice(&pixels);
+                at += pixels.len();
+            }
+            // A band that failed leaves its rows empty, but the frame still arrives.
+            Err(err) => {
+                tracing::error!(target: "vertexlauncher/skins", "A skin preview band failed: {err}");
+                at += rows * out_w;
+            }
+        }
+    }
+    let mut image = to_straight(&total);
+    if settings.post_aa {
+        image = fxaa(&image);
+    }
+    image
+}
+
+/// The accumulated colour of output rows `y0..y1` of a frame: every scene drawn at `ss` times the resolution over those
+/// rows, averaged down and weighted.
+fn render_band(
+    scenes: &[(f32, Vec<RenderTriangle>)],
+    skin: &RgbaImage,
+    cape: Option<&RgbaImage>,
+    settings: RasterSettings,
+    ss: usize,
+    y0: usize,
+    y1: usize,
+) -> Vec<[f32; 4]> {
+    let (out_w, out_h) = (settings.width as usize, settings.height as usize);
+    let (w, h) = (out_w * ss, out_h * ss);
+    let (hy0, hy1) = (y0 * ss, y1 * ss);
+    let band = Band { width: w, height: h, y0: hy0, y1: hy1 };
+    let inv = 1.0 / (ss * ss) as f32;
+    let mut out = vec![[0.0_f32; 4]; (y1 - y0) * out_w];
+    for (weight, triangles) in scenes {
+        let mut pixels = vec![[0.0_f32; 4]; (hy1 - hy0) * w];
+        let mut depth = vec![f32::INFINITY; (hy1 - hy0) * w];
+        for tri in triangles {
+            let texture = match tri.texture {
+                TriangleTexture::Skin => skin,
+                TriangleTexture::Cape => match cape {
+                    Some(cape) => cape,
+                    None => continue,
+                },
+            };
+            draw_triangle(&band, &mut pixels, &mut depth, tri, texture, ss as f32, settings.texel_border_aa);
+        }
+        for (offset, dst) in out.iter_mut().enumerate() {
+            let (x, y) = (offset % out_w, offset / out_w);
+            let mut sum = [0.0_f32; 4];
+            for sy in 0..ss {
+                for sx in 0..ss {
+                    let px = pixels[(y * ss + sy) * w + x * ss + sx];
+                    for c in 0..4 {
+                        sum[c] += px[c];
+                    }
+                }
+            }
+            for c in 0..4 {
+                dst[c] += sum[c] * inv * weight;
+            }
+        }
+    }
+    out
+}
+
 fn to_straight(acc: &Accumulator) -> RgbaImage {
     let mut image = RgbaImage::new(acc.width as u32, acc.height as u32);
     for (index, px) in acc.pixels.iter().enumerate() {

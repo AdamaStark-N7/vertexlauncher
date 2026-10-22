@@ -8,7 +8,7 @@ use config::Config;
 use launcher_ui::notification::{self, NotificationDisplaySettings, Severity};
 use vertex_shell::sturdy::glam::{Vec2, Vec4};
 use vertex_shell::sturdy::ui::{
-    AlignX, AlignY, AttachPoint, Border, ChildAlignment, CornerRadius, Cursor, Direction,
+    AlignX, AlignY, AttachPoint, Border, ChildAlignment, CornerRadius, Direction,
     ElementDesc, FloatTarget, Floating, Padding, Sizing, TextStyle, TextWrap, Ui,
 };
 
@@ -46,7 +46,8 @@ pub fn show(ui: &mut Ui<'_>, kit: &mut Kit, config: &Config) {
                 parent_attach_point: AttachPoint::RightTop,
                 offset: Vec2::new(-MARGIN, TITLE_BAR + MARGIN * 0.5),
                 z_index: 1500,
-                capture_pointer: false,
+                // The cards are in front of the page, so they take the pointer: what they cover is not clickable.
+                capture_pointer: true,
                 ..Floating::new(FloatTarget::Root)
             })),
     );
@@ -130,24 +131,26 @@ pub fn show(ui: &mut Ui<'_>, kit: &mut Kit, config: &Config) {
                                 kit.palette.hovered_fill()
                             } else {
                                 Vec4::ZERO
-                            })
-                            .cursor(Cursor::Pointer),
+                            }),
                     );
                     kit.text_colored(ui, "✕", kit.palette.text_muted.with_w(fade), 0.8);
                 }
-                if ui.clicked(&close) {
+                if kit.clicked_plain(ui, &close) {
                     dismissed.push(toast.id);
                 }
             }
-            kit::label(
-                ui,
-                &toast.message,
-                &TextStyle {
-                    wrap: TextWrap::Words,
-                    color: kit.palette.text.with_w(fade),
-                    ..kit.style(TextRole::Body)
-                },
-            );
+            // The card's text width: the stack's width less the border, the accent strip and both paddings.
+            kit::with_text_width(WIDTH - 2.0 - 10.0 - 2.0 * f32::from(PADDING), || {
+                kit::label(
+                    ui,
+                    &toast.message,
+                    &TextStyle {
+                        wrap: TextWrap::Words,
+                        color: kit.palette.text.with_w(fade),
+                        ..kit.style(TextRole::Body)
+                    },
+                )
+            });
             if toast.progress.is_some() || toast.spinner {
                 kit.progress(
                     ui,

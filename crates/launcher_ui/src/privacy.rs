@@ -165,6 +165,65 @@ pub fn hide_account_names(text: &str, names_lowercase: &[String]) -> Option<Stri
 /// What the UI is currently hiding: streamer mode and the lowercase names to hide with it.
 static HIDDEN_NAMES: Mutex<Option<(bool, Vec<String>)>> = Mutex::new(None);
 
+/// Profile id of each hidden name (lowercase name to id), so a hidden name can be drawn in its account's colour.
+static HIDDEN_IDS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+
+/// A piece of text as shown in streamer mode: ordinary text, or a hidden account (drawn as the redaction label,
+/// highlighted with the account's colour when its profile id is known).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScrubPiece {
+    Text(String),
+    Account { id: Option<String> },
+}
+
+/// `text` split into ordinary text and hidden accounts, or `None` when nothing in it is hidden (not in streamer mode,
+/// or no account is named in it). Both mention markup and plain occurrences of an account's name count.
+pub fn scrub_pieces(text: &str) -> Option<Vec<ScrubPiece>> {
+    if EXEMPT_DEPTH.with(|depth| depth.get() != 0) {
+        return None;
+    }
+    let (streamer_mode, names) = HIDDEN_NAMES.lock().ok()?.clone()?;
+    if !streamer_mode {
+        return None;
+    }
+    let ids = HIDDEN_IDS.lock().ok()?.clone();
+    let id_of = |name: &str| {
+        let lower = name.to_ascii_lowercase();
+        ids.iter()
+            .find(|(known, _)| *known == lower)
+            .map(|(_, id)| id.clone())
+            .filter(|id| !id.is_empty())
+    };
+    let mut pieces = Vec::new();
+    let mut hidden_any = false;
+    for segment in crate::account_text::segments(text) {
+        match segment {
+            crate::account_text::Segment::Account { id, name } => {
+                hidden_any = true;
+                let id = (!id.is_empty()).then(|| id.to_owned()).or_else(|| id_of(name));
+                pieces.push(ScrubPiece::Account { id });
+            }
+            crate::account_text::Segment::Text(part) => {
+                let mut copied = 0;
+                for range in name_ranges(part, &names) {
+                    if range.start > copied {
+                        pieces.push(ScrubPiece::Text(part[copied..range.start].to_owned()));
+                    }
+                    hidden_any = true;
+                    pieces.push(ScrubPiece::Account {
+                        id: id_of(&part[range.clone()]),
+                    });
+                    copied = range.end;
+                }
+                if copied < part.len() {
+                    pieces.push(ScrubPiece::Text(part[copied..].to_owned()));
+                }
+            }
+        }
+    }
+    hidden_any.then_some(pieces)
+}
+
 /// Sets up the last-chance filter that every piece of text drawn by the UI passes through
 /// ([`scrub`]), so account names cannot show in streamer mode whatever produced the text: log lines,
 /// error messages, anything.
@@ -174,6 +233,25 @@ static HIDDEN_NAMES: Mutex<Option<(bool, Vec<String>)>> = Mutex::new(None);
 /// [`crate::account_text`]) that reaches a plain widget is resolved here as well, to the name or
 /// to the redaction label, so the markup itself is never shown.
 pub fn update_hidden_names<'a>(streamer_mode: bool, names: impl IntoIterator<Item = &'a str>) {
+    update_hidden_accounts(streamer_mode, names.into_iter().map(|name| ("", name)));
+}
+
+/// [`update_hidden_names`] with each account's profile id too, which [`scrub_pieces`] uses to find its colour.
+pub fn update_hidden_accounts<'a>(
+    streamer_mode: bool,
+    accounts: impl IntoIterator<Item = (&'a str, &'a str)>,
+) {
+    let accounts: Vec<(&str, &str)> = accounts.into_iter().collect();
+    if let Ok(mut ids) = HIDDEN_IDS.lock() {
+        let next: Vec<(String, String)> = accounts
+            .iter()
+            .map(|(id, name)| (name.trim().to_ascii_lowercase(), (*id).to_owned()))
+            .collect();
+        if *ids != next {
+            *ids = next;
+        }
+    }
+    let names = accounts.iter().map(|(_, name)| *name);
     let mut names_lowercase: Vec<String> = names
         .into_iter()
         .map(|name| name.trim().to_ascii_lowercase())

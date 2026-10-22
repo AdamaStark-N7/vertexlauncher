@@ -304,6 +304,16 @@ impl AuthState {
             .map(|account| account.minecraft_profile.name.as_str())
     }
 
+    /// (profile id, Minecraft name) of every saved account, so a hidden name can still be drawn in its account's colour.
+    pub fn account_identities(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.accounts_state.accounts.iter().map(|account| {
+            (
+                account.minecraft_profile.id.as_str(),
+                account.minecraft_profile.name.as_str(),
+            )
+        })
+    }
+
     pub fn display_name(&self) -> Option<&str> {
         self.accounts_state
             .active_account()

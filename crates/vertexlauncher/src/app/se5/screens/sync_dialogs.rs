@@ -10,7 +10,7 @@ use launcher_ui::sync_runner::{
     self, SyncRunConfig, WorldSyncReceiver, WorldSyncRequest, WorldSyncResult,
 };
 use vertex_shell::sturdy::ui::{Clip, Direction, ElementDesc, Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::kit::{self, ButtonKind, Kit, TextRole};
 use super::super::{AppState, Dialog};

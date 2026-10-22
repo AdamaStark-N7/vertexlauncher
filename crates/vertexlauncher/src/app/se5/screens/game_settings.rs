@@ -7,7 +7,7 @@ use launcher_ui::screens::game_settings_api::{
 use vertex_shell::sturdy::Key;
 use vertex_shell::sturdy::MouseButton;
 use vertex_shell::sturdy::ui::{Clip, Direction, ElementDesc, Sizing, TextStyle, TextWrap, Ui};
-use vertex_shell::sturdy::ui_kit::{self, ModalStyle};
+use vertex_shell::sturdy::ui_kit::ModalStyle;
 
 use super::super::AppState;
 use super::super::kit::{self, ButtonKind, Kit, TextRole};
@@ -436,7 +436,26 @@ fn stepper(
         ) {
             next = Some((value - step).max(min));
         }
-        kit.text(ui, TextRole::Body, &format(value));
+        // Typing a number is the precise way: the box takes only what a number can hold, and the value is clamped.
+        let shown = format(value);
+        let (number, suffix) = shown.split_at(
+            shown
+                .find(|c: char| !(c.is_ascii_digit() || c == '.' || c == '-'))
+                .unwrap_or(shown.len()),
+        );
+        if let Some(typed) = kit.number_field(
+            ui,
+            &format!("{id}::value"),
+            number,
+            84.0,
+            step.fract() != 0.0 || number.contains('.'),
+            min < 0.0,
+        ) {
+            next = Some(typed.clamp(min, max));
+        }
+        if !suffix.trim().is_empty() {
+            kit.text(ui, TextRole::Muted, suffix.trim());
+        }
         if kit.button(
             ui,
             &format!("{id}::plus"),

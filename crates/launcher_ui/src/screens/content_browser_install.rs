@@ -599,6 +599,152 @@ fn remove_installed_project(
     Ok(())
 }
 
+/// Downloads a file for [`update_installed_file_only`] when it was not prefetched.
+pub(super) fn download_content_file(url: &str, destination: &Path) -> Result<(), String> {
+    download_file(url, destination)
+}
+
+/// Replaces the installed file of a project with `version`, and nothing else.
+///
+/// This is what updating a mod means: the new file goes where the old one was and the manifest notes the new version.
+/// No dependency is looked up, installed or removed, a project other mods require is replaced like any other, and a
+/// failure to clean up the old file afterwards is logged, not an error: the new version is in place. If the new file
+/// cannot be put in place the old one is put back and the error is returned for this project alone.
+///
+/// `prefetched_paths` maps a target path to a file already downloaded for it; otherwise the file is downloaded here.
+pub(super) fn update_installed_file_only(
+    instance_root: &Path,
+    entry: &BrowserProjectEntry,
+    installed_file_path: &Path,
+    version: BrowserVersionEntry,
+    prefetched_paths: &HashMap<PathBuf, PathBuf>,
+) -> Result<(), String> {
+    let resolved = resolved_download_from_version(version.clone());
+    let target_path = content_target_path(instance_root, entry, &version);
+    let mut manifest = load_content_manifest(instance_root);
+    let (effective_installed_file_path, stale_requested_path) =
+        resolve_installed_file_paths_for_update(instance_root, &manifest, entry, installed_file_path);
+
+    let existing = installed_project_for_entry(&manifest, entry)
+        .map(|(key, project)| (key.to_owned(), project.clone()));
+    if let Some((_, project)) = &existing
+        && project.selected_source == Some(resolved.source)
+        && project.selected_version_id.as_deref() == Some(resolved.version_id.as_str())
+        && target_path.exists()
+    {
+        return Ok(());
+    }
+
+    let staged_path = stage_existing_file_for_update(
+        effective_installed_file_path.as_path(),
+        target_path.as_path(),
+    )?;
+    let placed = (|| -> Result<(), String> {
+        if let Some(parent) = target_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create content folder {}: {err}", parent.display()))?;
+        }
+        let ready = match prefetched_paths.get(&target_path).filter(|path| path.exists()) {
+            Some(prefetched) => prefetched.clone(),
+            None => {
+                // Written beside the target first, so a download that dies half way never leaves a broken file in
+                // the content folder.
+                let partial = target_path.with_extension("vertex-download");
+                if let Err(err) = download_file(resolved.file_url.as_str(), partial.as_path()) {
+                    let _ = std::fs::remove_file(partial.as_path());
+                    return Err(err);
+                }
+                partial
+            }
+        };
+        if target_path.exists() {
+            remove_content_path(target_path.as_path())?;
+        }
+        std::fs::rename(ready.as_path(), target_path.as_path()).map_err(|err| {
+            format!(
+                "failed to place {} at {}: {err}",
+                ready.display(),
+                target_path.display()
+            )
+        })
+    })();
+    if let Err(err) = placed {
+        if let Some(staged) = staged_path.as_ref() {
+            restore_staged_update_file(staged.as_path(), effective_installed_file_path.as_path())
+                .map_err(|restore_err| {
+                    format!("{err} (also failed to restore the original file: {restore_err})")
+                })?;
+        }
+        return Err(err);
+    }
+
+    // The new file is in place. What follows is bookkeeping and cleanup, and none of it undoes the update.
+    let project_key = existing
+        .as_ref()
+        .map(|(key, _)| key.clone())
+        .unwrap_or_else(|| entry.dedupe_key.clone());
+    let previous = existing.map(|(_, project)| project);
+    let file_path = target_path
+        .strip_prefix(instance_root)
+        .unwrap_or(target_path.as_path())
+        .to_path_buf();
+    manifest.projects.insert(
+        project_key.clone(),
+        InstalledContentProject {
+            project_key,
+            name: entry.name.clone(),
+            folder_name: entry.content_type.folder_name().to_owned(),
+            file_path,
+            modrinth_project_id: entry.modrinth_project_id.clone(),
+            curseforge_project_id: entry.curseforge_project_id,
+            selected_source: Some(resolved.source),
+            selected_version_id: Some(resolved.version_id.clone()),
+            selected_version_name: Some(resolved.version_name.clone()),
+            selected_file_sha1: None,
+            selected_file_sha512: None,
+            pack_managed: false,
+            explicitly_installed: previous
+                .as_ref()
+                .map_or(true, |project| project.explicitly_installed),
+            // Dependencies are not part of an update, so what was recorded stays as it was.
+            direct_dependencies: previous
+                .map(|project| project.direct_dependencies)
+                .unwrap_or_default(),
+        },
+    );
+    if let Err(err) = save_content_manifest(instance_root, &manifest) {
+        tracing::warn!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            project = %entry.name,
+            "updated the file but could not save the content manifest: {err}"
+        );
+    }
+    let mut removed = Vec::new();
+    if let Err(err) = finalize_updated_file_replacement(
+        effective_installed_file_path.as_path(),
+        target_path.as_path(),
+        staged_path.as_deref(),
+        &mut removed,
+        None,
+    ) {
+        tracing::warn!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            project = %entry.name,
+            "updated, but could not remove the previous file: {err}"
+        );
+    }
+    if let Some(stale) = stale_requested_path.filter(|path| !paths_match_for_update(path, target_path.as_path()))
+        && let Err(err) = remove_content_path(stale.as_path())
+    {
+        tracing::warn!(
+            target: CONTENT_UPDATE_LOG_TARGET,
+            project = %entry.name,
+            "updated, but could not remove an extra copy: {err}"
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn resolved_download_from_version(version: BrowserVersionEntry) -> ResolvedDownload {
     ResolvedDownload {
         source: version.source,
