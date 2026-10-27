@@ -18,6 +18,9 @@ pub(super) struct SkinManagerState {
     pub(super) save_in_progress: bool,
     pub(super) refresh_in_progress: bool,
     pub(super) worker_rx: Option<Arc<Mutex<Receiver<WorkerEvent>>>>,
+    /// The cached account being read on a worker (it may touch the OS keyring), for the profile named first.
+    pub(super) snapshot_rx:
+        Option<Arc<Mutex<Receiver<(String, Result<auth::CachedAccountsState, String>)>>>>,
     pub(super) pick_skin_in_progress: bool,
     pub(super) pick_skin_results_rx:
         Option<Arc<Mutex<Receiver<Result<(PathBuf, Vec<u8>), String>>>>>,
@@ -80,6 +83,7 @@ impl Default for SkinManagerState {
             save_in_progress: false,
             refresh_in_progress: false,
             worker_rx: None,
+            snapshot_rx: None,
             pick_skin_in_progress: false,
             pick_skin_results_rx: None,
             preview_msaa_samples: 1,
@@ -193,23 +197,54 @@ impl SkinManagerState {
         self.start_refresh();
     }
 
+    /// Starts reading the cached account on a worker; [`Self::poll_snapshot`] shows it when it arrives.
     pub(super) fn load_snapshot_from_cache_for_profile(&mut self, profile_id: &str) {
-        match auth::load_cached_accounts() {
-            Ok(accounts) => {
-                let profile_id_lower = profile_id.to_ascii_lowercase();
-                if let Some(account) = accounts.accounts.iter().find(|account| {
-                    account.minecraft_profile.id.to_ascii_lowercase() == profile_id_lower
-                }) {
-                    self.apply_account_snapshot(account);
+        let (tx, rx) = mpsc::channel();
+        let profile_id = profile_id.to_owned();
+        self.snapshot_rx = Some(Arc::new(Mutex::new(rx)));
+        launcher_runtime::spawn_blocking_detached(move || {
+            let result = auth::load_cached_accounts().map_err(|err| err.to_string());
+            let _ = tx.send((profile_id, result));
+            crate::ui_waker::wake();
+        });
+    }
+
+    pub(super) fn poll_snapshot(&mut self) {
+        let Some(rx) = self.snapshot_rx.clone() else {
+            return;
+        };
+        let received = match rx.lock() {
+            Ok(rx) => rx.try_recv(),
+            Err(_) => Err(mpsc::TryRecvError::Disconnected),
+        };
+        match received {
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => self.snapshot_rx = None,
+            Ok((profile_id, result)) => {
+                self.snapshot_rx = None;
+                // The refresh that follows is newer than the cache: once it has landed, or the profile changed, the
+                // cache is stale and must not be drawn over it.
+                let current = self.active_profile_id.as_deref() == Some(profile_id.as_str())
+                    && self.refresh_in_progress;
+                match result {
+                    Ok(accounts) if current => {
+                        let profile_id_lower = profile_id.to_ascii_lowercase();
+                        if let Some(account) = accounts.accounts.iter().find(|account| {
+                            account.minecraft_profile.id.to_ascii_lowercase() == profile_id_lower
+                        }) {
+                            self.apply_account_snapshot(account);
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        tracing::error!(
+                            target: "vertexlauncher/skins",
+                            error = %err,
+                            "Failed to load cached accounts while preparing skin-manager snapshot."
+                        );
+                        notification::error!("skin_manager", "Failed to load account cache: {err}");
+                    }
                 }
-            }
-            Err(err) => {
-                tracing::error!(
-                    target: "vertexlauncher/skins",
-                    error = %err,
-                    "Failed to load cached accounts while preparing skin-manager snapshot."
-                );
-                notification::error!("skin_manager", "Failed to load account cache: {err}");
             }
         }
     }
@@ -254,6 +289,7 @@ impl SkinManagerState {
     }
 
     pub(super) fn poll_worker(&mut self, repaint: impl Fn()) {
+        self.poll_snapshot();
         let Some(rx) = self.worker_rx.take() else {
             return;
         };

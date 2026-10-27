@@ -14,6 +14,8 @@ use launcher_ui::screens::AppScreen;
 /// Controller state kept between frames.
 pub struct Gamepad {
     navigator: Option<GamepadNavigator>,
+    /// The controller layer is opened on a worker (the OS input stack can be slow to answer); `pump` takes it.
+    opening: Option<std::sync::mpsc::Receiver<Option<GamepadNavigator>>>,
     /// Right stick pan and trigger zoom for the screenshot viewers, in -1..1.
     pub viewer_pan: Vec2,
     pub viewer_zoom: f32,
@@ -21,8 +23,14 @@ pub struct Gamepad {
 
 impl Default for Gamepad {
     fn default() -> Self {
+        let (tx, rx) = std::sync::mpsc::channel();
+        launcher_runtime::spawn_blocking_detached(move || {
+            let _ = tx.send(GamepadNavigator::new());
+            vertex_shell::wake();
+        });
         Self {
-            navigator: GamepadNavigator::new(),
+            navigator: None,
+            opening: Some(rx),
             viewer_pan: Vec2::ZERO,
             viewer_zoom: 0.0,
         }
@@ -30,6 +38,21 @@ impl Default for Gamepad {
 }
 
 impl Gamepad {
+    /// Takes the controller layer once the worker has opened it. Call once per frame.
+    pub fn pump(&mut self) {
+        let Some(rx) = &self.opening else {
+            return;
+        };
+        match rx.try_recv() {
+            Ok(navigator) => {
+                self.navigator = navigator;
+                self.opening = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => self.opening = None,
+        }
+    }
+
     pub fn navigator(&self) -> Option<&GamepadNavigator> {
         self.navigator.as_ref()
     }
@@ -60,6 +83,7 @@ pub fn frame(ui: &mut Ui<'_>, kit: &mut Kit, state: &mut AppState) {
         console,
         ..
     } = state;
+    gamepad.pump();
     let Some(navigator) = gamepad.navigator.as_mut() else {
         kit.begin_input_frame(ui, NavInput::default(), 0);
         return;

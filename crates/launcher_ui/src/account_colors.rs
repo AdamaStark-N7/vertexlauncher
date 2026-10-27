@@ -174,63 +174,103 @@ impl AccountColorStore {
 
     /// Sets (or, with `None`, clears) an account's color and writes the file.
     pub fn set(&mut self, account_id: &str, color: Option<Color32>) -> io::Result<()> {
+        if !self.apply(account_id, color) {
+            return Ok(());
+        }
+        let json = self.to_json()?;
+        write_file(&self.path, &json)
+    }
+
+    /// Changes the color in memory only. False if `account_id` is not a usable key.
+    fn apply(&mut self, account_id: &str, color: Option<Color32>) -> bool {
         let key = normalize_account_id(account_id);
         if key.is_empty() {
-            return Ok(());
+            return false;
         }
         match color {
             Some(color) => self.colors.insert(key, color),
             None => self.colors.remove(&key),
         };
-        self.save()
+        true
     }
 
-    fn save(&self) -> io::Result<()> {
+    fn to_json(&self) -> io::Result<String> {
         let raw: BTreeMap<&str, String> = self
             .colors
             .iter()
             .map(|(account_id, color)| (account_id.as_str(), format_hex(*color)))
             .collect();
-        let json = serde_json::to_string_pretty(&raw).map_err(io::Error::other)?;
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        // Write beside the file and rename, so a crash never leaves half a file.
-        let temp_path = self.path.with_extension("json.tmp");
-        fs::write(&temp_path, json)?;
-        fs::rename(&temp_path, &self.path)
+        serde_json::to_string_pretty(&raw).map_err(io::Error::other)
     }
+}
+
+fn write_file(path: &std::path::Path, json: &str) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    // Write beside the file and rename, so a crash never leaves half a file.
+    let temp_path = path.with_extension("json.tmp");
+    fs::write(&temp_path, json)?;
+    fs::rename(&temp_path, path)
 }
 
 fn colors_path() -> PathBuf {
     app_paths::config_root().join(COLORS_FILE_NAME)
 }
 
+static STORE: OnceLock<Mutex<AccountColorStore>> = OnceLock::new();
+
+/// Reads the file on first use. Disk IO: only ever call this from a worker, never the UI thread.
 fn shared_store() -> &'static Mutex<AccountColorStore> {
-    static STORE: OnceLock<Mutex<AccountColorStore>> = OnceLock::new();
     STORE.get_or_init(|| Mutex::new(AccountColorStore::load(colors_path())))
 }
 
+/// Reads the saved colors on a worker. Until it finishes, [`color_for`] answers `None`.
+pub fn warm() {
+    launcher_runtime::spawn_blocking_detached(|| {
+        shared_store();
+        crate::ui_waker::wake();
+    });
+}
+
 /// The color chosen for `account_id` (a player UUID), if any.
+///
+/// Called while drawing, so it never waits: before [`warm`] has finished, or while a change is being applied, it is `None`.
 pub fn color_for(account_id: &str) -> Option<Color32> {
-    shared_store()
-        .lock()
+    STORE
+        .get()?
+        .try_lock()
         .ok()
         .and_then(|store| store.get(account_id))
 }
 
 /// Chooses (or with `None`, clears) the color for `account_id` and saves it to disk.
+///
+/// The change and the write happen on a worker; the new color shows on the next frame.
 pub fn set_color(account_id: &str, color: Option<Color32>) {
-    let Ok(mut store) = shared_store().lock() else {
-        return;
-    };
-    if let Err(error) = store.set(account_id, color) {
-        tracing::warn!(
-            target: "vertexlauncher/account_colors",
-            error = %error,
-            "Could not save the account colors."
-        );
-    }
+    static WRITE_LOCK: Mutex<()> = Mutex::new(());
+    let account_id = account_id.to_owned();
+    launcher_runtime::spawn_blocking_detached(move || {
+        // Writes go one at a time, each of the newest state, so two quick changes cannot interleave on the temp file.
+        let _writing = WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (path, json) = {
+            let Ok(mut store) = shared_store().lock() else {
+                return;
+            };
+            if !store.apply(&account_id, color) {
+                return;
+            }
+            (store.path.clone(), store.to_json())
+        };
+        crate::ui_waker::wake();
+        if let Err(error) = json.and_then(|json| write_file(&path, &json)) {
+            tracing::warn!(
+                target: "vertexlauncher/account_colors",
+                error = %error,
+                "Could not save the account colors."
+            );
+        }
+    });
 }
 
 /// Whether `color` is one of the default palette colors.

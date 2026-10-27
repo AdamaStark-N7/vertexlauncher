@@ -101,17 +101,7 @@ impl AuthState {
                     }
 
                     self.rebuild_active_avatar_png();
-                    if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-                        tracing::warn!(
-                            target: "vertexlauncher/auth/avatar",
-                            error = %err,
-                            "Failed to persist background-loaded avatar."
-                        );
-                        notification::warn!(
-                            "auth/avatar",
-                            "Failed to persist background-loaded avatar: {err}"
-                        );
-                    }
+                    self.save_accounts_in_background("Failed to persist background-loaded avatar");
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
                 Err(mpsc::TryRecvError::Disconnected) => {

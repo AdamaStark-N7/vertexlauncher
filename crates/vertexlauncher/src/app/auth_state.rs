@@ -65,11 +65,81 @@ pub struct AuthState {
     device_code_expiry: Option<Instant>,
     renewal: Option<Receiver<RenewalResult>>,
     status: AuthUiStatus,
+    /// The saved accounts are being read on a worker (the OS keyring can be slow); `poll` swaps them in.
+    pending_load: Option<Receiver<Box<AuthState>>>,
+    /// Failures of background cache writes, as messages for `poll` to report.
+    cache_save_tx: Sender<String>,
+    cache_save_rx: Receiver<String>,
 }
 
 impl AuthState {
+    /// Starts with no accounts and reads the saved ones on a worker, so a slow or stuck keyring never holds up the
+    /// window. `poll` swaps them in; until then the account list is empty and sign-in actions wait.
     pub fn load() -> Self {
+        let mut state = Self::empty();
+        let (tx, rx) = mpsc::channel();
+        state.pending_load = Some(rx);
+        let _ = tokio_runtime::spawn_blocking_detached(move || {
+            let _ = tx.send(Box::new(Self::load_blocking()));
+            launcher_ui::ui_waker::wake();
+        });
+        state
+    }
+
+    fn empty() -> Self {
         let (avatar_result_tx, avatar_result_rx) = mpsc::channel();
+        let (cache_save_tx, cache_save_rx) = mpsc::channel();
+        Self {
+            accounts_state: CachedAccountsState::default(),
+            account_avatars: HashMap::new(),
+            failed_account_errors: HashMap::new(),
+            avatar_result_tx,
+            avatar_result_rx,
+            avatar_loads_in_flight: HashSet::new(),
+            active_avatar_png: None,
+            flow: None,
+            device_code_flow: None,
+            device_code_prompt: None,
+            device_code_expiry: None,
+            renewal: None,
+            status: AuthUiStatus::Idle,
+            pending_load: None,
+            cache_save_tx,
+            cache_save_rx,
+        }
+    }
+
+    /// Writes the account cache on a worker (it goes through the OS keyring, which can stall). Writes go one at a
+    /// time and a newer request makes an older one that has not started yet skip itself. A failure comes back
+    /// through `cache_save_rx` as `"{failure}: {error}"`.
+    pub(super) fn save_accounts_in_background(&self, failure: &'static str) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        static WRITTEN: std::sync::Mutex<u64> = std::sync::Mutex::new(0);
+        let sequence = NEXT.fetch_add(1, Ordering::Relaxed) + 1;
+        let state = self.accounts_state.clone();
+        let tx = self.cache_save_tx.clone();
+        let _ = tokio_runtime::spawn_blocking_detached(move || {
+            let mut written = WRITTEN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if sequence < *written {
+                return;
+            }
+            *written = sequence;
+            if let Err(err) = auth::save_cached_accounts(&state) {
+                tracing::warn!(
+                    target: "vertexlauncher/auth_state",
+                    error = %err,
+                    "Persisting cached account state failed."
+                );
+                let _ = tx.send(format!("{failure}: {err}"));
+                launcher_ui::ui_waker::wake();
+            }
+        });
+    }
+
+    fn load_blocking() -> Self {
+        let (avatar_result_tx, avatar_result_rx) = mpsc::channel();
+        let (cache_save_tx, cache_save_rx) = mpsc::channel();
         let (accounts_state, status) = match auth::load_cached_accounts() {
             Ok(state) => (state, AuthUiStatus::Idle),
             Err(err) => {
@@ -101,6 +171,9 @@ impl AuthState {
             device_code_expiry: None,
             renewal: None,
             status,
+            pending_load: None,
+            cache_save_tx,
+            cache_save_rx,
         };
 
         if !auth_state.accounts_state.accounts.is_empty() {
@@ -128,6 +201,16 @@ impl AuthState {
     }
 
     pub fn poll(&mut self) {
+        if let Some(rx) = &self.pending_load {
+            match rx.try_recv() {
+                Ok(loaded) => *self = *loaded,
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => self.pending_load = None,
+            }
+        }
+        while let Ok(message) = self.cache_save_rx.try_recv() {
+            self.report_cache_save_failure(message);
+        }
         self.poll_avatar_loads();
         self.poll_renewal();
         self.poll_interactive_flow();
@@ -135,7 +218,7 @@ impl AuthState {
     }
 
     pub fn start_webview_sign_in(&mut self) {
-        if self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
+        if self.pending_load.is_some() || self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
             return;
         }
 
@@ -158,7 +241,7 @@ impl AuthState {
     }
 
     pub fn start_device_code_sign_in(&mut self) {
-        if self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
+        if self.pending_load.is_some() || self.flow.is_some() || self.device_code_flow.is_some() || self.renewal.is_some() {
             return;
         }
 
@@ -175,7 +258,7 @@ impl AuthState {
     }
 
     pub fn start_system_browser_sign_in(&mut self, theme: &vertex_theme::Theme) {
-        if self.flow.is_some() || self.renewal.is_some() {
+        if self.pending_load.is_some() || self.flow.is_some() || self.renewal.is_some() {
             return;
         }
 
@@ -194,7 +277,7 @@ impl AuthState {
     }
 
     pub fn select_account(&mut self, profile_id: &str) {
-        if !self.accounts_state.set_active_profile_id(profile_id) {
+        if self.pending_load.is_some() || !self.accounts_state.set_active_profile_id(profile_id) {
             return;
         }
 
@@ -204,15 +287,11 @@ impl AuthState {
             self.status = AuthUiStatus::Idle;
         }
 
-        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-            let message =
-                format!("Switched account in memory, but failed to cache account state: {err}");
-            self.report_cache_save_failure(message);
-        }
+        self.save_accounts_in_background("Switched account in memory, but failed to cache account state");
     }
 
     pub fn remove_account(&mut self, profile_id: &str) {
-        if !self.accounts_state.remove_by_profile_id(profile_id) {
+        if self.pending_load.is_some() || !self.accounts_state.remove_by_profile_id(profile_id) {
             return;
         }
 
@@ -221,15 +300,11 @@ impl AuthState {
         self.rebuild_active_avatar_png();
         self.status = AuthUiStatus::Idle;
 
-        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-            let message =
-                format!("Removed account in memory, but failed to cache account state: {err}");
-            self.report_cache_save_failure(message);
-        }
+        self.save_accounts_in_background("Removed account in memory, but failed to cache account state");
     }
 
     pub fn refresh_account_token(&mut self, profile_id: &str) {
-        if self.auth_busy() {
+        if self.pending_load.is_some() || self.auth_busy() {
             return;
         }
 
@@ -281,7 +356,10 @@ impl AuthState {
     }
 
     pub fn should_request_repaint(&self) -> bool {
-        self.flow.is_some() || self.renewal.is_some() || !self.avatar_loads_in_flight.is_empty()
+        self.pending_load.is_some()
+            || self.flow.is_some()
+            || self.renewal.is_some()
+            || !self.avatar_loads_in_flight.is_empty()
     }
 
     pub fn sign_in_in_progress(&self) -> bool {

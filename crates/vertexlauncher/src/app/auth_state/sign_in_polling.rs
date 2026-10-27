@@ -31,18 +31,9 @@ impl AuthState {
                         self.rebuild_active_avatar_png();
                         self.status = AuthUiStatus::Idle;
 
-                        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-                            tracing::warn!(
-                                target: "vertexlauncher/auth_state",
-                                error = %err,
-                                active_profile = self.accounts_state.active_profile_id.as_deref().unwrap_or_default(),
-                                "Sign-in succeeded but persisting cached account state failed."
-                            );
-                            let message = format!(
-                                "Sign-in succeeded, but failed to cache account state: {err}"
-                            );
-                            self.report_cache_save_failure(message);
-                        }
+                        self.save_accounts_in_background(
+                            "Sign-in succeeded, but failed to cache account state",
+                        );
 
                         flow_finished = true;
                         self.schedule_missing_avatars();
@@ -122,12 +113,9 @@ impl AuthState {
                         self.rebuild_active_avatar_png();
                         self.status = AuthUiStatus::Idle;
 
-                        if let Err(err) = auth::save_cached_accounts(&self.accounts_state) {
-                            let message = format!(
-                                "Sign-in succeeded, but failed to cache account state: {err}"
-                            );
-                            self.report_cache_save_failure(message);
-                        }
+                        self.save_accounts_in_background(
+                            "Sign-in succeeded, but failed to cache account state",
+                        );
 
                         device_flow_finished = true;
                         self.schedule_missing_avatars();

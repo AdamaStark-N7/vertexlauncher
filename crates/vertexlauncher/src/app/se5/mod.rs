@@ -265,6 +265,9 @@ pub struct AppState {
     font_scan: Option<mpsc::Receiver<FontOptions>>,
     /// Themes-folder fingerprint and when it was last checked, for live theme reload.
     theme_watch: (u64, std::time::Instant),
+    /// Folder fingerprints computed off the UI thread, and whether one is being computed.
+    theme_scan: launcher_runtime::WorkerChannel<(u64, Option<ThemeCatalog>)>,
+    theme_scan_in_flight: bool,
     applied_font: Option<FontSignature>,
     /// The config last handed to the engine appliers.
     submitted: Config,
@@ -423,11 +426,26 @@ impl AppState {
         }
         self.theme_watch.1 = std::time::Instant::now();
         vertex_shell::wake_after(INTERVAL);
-        let signature = ThemeCatalog::directory_signature();
-        if signature != self.theme_watch.0 {
-            self.theme_watch.0 = signature;
-            self.theme_catalog = ThemeCatalog::load();
-            self.sync_theme();
+        // The folder is looked at on a worker; the UI only ever reads the answer.
+        let results = self.theme_scan.drain();
+        if let Some((signature, catalog)) = results.items.into_iter().last() {
+            self.theme_scan_in_flight = false;
+            if let Some(catalog) = catalog {
+                self.theme_watch.0 = signature;
+                self.theme_catalog = catalog;
+                self.sync_theme();
+            }
+        }
+        if !self.theme_scan_in_flight {
+            self.theme_scan_in_flight = true;
+            let tx = self.theme_scan.sender();
+            let known = self.theme_watch.0;
+            launcher_runtime::spawn_blocking_detached(move || {
+                let signature = ThemeCatalog::directory_signature();
+                let catalog = (signature != known).then(ThemeCatalog::load);
+                let _ = tx.send((signature, catalog));
+                vertex_shell::wake();
+            });
         }
     }
 
@@ -741,6 +759,7 @@ impl App {
                 super::app_metadata::preload_settings_info,
             );
         }
+        launcher_ui::account_colors::warm();
         let palette = Palette::new(&theme, effective_ui_opacity_percent(&config));
         let kit = Kit::new(palette, config.ui_font_size());
         let selected_instance_id = instances
@@ -797,6 +816,8 @@ impl App {
                 ThemeCatalog::directory_signature(),
                 std::time::Instant::now(),
             ),
+            theme_scan: Default::default(),
+            theme_scan_in_flight: false,
             applied_font: None,
             config_saver: Saver::new("settings", |config| {
                 config::save_config(config).map_err(|err| err.to_string())
