@@ -19,7 +19,6 @@ members = [
     "crates/vertexlauncher",
     "crates/modprovider",
     "crates/modrinth",
-    "crates/runtime_bootstrap",
     "crates/shared_lru",
     "crates/vertex_constants",
     "crates/vtmpack",
@@ -47,8 +46,6 @@ pulldown-cmark = "0.13.3"
 syntect = "5.3.0"
 base64 = "0.22.1"
 raw-window-handle = "0.6.2"
-tokio = { version = "1.50.0", features = ["rt-multi-thread", "sync", "time", "fs", "process", "io-util"] }
-reqwest = { version = "0.12.24", default-features = false, features = ["rustls-tls"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["fmt", "env-filter"] }
 url = "2.5.8"
@@ -76,7 +73,6 @@ managed_content = { path = "crates/managed_content" }
 modrinth = { path = "crates/modrinth" }
 modprovider = { path = "crates/modprovider" }
 fontloader = { path = "crates/fontloader" }
-runtime_bootstrap = { path = "crates/runtime_bootstrap" }
 shared_lru = { path = "crates/shared_lru" }
 vtmpack = { path = "crates/vtmpack" }
 vertex_shell = { path = "crates/vertex_shell" }
@@ -152,9 +148,6 @@ opt-level = 3
 opt-level = 3
 
 [profile.dev.package.launcher_runtime]
-opt-level = 3
-
-[profile.dev.package.runtime_bootstrap]
 opt-level = 3
 
 [profile.dev.package.app_paths]

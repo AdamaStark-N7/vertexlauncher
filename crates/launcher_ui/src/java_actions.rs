@@ -116,10 +116,10 @@ async fn validate_java_executable(path: &str) -> Result<String, String> {
         return Err("No Java executable path is configured.".to_owned());
     }
     let path = Path::new(trimmed);
-    tokio::fs::metadata(path).await.map_err(|err| format!("Path is not readable: {trimmed}: {err}"))?;
-    let output = tokio::process::Command::new(path)
-        .arg("-version")
-        .output()
+    launcher_runtime::fs::metadata(path).await.map_err(|err| format!("Path is not readable: {trimmed}: {err}"))?;
+    let mut command = std::process::Command::new(path);
+    command.arg("-version");
+    let output = launcher_runtime::process::output(command)
         .await
         .map_err(|err| format!("Could not run {trimmed}: {err}"))?;
     let stdout = String::from_utf8_lossy(output.stdout.as_slice());

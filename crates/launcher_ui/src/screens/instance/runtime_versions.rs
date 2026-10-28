@@ -115,7 +115,7 @@ pub(in super::super) fn sync_version_catalog(
     );
 
     let _ = tokio_runtime::spawn_detached(async move {
-        let result: Result<VersionCatalog, String> = match tokio::time::timeout(
+        let result: Result<VersionCatalog, String> = match launcher_runtime::timeout(
             VERSION_CATALOG_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || {
                 fetch_version_catalog_with_refresh(filter, force_refresh)
@@ -297,7 +297,7 @@ pub(in super::super) fn request_modloader_versions(
     let loader_for_log = loader.clone();
     let game_for_log = game.clone();
     let _ = tokio_runtime::spawn_detached(async move {
-        let result: Result<Vec<String>, String> = match tokio::time::timeout(
+        let result: Result<Vec<String>, String> = match launcher_runtime::timeout(
             MODLOADER_VERSIONS_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || {
                 fetch_loader_versions_for_game(loader.as_str(), game.as_str(), force_refresh)

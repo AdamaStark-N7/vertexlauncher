@@ -38,7 +38,7 @@ pub(super) fn request_detail_versions(state: &mut ContentBrowserState) {
     state.detail_versions_error = None;
     let project_key = entry.dedupe_key.clone();
     let _ = tokio_runtime::spawn_detached(async move {
-        let versions: Result<Vec<BrowserVersionEntry>, String> = match tokio::time::timeout(
+        let versions: Result<Vec<BrowserVersionEntry>, String> = match launcher_runtime::timeout(
             DETAIL_VERSIONS_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || fetch_versions_for_entry(&entry)),
         )
@@ -77,7 +77,7 @@ pub(super) fn request_version_catalog(state: &mut ContentBrowserState) {
 
     state.version_catalog_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
-        let result: Result<Vec<MinecraftVersionEntry>, String> = match tokio::time::timeout(
+        let result: Result<Vec<MinecraftVersionEntry>, String> = match launcher_runtime::timeout(
             VERSION_CATALOG_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || {
                 fetch_version_catalog(VersionCatalogFilter::default())

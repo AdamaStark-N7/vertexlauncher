@@ -4,8 +4,6 @@ version.workspace = true
 edition = "2024"
 
 [dependencies]
-runtime_bootstrap.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]

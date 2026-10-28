@@ -50,7 +50,7 @@ pub(super) fn request_move_instance(
 
     let _ = tokio_runtime::spawn_detached(async move {
         // Create the destination root directory
-        if let Err(err) = tokio::fs::create_dir_all(&dest_root).await {
+        if let Err(err) = launcher_runtime::fs::create_dir_all(&dest_root).await {
             tracing::warn!(
                 target: "vertexlauncher/move_instance",
                 path = %dest_root.display(),
@@ -71,7 +71,7 @@ pub(super) fn request_move_instance(
 
         // Walk the tree and total its size on a blocking thread; both are pure filesystem work.
         let scan_root = source_root.clone();
-        let Ok((files, total_bytes)) = tokio::task::spawn_blocking(move || {
+        let Ok((files, total_bytes)) = launcher_runtime::spawn_blocking(move || {
             let mut files: Vec<PathBuf> = Vec::new();
             collect_files_recursively(&scan_root, &mut files);
             let total_bytes: u64 = files
@@ -106,7 +106,7 @@ pub(super) fn request_move_instance(
             .map(|count| count.get().saturating_mul(2))
             .unwrap_or(8)
             .clamp(4, 32);
-        let copy_permits = Arc::new(tokio::sync::Semaphore::new(max_concurrent_copies));
+        let copy_permits = Arc::new(launcher_runtime::Semaphore::new(max_concurrent_copies));
 
         // One channel for all child reports back to the parent aggregator
         let (child_tx, child_rx) = mpsc::channel::<MoveChildReport>();
@@ -122,22 +122,9 @@ pub(super) fn request_move_instance(
                     .strip_prefix(&source_root)
                     .map(|p| p.to_string_lossy().replace('\\', "/"))
                     .unwrap_or_else(|_| source_path.display().to_string());
-                let Ok(_permit) = copy_permits.acquire_owned().await else {
-                    tracing::warn!(
-                        target: "vertexlauncher/move_instance",
-                        relative_path = rel.as_str(),
-                        "failed to acquire move concurrency permit"
-                    );
-                    let _ = child_tx.send(MoveChildReport {
-                        file_rel_path: rel,
-                        bytes_copied: 0,
-                        done: true,
-                        error: Some("Failed to acquire move concurrency permit.".to_owned()),
-                    });
-                    return;
-                };
+                let Ok(_permit) = copy_permits.acquire_owned().await;
 
-                let result = tokio::task::spawn_blocking({
+                let result = launcher_runtime::spawn_blocking({
                     let rel = rel.clone();
                     let child_tx = child_tx.clone();
                     move || {
@@ -279,7 +266,7 @@ pub(super) fn request_move_instance(
         let mut first_error: Option<String> = None;
 
         // Run the aggregation loop in a blocking task since recv() blocks
-        let _ = tokio::task::spawn_blocking(move || {
+        let _ = launcher_runtime::spawn_blocking(move || {
             loop {
                 match child_rx.recv() {
                     Ok(report) => {

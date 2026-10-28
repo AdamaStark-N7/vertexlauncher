@@ -123,12 +123,12 @@ pub async fn ensure_openjdk_runtime_async(runtime_major: u8) -> Result<PathBuf, 
     }
 
     if let Some(parent) = install_root.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        launcher_runtime::fs::create_dir_all(parent).await?;
     }
-    if tokio::fs::try_exists(&install_root).await? {
-        tokio::fs::remove_dir_all(&install_root).await?;
+    if launcher_runtime::fs::try_exists(&install_root).await? {
+        launcher_runtime::fs::remove_dir_all(&install_root).await?;
     }
-    tokio::fs::create_dir_all(&install_root).await?;
+    launcher_runtime::fs::create_dir_all(&install_root).await?;
 
     let metadata_url = format!(
         "https://api.adoptium.net/v3/assets/latest/{runtime_major}/hotspot?architecture={arch}&image_type=jdk&jvm_impl=hotspot&os={os}&vendor=eclipse"
@@ -139,20 +139,20 @@ pub async fn ensure_openjdk_runtime_async(runtime_major: u8) -> Result<PathBuf, 
         .ok_or(InstallationError::OpenJdkMetadataMissing { runtime_major })?;
 
     let downloads_dir = cache_root_dir().join("downloads");
-    tokio::fs::create_dir_all(&downloads_dir).await?;
+    launcher_runtime::fs::create_dir_all(&downloads_dir).await?;
     let archive_path = downloads_dir.join(package_name.as_str());
     download_file_simple_async(package_url.as_str(), archive_path.as_path()).await?;
 
     let archive_path_for_extract = archive_path.clone();
     let install_root_for_extract = install_root.clone();
-    tokio::task::spawn_blocking(move || {
+    launcher_runtime::spawn_blocking(move || {
         extract_archive(
             archive_path_for_extract.as_path(),
             install_root_for_extract.as_path(),
         )
     })
     .await
-    .map_err(map_tokio_join_error)??;
+    .map_err(map_join_error)??;
 
     let installed = find_java_executable_under_async(install_root.clone())
         .await?
@@ -171,7 +171,7 @@ pub fn purge_cache() -> Result<(), InstallationError> {
 
 pub async fn purge_cache_async() -> Result<(), InstallationError> {
     let cache_root = cache_root_dir();
-    match tokio::fs::remove_dir_all(&cache_root).await {
+    match launcher_runtime::fs::remove_dir_all(&cache_root).await {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
         Err(err) => Err(InstallationError::Io(err)),
@@ -623,7 +623,7 @@ pub async fn ensure_game_files_async(
     download_policy: DownloadPolicy,
     progress: Option<InstallProgressCallback>,
 ) -> Result<GameSetupResult, InstallationError> {
-    tokio::task::spawn_blocking(move || {
+    launcher_runtime::spawn_blocking(move || {
         ensure_game_files(
             instance_root.as_path(),
             game_version.as_str(),
@@ -635,5 +635,5 @@ pub async fn ensure_game_files_async(
         )
     })
     .await
-    .map_err(map_tokio_join_error)?
+    .map_err(map_join_error)?
 }

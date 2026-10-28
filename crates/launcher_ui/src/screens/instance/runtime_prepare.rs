@@ -8,7 +8,7 @@ pub(in super::super) async fn reinstall_instance_profile_files(
     const REINSTALL_PATHS: [&str; 5] = ["versions", "libraries", "assets", "natives", "loaders"];
     for relative in REINSTALL_PATHS {
         let path = instance_root.join(relative);
-        match tokio::fs::remove_dir_all(path.as_path()).await {
+        match launcher_runtime::fs::remove_dir_all(path.as_path()).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err),
@@ -165,7 +165,7 @@ pub(in super::super) fn request_runtime_prepare(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            match tokio::fs::metadata(path).await {
+            match launcher_runtime::fs::metadata(path).await {
                 Ok(_) => Ok(path.to_owned()),
                 Err(_) if required_java_major.is_some() => {
                     let runtime_major = required_java_major.unwrap_or_default();

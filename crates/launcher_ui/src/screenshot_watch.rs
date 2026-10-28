@@ -164,7 +164,7 @@ fn screenshot_actions(path: PathBuf) -> Vec<NotificationAction> {
         NotificationAction::new("Remove", move || {
             let path = remove_path.clone();
             tokio_runtime::spawn_detached(async move {
-                match tokio::fs::remove_file(path.as_path()).await {
+                match launcher_runtime::fs::remove_file(path.as_path()).await {
                     Ok(()) => notification::info!("screenshots", "Deleted screenshot from disk."),
                     Err(err) => {
                         tracing::warn!(

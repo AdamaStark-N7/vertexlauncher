@@ -182,7 +182,7 @@ pub fn request_runtime_launch(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            match tokio::fs::metadata(path).await {
+            match launcher_runtime::fs::metadata(path).await {
                 Ok(_) => Ok(path.to_owned()),
                 Err(_) if required_java_major.is_some() => {
                     let runtime_major = required_java_major.unwrap_or_default();

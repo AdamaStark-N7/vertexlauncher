@@ -1,21 +1,20 @@
 //! CPU work on whichever executor the application provides.
 //!
-//! The launcher's own Tokio runtime ([`crate::spawn`]) is for IO: it has a reactor, and a large blocking pool for
-//! calls that wait. CPU-bound work is different: it should be spread over exactly the machine's cores, next to the UI
+//! The launcher's own executor ([`crate::spawn`]) is for IO: it is paired with a large blocking pool for calls that
+//! wait. CPU-bound work is different: it should be spread over exactly the machine's cores, next to the UI
 //! engine's own jobs rather than as a second set of threads competing with them. The application installs the UI
 //! engine's task scheduler as the compute backend ([`install_compute_backend`]); [`spawn_compute`] then runs futures
 //! there, and a future that wants more parallelism spawns more of them and awaits their handles, which hands its worker
 //! back to the scheduler while it waits instead of blocking it. Where no backend is installed (tests, tools) the same
-//! futures run on the launcher's Tokio runtime, so callers do not care which they got.
+//! futures run on the launcher's own executor, so callers do not care which they got.
 
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::OnceLock;
 use std::task::{Context, Poll};
 
-use tokio::sync::oneshot;
-
 use crate::TaskError;
+use crate::exec;
 
 /// A boxed future with no output, which is what a backend runs.
 pub type ComputeFuture = Pin<Box<dyn Future<Output = ()> + Send + 'static>>;
@@ -46,18 +45,14 @@ pub fn compute_workers() -> usize {
 
 /// A running compute task. Await it, or poll it from a frame with [`ComputeHandle::try_take`].
 pub struct ComputeHandle<T> {
-    result: oneshot::Receiver<T>,
+    result: exec::Receiver<T>,
 }
 
 impl<T> ComputeHandle<T> {
     /// The result if the task has finished, without waiting. A task that ended without producing one (it panicked)
     /// reports an error.
     pub fn try_take(&mut self) -> Option<Result<T, TaskError>> {
-        match self.result.try_recv() {
-            Ok(value) => Some(Ok(value)),
-            Err(oneshot::error::TryRecvError::Empty) => None,
-            Err(oneshot::error::TryRecvError::Closed) => Some(Err(ended_without_result())),
-        }
+        self.result.try_take().map(|result| result.map_err(|_| ended_without_result()))
     }
 }
 
@@ -81,13 +76,13 @@ where
     F: Future + Send + 'static,
     F::Output: Send + 'static,
 {
-    let (sender, result) = oneshot::channel();
+    let (sender, result) = exec::cell();
     let task: ComputeFuture = Box::pin(async move {
-        let _ = sender.send(future.await);
+        sender.complete(future.await);
     });
     match BACKEND.get() {
         Some(backend) => (backend.spawn)(task),
-        None => crate::spawn_detached(task),
+        None => exec::spawn_boxed(task),
     }
     ComputeHandle { result }
 }

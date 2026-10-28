@@ -120,7 +120,7 @@ pub(super) fn request_detail_versions(state: &mut DiscoverState) {
     let loader_filter = state.loader_filter;
     let game_version_filter = instances::normalize_optional(state.game_version_filter.as_str());
     let _ = tokio_runtime::spawn_detached(async move {
-        let versions: Result<Vec<DiscoverVersionEntry>, String> = match tokio::time::timeout(
+        let versions: Result<Vec<DiscoverVersionEntry>, String> = match launcher_runtime::timeout(
             DETAIL_VERSIONS_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || {
                 load_detail_versions(

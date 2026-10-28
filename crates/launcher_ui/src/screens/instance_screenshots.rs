@@ -66,7 +66,7 @@ pub(super) fn request_instance_screenshot_delete(
 
     state.delete_screenshot_in_flight = true;
     let _ = tokio_runtime::spawn_detached(async move {
-        let result = tokio::fs::remove_file(path.as_path()).await.map_err(|err| {
+        let result = launcher_runtime::fs::remove_file(path.as_path()).await.map_err(|err| {
             tracing::warn!(target: "vertexlauncher/io", op = "remove_file", path = %path.display(), error = %err, context = "delete instance screenshot");
             format!("failed to remove {}: {err}", path.display())
         });

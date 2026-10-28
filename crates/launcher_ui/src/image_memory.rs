@@ -9,7 +9,7 @@ use crate::app::tokio_runtime;
 
 pub async fn load_image_path_for_memory(path: std::path::PathBuf) -> Result<Arc<[u8]>, String> {
     let path_label = path.display().to_string();
-    let bytes = tokio::fs::read(path.as_path())
+    let bytes = launcher_runtime::fs::read(path.as_path())
         .await
         .map_err(|err| format!("failed to read '{path_label}': {err}"))?;
 

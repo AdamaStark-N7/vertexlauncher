@@ -293,18 +293,13 @@ fn resolve_instance<'a>(
 
 async fn resolve_world_name(instance_root: &Path, selector: &str) -> Result<String, String> {
     let saves = instance_root.join("saves");
-    let mut entries = tokio::fs::read_dir(saves.as_path())
+    let entries = launcher_runtime::fs::read_dir(saves.as_path())
         .await
         .map_err(|err| format!("failed to read worlds under '{}': {err}", saves.display()))?;
     let lowered = selector.to_ascii_lowercase();
     let mut candidates = Vec::new();
-    while let Some(entry) = entries.next_entry().await.map_err(|err| {
-        format!(
-            "failed to read world entry under '{}': {err}",
-            saves.display()
-        )
-    })? {
-        let file_type = entry.file_type().await.map_err(|err| {
+    for entry in entries {
+        let file_type = entry.file_type().map_err(|err| {
             format!(
                 "failed to inspect world entry under '{}': {err}",
                 saves.display()
@@ -349,11 +344,11 @@ async fn print_targets(instance: &InstanceRecord, instance_root: &Path) {
     println!("Instance: {} ({})", instance.name, instance.id);
     println!("Worlds:");
     let saves = instance_root.join("saves");
-    match tokio::fs::read_dir(saves.as_path()).await {
-        Ok(mut entries) => {
+    match launcher_runtime::fs::read_dir(saves.as_path()).await {
+        Ok(entries) => {
             let mut found = false;
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                if entry.file_type().await.is_ok_and(|kind| kind.is_dir()) {
+            for entry in entries {
+                if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                     let name = entry.file_name().to_string_lossy().to_string();
                     if !name.trim().is_empty() {
                         println!("  - {}", name);
@@ -500,7 +495,7 @@ async fn select_java_path(config: &Config, game_version: &str) -> Result<String,
     let configured = runtime.and_then(|runtime| config.java_runtime_path_ref(runtime));
     if let Some(path) = configured {
         let normalized = path.as_os_str().to_string_lossy().trim().to_owned();
-        if !normalized.is_empty() && tokio::fs::metadata(path).await.is_ok() {
+        if !normalized.is_empty() && launcher_runtime::fs::metadata(path).await.is_ok() {
             return Ok(normalized);
         }
     }
@@ -588,7 +583,7 @@ fn print_help() {
 }
 
 async fn parse_servers_dat(path: &Path) -> Option<Vec<ServerDatEntry>> {
-    let bytes = tokio::fs::read(path).await.ok()?;
+    let bytes = launcher_runtime::fs::read(path).await.ok()?;
     if bytes.is_empty() {
         return Some(Vec::new());
     }

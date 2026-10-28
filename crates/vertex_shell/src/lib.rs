@@ -307,3 +307,17 @@ where
         .transparent_composition(config.transparent || translucent);
     sturdy::run(runtime, Shell { draw: Some(draw), bridge, applied: None, appliers: None, effect_polls_left: 0, handed_off: false })
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, Instant};
+
+    /// The launcher's waits ride on the engine's timer; it has to work with no window or GPU session.
+    #[test]
+    fn the_engine_timer_sleeps_without_a_session() {
+        let started = Instant::now();
+        let slept = sturdy::net::block_on(sturdy::net::sleep(Duration::from_millis(80)));
+        assert!(slept.is_ok());
+        assert!(started.elapsed() >= Duration::from_millis(70));
+    }
+}

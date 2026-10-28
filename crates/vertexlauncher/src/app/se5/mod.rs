@@ -92,6 +92,13 @@ pub(super) fn run(config_state: LoadConfigResult) -> ExitCode {
         },
         workers: || vertex_shell::sturdy::diagnostics::worker_count() as usize,
     });
+    // Waits ride on the UI engine's timer reactor instead of the runtime's own timer thread. If the engine cannot
+    // supply one for a wait, that wait falls back to the thread.
+    launcher_runtime::install_async_backend(launcher_runtime::AsyncBackend {
+        sleep: |duration| {
+            Box::pin(async move { vertex_shell::sturdy::net::sleep(duration).await.is_ok() })
+        },
+    });
     #[cfg(target_os = "macos")]
     super::app_icon::apply_macos_dock_icon();
 

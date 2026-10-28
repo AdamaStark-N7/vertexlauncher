@@ -520,7 +520,7 @@ impl SkinManagerState {
         self.pick_skin_in_progress = true;
         self.pick_skin_results_rx = Some(Arc::new(Mutex::new(rx)));
         let _ = tokio_runtime::spawn_detached(async move {
-            let result = tokio::fs::read(path.as_path())
+            let result = launcher_runtime::fs::read(path.as_path())
                 .await
                 .map_err(|err| format!("Failed to read image: {err}"))
                 .and_then(|bytes| {

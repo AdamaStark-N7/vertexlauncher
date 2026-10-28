@@ -12,9 +12,7 @@ thiserror.workspace = true
 image.workspace = true
 base64.workspace = true
 ureq.workspace = true
-tokio.workspace = true
 tracing.workspace = true
-runtime_bootstrap.workspace = true
 vertex_constants.workspace = true
 zeroize = "1.8"
 rand = "=0.8.5"

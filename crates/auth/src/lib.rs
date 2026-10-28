@@ -6,13 +6,11 @@ mod device_code;
 mod error;
 mod minecraft;
 mod oauth;
-mod runtime;
 mod secret_store;
 mod types;
 mod util;
 
 use std::sync::mpsc;
-use tokio::runtime::Handle;
 
 pub use constants::{BUILTIN_MICROSOFT_CLIENT_ID, BUILTIN_MICROSOFT_TENANT};
 pub use error::AuthError;
@@ -50,47 +48,20 @@ pub fn validate_oauth_callback_code(
     oauth::extract_authorization_code(callback_url, redirect_uri, expected_state)
 }
 
-/// Starts the device-code login flow on the current Tokio runtime if available.
+/// Starts the device-code login flow on its own thread.
 ///
-/// Falls back to the internal auth runtime when called from non-runtime threads.
+/// The returned flow must be polled via [`DeviceCodeLoginFlow::poll_events`].
 pub fn start_device_code_login(client_id: impl Into<String>) -> DeviceCodeLoginFlow {
     tracing::debug!(
         target: "vertexlauncher/auth",
         "starting device-code login flow"
     );
-    if let Ok(handle) = Handle::try_current() {
-        return start_device_code_login_with_handle(client_id, &handle);
-    }
-
-    match runtime::auth_runtime_handle() {
-        Ok(handle) => start_device_code_login_with_handle(client_id, handle),
-        Err(err) => {
-            tracing::error!(
-                target: "vertexlauncher/auth",
-                error = %err,
-                "device-code login could not start because the auth runtime failed to initialize"
-            );
-            failed_device_code_login_flow(format!(
-                "Failed to start device-code login background runtime: {err}"
-            ))
-        }
-    }
-}
-
-/// Starts device-code login flow using the provided Tokio runtime handle.
-///
-/// The returned flow must be polled via [`DeviceCodeLoginFlow::poll_events`].
-pub fn start_device_code_login_with_handle(
-    client_id: impl Into<String>,
-    handle: &Handle,
-) -> DeviceCodeLoginFlow {
     let client_id = client_id.into();
     let (sender, receiver) = mpsc::channel();
     let sender_for_task = sender.clone();
 
     // Run the blocking device-code polling flow on a dedicated thread
     // so UI threads stay responsive.
-    let _ = handle;
     std::thread::spawn(move || {
         if let Err(err) = device_code::run_device_code_login(client_id, &sender_for_task) {
             if let Err(send_err) = sender_for_task.send(LoginEvent::Failed(err.to_string())) {
@@ -103,15 +74,6 @@ pub fn start_device_code_login_with_handle(
         }
     });
 
-    DeviceCodeLoginFlow {
-        receiver,
-        finished: false,
-    }
-}
-
-fn failed_device_code_login_flow(message: String) -> DeviceCodeLoginFlow {
-    let (sender, receiver) = mpsc::channel();
-    let _ = sender.send(LoginEvent::Failed(message));
     DeviceCodeLoginFlow {
         receiver,
         finished: false,

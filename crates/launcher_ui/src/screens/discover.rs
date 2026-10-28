@@ -551,7 +551,7 @@ fn request_version_catalog(state: &mut DiscoverState) {
     state.version_catalog_in_flight = true;
     tracing::info!(target: "vertexlauncher/discover", "Starting discover version catalog fetch.");
     let _ = tokio_runtime::spawn_detached(async move {
-        let result: Result<Vec<MinecraftVersionEntry>, String> = match tokio::time::timeout(
+        let result: Result<Vec<MinecraftVersionEntry>, String> = match launcher_runtime::timeout(
             VERSION_CATALOG_FETCH_TIMEOUT,
             tokio_runtime::spawn_blocking(move || {
                 fetch_version_catalog(VersionCatalogFilter::default())

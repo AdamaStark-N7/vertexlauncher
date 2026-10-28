@@ -150,7 +150,7 @@ pub(super) fn start_initial_instance_install_with(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            match tokio::fs::metadata(path).await {
+            match launcher_runtime::fs::metadata(path).await {
                 Ok(_) => Ok(path.to_owned()),
                 Err(_) if runtime.is_some() => {
                     let runtime = runtime.expect("runtime checked above");
